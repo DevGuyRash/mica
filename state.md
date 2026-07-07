@@ -4,11 +4,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- M6 — self-healing reconciliation: rename-follow hook + `Mica: Repair` (report + rehome), pure conflict classifier in Rust.
+- M7 — scriptable API (`window.mica`) + command palette + inbox/outbox file-bridge for agents.
 
 ## Next
 
-- M7 — scriptable API (`window.mica`) + command palette + inbox/outbox file-bridge for agents.
+- M8 — migration (tabs→mica + archive-as-history), perf hardening, polish. Then in-vault runtime verification.
 
 ## Deferred (revisit at the noted milestone)
 

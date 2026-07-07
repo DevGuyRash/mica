@@ -14,10 +14,12 @@ use wasm_bindgen::prelude::*;
 mod diff;
 mod edit;
 mod parser;
+mod reconcile;
 mod scanner;
 mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
+pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use edit::{block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, BlockEdit};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
@@ -135,6 +137,14 @@ pub fn diff(base: &str, other: &str, granularity: &str, context: usize) -> Resul
 #[wasm_bindgen]
 pub fn make_patch(base: &str, other: &str, context: usize) -> String {
     make_patch_impl(base, other, context)
+}
+
+/// Classify content vs sidecar block-id indexes into reconciliation actions.
+#[wasm_bindgen]
+pub fn reconcile(content: JsValue, sidecar: JsValue) -> Result<JsValue, JsValue> {
+    let content: Vec<ContentRef> = serde_wasm_bindgen::from_value(content).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let sidecar: Vec<SidecarRef> = serde_wasm_bindgen::from_value(sidecar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&reconcile_impl(&content, &sidecar)).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ import init, {
 	mica_version,
 	new_id,
 	parse_block,
+	reconcile,
 	replace_block_content,
 	scan,
 	scan_view,
@@ -203,4 +204,26 @@ export function nodeAtPath(cst: Cst, path: number[]): MicaNode | null {
 		nodes = next.kind === "container" ? next.children : [];
 	}
 	return node;
+}
+
+// --- Reconciliation (mirrors the Rust reconcile types) -------------------
+
+export interface ContentRef {
+	block: string;
+	note: string;
+}
+
+export interface SidecarRef {
+	block: string;
+	sidecar: string;
+}
+
+export type ReconcileAction =
+	| { kind: "orphan-sidecar"; block: string; sidecar: string }
+	| { kind: "orphan-block"; block: string; note: string }
+	| { kind: "duplicate-block"; block: string; notes: string[] };
+
+/** Classify content vs sidecar block-id indexes into reconciliation actions. */
+export function reconcileIndexes(content: ContentRef[], sidecar: SidecarRef[]): ReconcileAction[] {
+	return reconcile(content, sidecar) as ReconcileAction[];
 }

@@ -4,6 +4,8 @@ import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
 import { ensureBlockIds, ensureNoteId } from "./identity/identity";
+import { repair } from "./identity/reconcile";
+import { sidecarDir } from "./storage/sidecar";
 import { DiffModal } from "./diff/diffModal";
 
 /**
@@ -25,6 +27,11 @@ export default class MicaPlugin extends Plugin {
 				if (file instanceof TFile) this.engine.handleModify(file);
 			}),
 		);
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (file instanceof TFile && file.extension === "md") void this.followRename(file, oldPath);
+			}),
+		);
 
 		this.addCommand({
 			id: "prepare-note",
@@ -40,6 +47,11 @@ export default class MicaPlugin extends Plugin {
 			id: "diff-versions",
 			name: "Compare block versions",
 			callback: () => void this.diffActiveBlock(),
+		});
+		this.addCommand({
+			id: "repair",
+			name: "Repair history (reconcile)",
+			callback: () => void this.runRepair(),
 		});
 
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
@@ -70,5 +82,17 @@ export default class MicaPlugin extends Plugin {
 			return;
 		}
 		new DiffModal(this, file, block.id).open();
+	}
+
+	private async followRename(file: TFile, oldPath: string): Promise<void> {
+		const oldSidecar = `${oldPath.slice(0, oldPath.length - file.extension.length - 1)}.mica`;
+		const af = this.app.vault.getAbstractFileByPath(oldSidecar);
+		if (af) await this.app.vault.rename(af, sidecarDir(file)).catch(() => undefined);
+	}
+
+	private async runRepair(): Promise<void> {
+		const { actions, rehomed } = await repair(this);
+		new Notice(`Mica repair: ${rehomed.length} rehomed, ${actions.length} issue(s). See console.`);
+		if (actions.length || rehomed.length) console.info("Mica repair:", { rehomed, actions });
 	}
 }

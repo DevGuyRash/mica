@@ -42,8 +42,8 @@ export async function readObject(vault: Vault, file: TFile, hash: string): Promi
 	return af instanceof TFile ? vault.read(af) : null;
 }
 
-export async function readLedger(vault: Vault, file: TFile): Promise<LedgerEvent[]> {
-	const af = vault.getAbstractFileByPath(ledgerPath(file));
+export async function readEventsAt(vault: Vault, path: string): Promise<LedgerEvent[]> {
+	const af = vault.getAbstractFileByPath(path);
 	if (!(af instanceof TFile)) return [];
 	const events: LedgerEvent[] = [];
 	for (const line of (await vault.read(af)).split("\n")) {
@@ -56,6 +56,10 @@ export async function readLedger(vault: Vault, file: TFile): Promise<LedgerEvent
 		}
 	}
 	return events;
+}
+
+export async function readLedger(vault: Vault, file: TFile): Promise<LedgerEvent[]> {
+	return readEventsAt(vault, ledgerPath(file));
 }
 
 export async function appendEvents(vault: Vault, file: TFile, events: LedgerEvent[]): Promise<void> {
