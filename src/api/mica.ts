@@ -55,9 +55,13 @@ export class MicaApi {
 
 	async blockUpdate(notePath: string, blockId: string, content: string): Promise<void> {
 		const file = this.note(notePath);
+		// Snapshot BEFORE writing so an agent edit can never destroy the only
+		// copy of the current content (the debounced snapshot may not have fired).
+		await this.plugin.engine.snapshot(file);
 		const next = replaceBlockContent(await this.plugin.app.vault.read(file), blockId, content);
 		if (next === null) throw new Error(`Block not found: ${blockId}`);
 		await this.plugin.app.vault.modify(file, next);
+		await this.plugin.engine.snapshot(file);
 	}
 
 	async versionsList(notePath: string, blockId: string): Promise<VersionMeta[]> {
@@ -127,15 +131,24 @@ export class MicaApi {
 		return fn(...(instruction.args ?? []));
 	}
 
-	/** Watch the inbox for instruction JSON dropped by agents/scripts. */
+	/**
+	 * Watch the inbox for instruction JSON dropped by agents/scripts.
+	 *
+	 * Registered inside `onLayoutReady`: Obsidian fires `create` for every
+	 * existing file during vault load, so registering earlier would REPLAY every
+	 * old instruction (including destructive ones) on every app launch. Each
+	 * inbox file is also deleted after processing, so it can only ever run once.
+	 */
 	registerBridge(): void {
-		this.plugin.registerEvent(
-			this.plugin.app.vault.on("create", (f) => {
-				if (f instanceof TFile && f.path.startsWith(`${INBOX}/`) && f.extension === "json") {
-					void this.processInbox(f);
-				}
-			}),
-		);
+		this.plugin.app.workspace.onLayoutReady(() => {
+			this.plugin.registerEvent(
+				this.plugin.app.vault.on("create", (f) => {
+					if (f instanceof TFile && f.path.startsWith(`${INBOX}/`) && f.extension === "json") {
+						void this.processInbox(f);
+					}
+				}),
+			);
+		});
 	}
 
 	private async processInbox(file: TFile): Promise<void> {
@@ -147,8 +160,17 @@ export class MicaApi {
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
-		if (!vault.getAbstractFileByPath(OUTBOX)) await vault.createFolder(OUTBOX).catch(() => undefined);
-		const out = normalizePath(`${OUTBOX}/${file.basename}.json`);
-		await vault.create(out, JSON.stringify({ ok: error === null, result, error }, null, 2)).catch(() => undefined);
+		// Consume the instruction so it can never replay.
+		await vault.delete(file).catch((e) => console.error("Mica bridge: failed to consume inbox file", file.path, e));
+		try {
+			if (!vault.getAbstractFileByPath(OUTBOX)) await vault.createFolder(OUTBOX);
+			const out = normalizePath(`${OUTBOX}/${file.basename}.json`);
+			const existing = vault.getAbstractFileByPath(out);
+			if (existing instanceof TFile) await vault.delete(existing);
+			await vault.create(out, JSON.stringify({ ok: error === null, result, error }, null, 2));
+		} catch (e) {
+			// Never hang an agent silently: the failure is at least observable.
+			console.error("Mica bridge: failed to write outbox result for", file.path, e);
+		}
 	}
 }

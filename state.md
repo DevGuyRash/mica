@@ -4,15 +4,19 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- In-vault runtime verification: load Mica in the live vault and exercise all three modes, inline editing, snapshot/diff/revert, migration, and the file-bridge. Everything under `crates/` and `src/` builds, typechecks, lints, and passes `cargo test` + `pnpm smoke`, but has not yet been driven inside a running Obsidian.
+- User-side validation in the real vault: enable Mica, run the dry-run migration on one real prompt note, exercise tabs/versioning/diff day-to-day. The full automated stack is green (51 Rust tests, Node smoke, typecheck/lint, 7 e2e specs in a downloaded real Obsidian), but daily-driver feel is unproven.
 
-## Remaining polish (by area)
+## Remaining scope (by area, post-audit)
 
-- **Migration**: currently does structural tabs→mica conversion + snapshots v1. Still to do: import each `[!bug]-` / `[!todo]-` archived callout as a _prior_ version, plus a dry-run + rollback command.
-- **Live Preview editing**: upgrade the textarea inline editor to `EmbeddableMarkdownEditor` (markdown rendering while editing) inside a persistent atomic widget (vs today's reveal-on-overlap).
-- **Perf**: incremental block-level reparse so typing inside a block triggers 0 WASM scans (today: one scan per document change, cached across cursor moves). Then the zero-copy typed-array boundary (today: `serde-wasm-bindgen` structured clone).
-- **Settings UI**: autosave/debounce, snapshot cadence, sidecar visibility, default diff granularity/edit mode, theming presets.
-- **Tests/CI**: a TS test runner + GitHub Actions (build wasm, cargo test, tsc, eslint, smoke).
+- **Migration**: import `[!bug]-` / `[!todo]-` archived callouts as _prior_ versions (today: structural convert + whole-note backup object + v1 snapshot); bulk vault-wide migration with a report; `migrate.*` verbs on the API.
+- **Versioning UX**: edit-a-previous-version-in-place (branch default / amend explicit), lineage view, live gutter diff vs last snapshot, per-block version chip.
+- **Diff**: N-up (≤3 columns vs base) view and a patch _view_ mode (engine + swap-base + copy-patch exist).
+- **Live Preview**: upgrade the textarea to `EmbeddableMarkdownEditor` (semi-internal API — keep the textarea fallback); optional `atomicRanges` for a persistent widget.
+- **Reconciliation**: duplicate-note-anchor and merge-divergence cases (orphan-sidecar / orphan-block / duplicate-block ship today); reconcile pass on load.
+- **Storage polish**: sidecar `manifest.json` + derived `state.json` + `.graveyard/`; register `.mica/` objects in Obsidian's Excluded files to keep search/graph clean.
+- **Settings UI**: snapshot debounce, default diff granularity/mode, sidecar location, theming presets (CSS vars exist).
+- **Perf (deferred by measurement)**: full-doc scan is ~0.7 ms on the real 711 KB note, cached across cursor moves; incremental reparse + zero-copy typed-array boundary remain future wins, not current pain.
+- **CI**: GitHub Actions running the four tiers (cargo, smoke, gate, wdio e2e under xvfb).
 
 ## Confirmed defaults (revisit only if needed)
 
@@ -22,5 +26,6 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Risks to watch
 
-- `EmbeddableMarkdownEditor` is a semi-internal Obsidian API — isolate behind an adapter with the current plain-textarea fallback.
-- Live Preview widget interactivity vs Obsidian revealing source when upgrading from reveal-on-overlap to `atomicRanges`.
+- Obsidian Sync racing a `ledger.jsonl` append mid-write is reasoned-safe (append-only + order-independent fold) but not reproduced under real Sync.
+- `EmbeddableMarkdownEditor` is semi-internal and has broken before (Obsidian 1.5.8) — adapter + fallback required when adopted.
+- The official Obsidian CLI test tier (`just e2e-cli`) is unexercised until the local app ships/activates the CLI.

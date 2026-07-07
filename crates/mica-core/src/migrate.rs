@@ -21,6 +21,10 @@ pub struct MigrationResult {
 }
 
 /// Convert every legacy ```tabs block in `doc` into a ```mica block.
+///
+/// Lossless by construction: content before the first `tab:` line is preserved
+/// as a leading leaf, tab bodies are copied verbatim (blank lines, dividers and
+/// all), and blocks containing Templater tokens (`<%`) are left untouched.
 pub fn migrate_tabs_impl(doc: &str) -> MigrationResult {
     let spans = scan_tag_impl(doc, "tabs");
     if spans.is_empty() {
@@ -31,16 +35,25 @@ pub fn migrate_tabs_impl(doc: &str) -> MigrationResult {
     let mut cursor = 0;
     for span in &spans {
         out.push_str(&doc[cursor..span.start]);
-        let (mica, block) = convert(&doc[span.content_start..span.content_end]);
-        blocks.push(block);
-        out.push_str(&mica);
+        let content = &doc[span.content_start..span.content_end];
+        if content.contains("<%") {
+            // Templater source: converting would freeze template tokens into a
+            // real block. Leave the original bytes exactly as they were.
+            out.push_str(&doc[span.start..span.end]);
+        } else {
+            let (mica, block) = convert(content);
+            blocks.push(block);
+            out.push_str(&mica);
+        }
         cursor = span.end;
     }
     out.push_str(&doc[cursor..]);
-    MigrationResult { doc: out, blocks, changed: true }
+    let changed = !blocks.is_empty();
+    MigrationResult { doc: out, blocks, changed }
 }
 
 fn convert(content: &str) -> (String, MigratedBlock) {
+    let mut preamble = String::new();
     let mut tabs: Vec<(String, String)> = Vec::new();
     let mut name: Option<String> = None;
     let mut body = String::new();
@@ -53,6 +66,8 @@ fn convert(content: &str) -> (String, MigratedBlock) {
             name = Some(rest.trim().to_string());
         } else if name.is_some() {
             body.push_str(line);
+        } else {
+            preamble.push_str(line); // verbatim content before the first tab:
         }
     }
     if let Some(n) = name.take() {
@@ -62,13 +77,20 @@ fn convert(content: &str) -> (String, MigratedBlock) {
     let id = new_id_impl();
     let block_name = tabs.first().map(|(n, _)| n.clone());
 
-    let mut inner = String::from(":::tabs\n");
+    let mut inner = preamble;
+    if !inner.is_empty() && !inner.ends_with('\n') {
+        inner.push('\n');
+    }
+    inner.push_str(":::tabs\n");
     for (n, b) in &tabs {
         inner.push_str(":::tab ");
         inner.push_str(n);
         inner.push('\n');
-        inner.push_str(b.trim_end_matches('\n'));
-        inner.push_str("\n:::\n");
+        inner.push_str(b); // verbatim body — blank lines and dividers preserved
+        if !b.is_empty() && !b.ends_with('\n') {
+            inner.push('\n');
+        }
+        inner.push_str(":::\n");
     }
     inner.push_str(":::\n");
 
@@ -127,5 +149,41 @@ mod tests {
         let r = migrate_tabs_impl("just text\n");
         assert!(!r.changed);
         assert_eq!(r.doc, "just text\n");
+    }
+
+    #[test]
+    fn preamble_before_first_tab_is_preserved() {
+        let doc = "```tabs\nPREAMBLE KEEP ME\n\ntab: A\nbody\n```\n";
+        let r = migrate_tabs_impl(doc);
+        assert!(r.changed);
+        assert!(r.doc.contains("PREAMBLE KEEP ME"), "preamble must survive: {}", r.doc);
+        // Preamble sits before the tabs container, inside the mica block.
+        let pre = r.doc.find("PREAMBLE").unwrap();
+        let tabs = r.doc.find(":::tabs").unwrap();
+        assert!(pre < tabs);
+    }
+
+    #[test]
+    fn tab_bodies_are_copied_verbatim_including_blank_runs() {
+        let doc = "```tabs\ntab: A\nline\n\n\n%% divider %%\n\ntab: B\nx\n```\n";
+        let r = migrate_tabs_impl(doc);
+        assert!(r.doc.contains("line\n\n\n%% divider %%\n\n:::"), "blank runs preserved: {}", r.doc);
+    }
+
+    #[test]
+    fn templater_blocks_are_left_untouched() {
+        let doc = "```tabs\ntab: <% tp.file.cursor() %>\nbody\n```\n";
+        let r = migrate_tabs_impl(doc);
+        assert!(!r.changed);
+        assert_eq!(r.doc, doc);
+    }
+
+    #[test]
+    fn quoted_tabs_examples_are_not_migrated() {
+        // A tabs example inside a longer documentation fence stays untouched.
+        let doc = "``````md\n`````tabs\ntab: Doc\nquoted\n`````\n``````\n";
+        let r = migrate_tabs_impl(doc);
+        assert!(!r.changed);
+        assert_eq!(r.doc, doc);
     }
 }

@@ -43,9 +43,19 @@ pub struct BlockState {
 }
 
 /// Fold the append-only ledger into current state, keyed by block id.
+///
+/// Events are folded in (ts, eid) order — NOT file order — so a line-union
+/// merge from Obsidian Sync / git folds to the same state on every device.
 pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
+    let mut events: Vec<Event> = events.to_vec();
+    events.sort_by(|a, b| {
+        let key = |e: &Event| match e {
+            Event::AddVersion { ts, eid, .. } | Event::SetHead { ts, eid, .. } => (*ts, eid.clone()),
+        };
+        key(a).cmp(&key(b))
+    });
     let mut state: BTreeMap<String, BlockState> = BTreeMap::new();
-    for e in events {
+    for e in &events {
         match e {
             Event::AddVersion { block, hash, ts, label, .. } => {
                 let bs = state.entry(block.clone()).or_default();
@@ -102,6 +112,16 @@ mod tests {
         let twice = fold_ledger_impl(&[add("b", "h1", 1), add("b", "h1", 1)]);
         assert_eq!(once, twice);
         assert_eq!(twice["b"].versions.len(), 1);
+    }
+
+    #[test]
+    fn fold_is_order_independent() {
+        // Sync/git merges union lines in arbitrary order; the fold must not care.
+        let forward = vec![add("b", "h1", 1), set("b", "h1", 1), add("b", "h2", 2), set("b", "h2", 2)];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        assert_eq!(fold_ledger_impl(&forward), fold_ledger_impl(&reversed));
+        assert_eq!(fold_ledger_impl(&reversed)["b"].head.as_deref(), Some("h2"));
     }
 
     #[test]

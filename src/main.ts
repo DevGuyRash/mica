@@ -1,5 +1,6 @@
 import { Notice, Plugin, TFile } from "obsidian";
-import { coreVersion, initCore, migrateTabs, scanBlocksView } from "./wasm/bridge";
+import { coreVersion, hashContent, initCore, migrateTabs, scanBlocksView } from "./wasm/bridge";
+import { ensureSidecar, writeObject } from "./storage/sidecar";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
@@ -64,9 +65,14 @@ export default class MicaPlugin extends Plugin {
 			callback: () => void this.runInstructionFromClipboard(),
 		});
 		this.addCommand({
+			id: "migrate-tabs-dry-run",
+			name: "Migrate tabs → Mica (dry run, active note)",
+			callback: () => void this.migrateActiveNote(true),
+		});
+		this.addCommand({
 			id: "migrate-tabs",
 			name: "Migrate tabs → Mica (active note)",
-			callback: () => void this.migrateActiveNote(),
+			callback: () => void this.migrateActiveNote(false),
 		});
 
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
@@ -122,17 +128,28 @@ export default class MicaPlugin extends Plugin {
 		}
 	}
 
-	private async migrateActiveNote(): Promise<void> {
+	private async migrateActiveNote(dryRun: boolean): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return;
-		const result = migrateTabs(await this.app.vault.read(file));
+		const original = await this.app.vault.read(file);
+		const result = migrateTabs(original);
 		if (!result.changed) {
-			new Notice("No obsidian-tabs blocks found in this note.");
+			new Notice("No convertible obsidian-tabs blocks found (Templater notes are skipped).");
 			return;
 		}
+		if (dryRun) {
+			new Notice(`Dry run: ${result.blocks.length} block(s) would convert. Preview in console.`);
+			console.info("Mica migration dry run for", file.path, "\n", result.doc);
+			return;
+		}
+		// Store the ENTIRE original document as a content-addressed object
+		// before touching anything — migration is always recoverable.
+		await ensureSidecar(this.app.vault, file);
+		const backup = hashContent(original);
+		await writeObject(this.app.vault, file, backup, original);
 		await this.app.vault.modify(file, result.doc);
 		await ensureNoteId(this, file);
 		await this.engine.snapshot(file);
-		new Notice(`Mica: migrated ${result.blocks.length} block(s) and snapshotted v1.`);
+		new Notice(`Mica: migrated ${result.blocks.length} block(s); original backed up as ${backup}.`);
 	}
 }

@@ -26,19 +26,19 @@ Every correctness guarantee comes from one discipline repeated at three layers:
 
 ## Rust → WASM core
 
-- A **pushdown line scanner** (a stack of `CodeFence{char,len}` / `ColonFence{len}` contexts) delimits blocks and layout directives in one O(bytes) pass — replacing backtick-counting. CommonMark rule: a fence of N chars closes only on ≥ N of the same char; nesting requires the outer fence strictly longer than every inner one, which the serializer guarantees on write.
-- The parse result is a **Structure-of-Arrays CST**: flat parallel vectors (kind / parent / children / spans / subtree-hash) that are cache-friendly and cheap to ship to JS. Leaf content is opaque byte spans; Mica never parses markdown inline syntax.
-- **Boundary.** Hot paths (`scan`, `parse_block`) exchange raw pointers + typed-array views over `wasm.memory.buffer` (zero-copy; strings decoded lazily). Low-frequency ops use `serde-wasm-bindgen`. WASM crossings are O(structural events), not O(keystrokes). The `.wasm` is inlined into `main.js` as a `Uint8Array` (esbuild `binary` loader) and instantiated once.
+- A **context-tracking line scanner** (`None` / inside-a-foreign-fence / inside-a-mica-block) delimits blocks in one O(bytes) pass — replacing backtick-counting. Per CommonMark, everything inside any fence is literal until that fence's closer, so a ` ```mica ` example _quoted_ inside a longer documentation fence is never treated as a real block. The serializer guarantees the outer fence is strictly longer than every inner one on write. Colon-fence directives (`:::tabs` / `:::tab` / `:::grid` / `:::cell`) are parsed _inside_ a block by a recursive descent that treats inner code fences as opaque.
+- The parse result is a **CST of containers and opaque leaves**; every node stores its exact source strings, so `serialize(parse(x)) == x` byte-for-byte for unedited trees. Leaf content is never re-flowed; Mica parses structure, not markdown inline syntax.
+- **Boundary.** All calls cross via `serde-wasm-bindgen` (structured clone) today; a zero-copy typed-array path is a planned optimization. A full-document scan of the real 711 KB note measures ~0.7 ms. Offsets crossing to CodeMirror are converted to UTF-16 in a single forward pass. The `.wasm` is inlined into `main.js` as a `Uint8Array` (esbuild `binary` loader) and instantiated once.
 
 ## Rendering (three modes)
 
 - **Reading view.** `registerMarkdownCodeBlockProcessor("mica", …)` builds read-only interactive DOM; nested content renders by recursion via `MarkdownRenderer.render` under a `MarkdownRenderChild`.
-- **Live Preview.** A `StateField` holds the block `RangeSet` and provides it to `EditorView.atomicRanges` (the cursor skips the block, so Obsidian never reveals raw source). A `ViewPlugin` builds `Decoration.replace({widget, block:true})` over `view.visibleRanges` only (virtualized), gated by `editorLivePreviewField`, at `Prec.highest`. `WidgetType.eq(id,hash)` reuses DOM. The widget hosts an `EmbeddableMarkdownEditor` (behind an adapter, since it is semi-internal).
+- **Live Preview.** A `StateField<DecorationSet>` builds `Decoration.replace({widget, block:true})` for every closed block and provides it via `EditorView.decorations.from(field)`. This MUST be a StateField: CodeMirror rejects block-level/line-break-spanning decorations from view plugins at runtime ("Block decorations may not be specified via plugins") — a constraint verified the hard way in a live Obsidian. Reveal-on-overlap: a block whose range intersects the selection renders as raw source. Gated by `editorLivePreviewField`; ranges end at the closing fence line's end (never past its newline); `WidgetType.eq(id, content)` reuses DOM; the scan is cached per document text so cursor-only transactions skip WASM.
 - **Source mode.** Widgets off; raw fence text; byte-exact round-trip.
 
 ## Editing (corruption-proof)
 
-A keystroke inside a tab emits a child delta → Mica reads the block's live range from the `StateField` (plus a boundary-verify that re-scans on mismatch) → dispatches `{changes}` to the parent view with a `micaInternal` annotation (no feedback loop). Positions are mapped by CodeMirror; corruption is impossible by construction.
+The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMarkdownEditor` upgrade is planned). Save re-scans the **live** document for the block by id, re-parses it, verifies the target tab's identity (name + title) — refusing to write if the block changed underneath the editor — swaps that tab's children in the CST, re-serializes, and dispatches a `{from,to,insert}` change whose bounds were recomputed at that instant. No cached offset or node path is ever trusted at write time.
 
 ## Storage & versioning
 

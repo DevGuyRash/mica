@@ -69,7 +69,15 @@ export async function appendEvents(vault: Vault, file: TFile, events: LedgerEven
 	const af = vault.getAbstractFileByPath(path);
 	if (af instanceof TFile) {
 		await vault.append(af, lines);
-	} else {
+		return;
+	}
+	try {
 		await vault.create(path, lines);
+	} catch {
+		// Lost a create race — the ledger appeared between the check and the
+		// create. Re-resolve and append so the events are never dropped.
+		const raced = vault.getAbstractFileByPath(path);
+		if (raced instanceof TFile) await vault.append(raced, lines);
+		else throw new Error(`Mica: cannot write ledger at ${path}`);
 	}
 }

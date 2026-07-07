@@ -53,7 +53,9 @@ just bootstrap   # pnpm install + add the wasm32 target
 just build       # wasm-pack + bundled main.js
 just link        # symlink into your vault for live testing
 just check       # typecheck, lint, format-check, rust tests
-pnpm smoke       # end-to-end WASM boundary test (no Obsidian needed)
+pnpm smoke       # WASM boundary test in Node (no Obsidian needed)
+just e2e         # full contract + rendering suite in a REAL sandboxed Obsidian (Xvfb)
+just e2e-cli     # contract checks via the official Obsidian CLI (skips if not activated)
 ```
 
 Requirements: Node + pnpm, the Rust toolchain with `wasm-pack` and the `wasm32-unknown-unknown` target, and `just`.

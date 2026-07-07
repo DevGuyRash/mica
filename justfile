@@ -33,6 +33,16 @@ fmt:
 test:
     cargo test --manifest-path crates/mica-core/Cargo.toml
 
+# End-to-end tests in a real (sandboxed, downloaded) Obsidian under Xvfb.
+e2e:
+    pnpm run build
+    xvfb-run -a pnpm run e2e
+
+# Contract tests via the official Obsidian CLI against the RUNNING app
+# (skips with instructions if the CLI isn't activated).
+e2e-cli:
+    sh tests/e2e-cli/run.sh
+
 # Symlink the built plugin into the vault for live testing.
 link:
     ln -sfn "$(pwd)" "$HOME/kingdom/.obsidian/plugins/mica"

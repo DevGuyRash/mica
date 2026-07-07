@@ -12,6 +12,10 @@ dist/
 target/
 src/wasm/pkg/
 
+# E2E (downloaded Obsidian binaries + runner logs)
+.obsidian-cache/
+logs/
+
 # Agent / local (house convention)
 .local/
 .claude/

@@ -3,8 +3,12 @@ import { serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
 
 /** Hooks that make a rendered block editable (Live Preview only). */
 export interface EditHooks {
-	/** Persist a tab's new source; `path` locates the tab node in the CST. */
-	save: (path: number[], newText: string) => void;
+	/**
+	 * Persist a tab's new source. `path` locates the tab node in the CST and
+	 * `expectedTitle` lets the writer verify the node hasn't changed identity
+	 * underneath the editor before replacing anything.
+	 */
+	save: (path: number[], expectedTitle: string, newText: string) => void;
 }
 
 export interface RenderCtx {
@@ -56,11 +60,16 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	const wrap = el.createDiv({ cls: "mica-tabs" });
 	const nav = wrap.createDiv({ cls: "mica-tab-nav", attr: { role: "tablist" } });
 	const panels = wrap.createDiv({ cls: "mica-tab-panels" });
-	const btns: HTMLElement[] = [];
+	const btns: HTMLButtonElement[] = [];
 	const panelEls: HTMLElement[] = [];
-	const activate = (k: number): void => {
-		btns.forEach((b, m) => b.toggleClass("is-active", m === k));
+	const activate = (k: number, focus = false): void => {
+		btns.forEach((b, m) => {
+			b.toggleClass("is-active", m === k);
+			b.setAttribute("aria-selected", String(m === k));
+			b.tabIndex = m === k ? 0 : -1; // roving tabindex
+		});
 		panelEls.forEach((p, m) => p.toggleClass("is-active", m === k));
+		if (focus) btns[k]?.focus();
 	};
 
 	node.children.forEach((c, idx) => {
@@ -76,6 +85,26 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		btn.addEventListener("click", () => activate(k));
 		btns.push(btn);
 		panelEls.push(panel);
+	});
+
+	// Keyboard navigation per the ARIA tabs pattern.
+	nav.addEventListener("keydown", (ev: KeyboardEvent) => {
+		const current = btns.findIndex((b) => b.tabIndex === 0);
+		if (current < 0) return;
+		const last = btns.length - 1;
+		const next =
+			ev.key === "ArrowRight"
+				? (current + 1) % btns.length
+				: ev.key === "ArrowLeft"
+					? (current + last) % btns.length
+					: ev.key === "Home"
+						? 0
+						: ev.key === "End"
+							? last
+							: -1;
+		if (next < 0) return;
+		ev.preventDefault();
+		activate(next, true);
 	});
 
 	if (btns.length) activate(0);
@@ -100,7 +129,7 @@ function openInlineEditor(tab: Container, panel: HTMLElement, ctx: RenderCtx, ta
 	ta.rows = Math.min(24, ta.value.split("\n").length + 1);
 	const bar = panel.createDiv({ cls: "mica-tab-actions" });
 	bar.createEl("button", { cls: "mod-cta", text: "Save", attr: { type: "button" } }).addEventListener("click", () => {
-		ctx.editable?.save(tabPath, ta.value);
+		ctx.editable?.save(tabPath, tab.title, ta.value);
 	});
 	bar.createEl("button", { text: "Cancel", attr: { type: "button" } }).addEventListener("click", () => {
 		renderTabBody(tab, panel, ctx, tabPath);

@@ -55,6 +55,16 @@ struct Open {
     attrs: Vec<(String, String)>,
 }
 
+/// Scanner context: outside any fence, inside a foreign (non-target) fence, or
+/// inside a target block. Per CommonMark, everything inside a fence is literal
+/// until its closer — so a ` ```mica ` example QUOTED inside a longer plain
+/// fence must never be treated as a real block.
+enum Ctx {
+    None,
+    Foreign { fence_char: u8, fence_len: usize },
+    Target(Open),
+}
+
 /// Scan `src` for every top-level ` ```mica ` block, in document order.
 pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
     scan_tag_impl(src, MICA_TAG)
@@ -66,7 +76,7 @@ pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
 pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
     let mut blocks = Vec::new();
     let mut offset = 0usize;
-    let mut open: Option<Open> = None;
+    let mut ctx = Ctx::None;
 
     for line in src.split_inclusive('\n') {
         let line_start = offset;
@@ -74,21 +84,31 @@ pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
 
         let text = trim_eol(line);
 
-        match &open {
-            None => {
+        match &ctx {
+            Ctx::None => {
                 if let Some((fence_char, fence_len, attrs)) = parse_open_fence(text, tag) {
-                    open = Some(Open {
+                    ctx = Ctx::Target(Open {
                         start: line_start,
                         fence_char,
                         fence_len,
                         content_start: offset,
                         attrs,
                     });
+                } else if let Some((fence_char, fence_len)) = parse_any_fence_open(text) {
+                    ctx = Ctx::Foreign { fence_char, fence_len };
                 }
             }
-            Some(o) => {
+            Ctx::Foreign { fence_char, fence_len } => {
+                if is_close_fence(text, *fence_char, *fence_len) {
+                    ctx = Ctx::None;
+                }
+            }
+            Ctx::Target(o) => {
                 if is_close_fence(text, o.fence_char, o.fence_len) {
-                    let o = open.take().unwrap();
+                    let o = match std::mem::replace(&mut ctx, Ctx::None) {
+                        Ctx::Target(o) => o,
+                        _ => unreachable!(),
+                    };
                     blocks.push(BlockSpan {
                         start: o.start,
                         end: offset,
@@ -104,7 +124,7 @@ pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
         }
     }
 
-    if let Some(o) = open {
+    if let Ctx::Target(o) = ctx {
         blocks.push(BlockSpan {
             start: o.start,
             end: offset,
@@ -118,6 +138,29 @@ pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
     }
 
     blocks
+}
+
+/// Any fenced-code opener (regardless of info string): a run of >= 3 backticks
+/// or tildes at <= 3 spaces of indent. Backtick fences may not carry a backtick
+/// in the info string.
+fn parse_any_fence_open(text: &str) -> Option<(u8, usize)> {
+    let indent = leading_spaces(text);
+    if indent > 3 {
+        return None;
+    }
+    let rest = &text[indent..];
+    let fence_char = rest.as_bytes().first().copied()?;
+    if fence_char != b'`' && fence_char != b'~' {
+        return None;
+    }
+    let fence_len = rest.bytes().take_while(|&b| b == fence_char).count();
+    if fence_len < 3 {
+        return None;
+    }
+    if fence_char == b'`' && rest[fence_len..].contains('`') {
+        return None;
+    }
+    Some((fence_char, fence_len))
 }
 
 /// If `text` opens a ` ```mica ` fence, return `(fence_char, fence_len, attrs)`.
@@ -228,18 +271,33 @@ pub struct BlockView {
 }
 
 /// Scan for blocks with UTF-16 offsets, ready for CodeMirror decorations.
+/// Offsets are converted in one forward pass (a moving byte→utf16 cursor), so
+/// the whole conversion is O(document), not O(blocks × document).
 pub fn scan_view_impl(src: &str) -> Vec<BlockView> {
+    let mut cursor_byte = 0usize;
+    let mut cursor_u16 = 0usize;
+    let mut to_u16 = |byte: usize| {
+        cursor_u16 += utf16_len(&src[cursor_byte..byte]);
+        cursor_byte = byte;
+        cursor_u16
+    };
     scan_impl(src)
         .into_iter()
-        .map(|b| BlockView {
-            start: utf16_len(&src[..b.start]),
-            end: utf16_len(&src[..b.end]),
-            content_start: utf16_len(&src[..b.content_start]),
-            content_end: utf16_len(&src[..b.content_end]),
-            fence_len: b.fence_len,
-            closed: b.closed,
-            id: b.id().map(str::to_string),
-            name: b.get("name").map(str::to_string),
+        .map(|b| {
+            let start = to_u16(b.start);
+            let content_start = to_u16(b.content_start);
+            let content_end = to_u16(b.content_end);
+            let end = to_u16(b.end);
+            BlockView {
+                start,
+                end,
+                content_start,
+                content_end,
+                fence_len: b.fence_len,
+                closed: b.closed,
+                id: b.id().map(str::to_string),
+                name: b.get("name").map(str::to_string),
+            }
         })
         .collect()
 }
@@ -328,5 +386,26 @@ mod tests {
         let b = scan_impl("```mica\n```\n");
         assert_eq!(b.len(), 1);
         assert!(b[0].closed);
+    }
+
+    #[test]
+    fn quoted_mica_inside_foreign_fence_is_ignored() {
+        // A documentation note QUOTING a mica example must not create a block.
+        let src = "````md\n```mica id=fake\nquoted example\n```\n````\n\n```mica id=real\nx\n```\n";
+        let b = scan_impl(src);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].id(), Some("real"));
+    }
+
+    #[test]
+    fn quoted_tabs_inside_foreign_fence_is_ignored() {
+        let src = "``````md\n`````tabs\ntab: Doc\nquoted\n`````\n``````\n";
+        assert!(scan_tag_impl(src, "tabs").is_empty());
+    }
+
+    #[test]
+    fn tilde_foreign_fence_hides_backtick_mica() {
+        let src = "~~~\n```mica id=x\nquoted\n```\n~~~\n";
+        assert!(scan_impl(src).is_empty());
     }
 }

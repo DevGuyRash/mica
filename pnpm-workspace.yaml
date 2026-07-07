@@ -1,4 +1,9 @@
 # pnpm settings (pnpm 11 reads config from here, not the package.json "pnpm" field).
-# Allow esbuild to run its postinstall so its native binary is installed.
+# Build-script approvals: esbuild installs its native binary; classic-level builds
+# leveldb bindings used by the wdio toolchain. Edge/Gecko driver downloads are
+# declined — Obsidian tests drive Electron (Chromium) only.
 allowBuilds:
+    classic-level: true
+    edgedriver: false
     esbuild: true
+    geckodriver: false
