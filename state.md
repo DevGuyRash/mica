@@ -4,25 +4,22 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- User-side validation in the real vault: enable Mica, run the dry-run migration on one real prompt note, exercise tabs/versioning/diff day-to-day. The full automated stack is green (51 Rust tests, Node smoke, typecheck/lint, 7 e2e specs in a downloaded real Obsidian), but daily-driver feel is unproven.
+- Daily-driver validation in the real vault (v0.1.0): enable Mica, run **Migrate tabs → Mica (dry run, whole vault)**, review the console report, migrate one real prompt note, and live with tabs/chip/diff for a few sessions. Everything automated is green (54 Rust tests, Node smoke, strict gate, 8 e2e specs in a real Obsidian); lived-in feel is the remaining unknown.
 
-## Remaining scope (by area, post-audit)
+## Remaining scope
 
-- **Migration**: import `[!bug]-` / `[!todo]-` archived callouts as _prior_ versions (today: structural convert + whole-note backup object + v1 snapshot); bulk vault-wide migration with a report; `migrate.*` verbs on the API.
-- **Versioning UX**: edit-a-previous-version-in-place (branch default / amend explicit), lineage view, live gutter diff vs last snapshot, per-block version chip.
-- **Diff**: N-up (≤3 columns vs base) view and a patch _view_ mode (engine + swap-base + copy-patch exist).
-- **Live Preview**: upgrade the textarea to `EmbeddableMarkdownEditor` (semi-internal API — keep the textarea fallback); optional `atomicRanges` for a persistent widget.
-- **Reconciliation**: duplicate-note-anchor and merge-divergence cases (orphan-sidecar / orphan-block / duplicate-block ship today); reconcile pass on load.
-- **Storage polish**: sidecar `manifest.json` + derived `state.json` + `.graveyard/`; register `.mica/` objects in Obsidian's Excluded files to keep search/graph clean.
-- **Settings UI**: snapshot debounce, default diff granularity/mode, sidecar location, theming presets (CSS vars exist).
-- **Perf (deferred by measurement)**: full-doc scan is ~0.7 ms on the real 711 KB note, cached across cursor moves; incremental reparse + zero-copy typed-array boundary remain future wins, not current pain.
-- **CI**: GitHub Actions running the four tiers (cargo, smoke, gate, wdio e2e under xvfb).
+- **Live Preview editor**: upgrade the textarea to `EmbeddableMarkdownEditor` (semi-internal API — adapter + keep the textarea fallback); optional `atomicRanges` persistent widget.
+- **Versioning UX**: lineage view (parent chains exist in the ledger; no UI walks them yet); live gutter diff vs head while typing (the chip's dirty dot covers the signal today).
+- **Reconciliation**: duplicate-note-anchor and merge-divergence conflict cases (orphan/duplicate-block cases + startup reconcile ship today).
+- **Storage polish**: derived `state.json` cache and `.graveyard/` for detached histories; register `.mica/` objects in Obsidian's Excluded files (manual setting today).
+- **Perf (deferred by measurement)**: incremental block-level reparse and the zero-copy typed-array boundary — current full-doc scan is ~0.7 ms on the real 711 KB note, cached across cursor moves.
+- **Distribution**: community-plugin submission checklist (repo URL in manifest, release artifacts) when ready to publish.
 
 ## Confirmed defaults (revisit only if needed)
 
 - Authoring syntax: colon-fence directives inside a ` ```mica ` fence.
 - `mica-id` is a separate frontmatter field from the existing `uuid`.
-- Edit-a-previous-version defaults to `branch`, not `amend`.
+- Edit-a-previous-version defaults to `branch` (parent recorded); no in-place amend.
 
 ## Risks to watch
 

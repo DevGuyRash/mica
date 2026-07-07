@@ -202,3 +202,69 @@
 	font-size: var(--font-ui-small);
 	resize: vertical;
 }
+
+.mica-edit-area-modal {
+	min-height: 40vh;
+}
+
+/* Version chip */
+.mica-chipbar {
+	display: flex;
+	justify-content: flex-end;
+	padding: 2px 6px;
+	border-top: 1px solid var(--mica-border);
+	background: var(--mica-tab-bg);
+}
+
+.mica-chip {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	background: transparent;
+	border: 1px solid var(--mica-border);
+	border-radius: 10px;
+	padding: 0 8px;
+	cursor: pointer;
+}
+
+.mica-chip:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.mica-chip.is-dirty {
+	color: var(--mica-accent);
+	border-color: var(--mica-accent);
+}
+
+/* Patch + N-up diff surfaces */
+.mica-diff-patchtext,
+.mica-diff-basetext {
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	margin: 0;
+	padding: 6px;
+}
+
+.mica-diff-nup {
+	display: grid;
+	grid-template-columns: repeat(var(--mica-nup-cols, 3), minmax(0, 1fr));
+	gap: 0;
+}
+
+.mica-diff-nup-head {
+	font-weight: 600;
+	padding: 4px 6px;
+	border-bottom: 1px solid var(--mica-border);
+	background: var(--mica-tab-bg);
+}
+
+.mica-diff-nup-col {
+	border-left: 1px solid var(--mica-border);
+	overflow-x: auto;
+}
+
+.mica-diff-nup-col:first-of-type {
+	border-left: none;
+}

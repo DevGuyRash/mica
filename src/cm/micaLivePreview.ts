@@ -37,11 +37,16 @@ class MicaWidget extends WidgetType {
 		// Resolve the note this editor actually hosts (correct across split
 		// panes/popouts, where getActiveFile() may point elsewhere).
 		const info = view.state.field(editorInfoField, false);
+		const chip =
+			this.plugin.settings.showVersionChip && this.id && info?.file
+				? { plugin: this.plugin, file: info.file, blockId: this.id, content: this.content }
+				: undefined;
 		renderCst(parseBlock(this.content), el, {
 			app: this.plugin.app,
 			sourcePath: info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "",
 			component: child,
 			editable: this.id ? { save: (path, title, text) => this.save(view, path, title, text) } : undefined,
+			chip,
 		});
 		return el;
 	}

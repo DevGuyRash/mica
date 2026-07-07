@@ -141,6 +141,8 @@ export type LedgerEvent =
 			hash: string;
 			label?: string | null;
 			origin?: string | null;
+			/** Lineage: hash this version was derived from (branch/edit-previous). */
+			parent?: string | null;
 	  }
 	| { type: "set-head"; eid: string; ts: number; block: string; hash: string };
 
@@ -231,9 +233,16 @@ export function reconcileIndexes(content: ContentRef[], sidecar: SidecarRef[]): 
 
 // --- Migration -----------------------------------------------------------
 
+export interface MigratedVersion {
+	label: string;
+	status: string;
+	content: string;
+}
+
 export interface MigratedBlock {
 	id: string;
 	name: string | null;
+	versions: MigratedVersion[];
 }
 
 export interface MigrationResult {

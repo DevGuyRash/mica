@@ -14,6 +14,32 @@ export function renderDiff(el: HTMLElement, result: DiffResult, mode: DiffMode):
 	}
 }
 
+/** Render a unified-diff patch as monospace text. */
+export function renderPatch(el: HTMLElement, patch: string): void {
+	el.empty();
+	el.addClass("mica-diff");
+	el.createEl("pre", { cls: "mica-diff-patchtext", text: patch });
+}
+
+/** N-up compare: the base column plus one inline-diff column per version. */
+export function renderNUp(
+	el: HTMLElement,
+	base: { label: string; text: string },
+	columns: { label: string; result: DiffResult }[],
+): void {
+	el.empty();
+	el.addClass("mica-diff");
+	const grid = el.createDiv({ cls: "mica-diff-nup" });
+	grid.style.setProperty("--mica-nup-cols", String(columns.length + 1));
+	grid.createDiv({ cls: "mica-diff-nup-head", text: `${base.label} (base)` });
+	for (const c of columns) grid.createDiv({ cls: "mica-diff-nup-head", text: c.label });
+	const baseCell = grid.createDiv({ cls: "mica-diff-nup-col" });
+	baseCell.createEl("pre", { cls: "mica-diff-basetext", text: base.text });
+	for (const c of columns) {
+		renderInline(grid.createDiv({ cls: "mica-diff-nup-col" }), c.result);
+	}
+}
+
 function renderInline(el: HTMLElement, result: DiffResult): void {
 	for (const hunk of result.hunks) {
 		const h = el.createDiv({ cls: "mica-diff-hunk" });

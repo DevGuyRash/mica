@@ -70,6 +70,16 @@ describe("runtime contracts (window.mica)", function () {
 		);
 		const reverted = await browser.executeObsidian(() => window.mica.blockRead("Versioned.md", "blk-e2e-1"));
 		expect(reverted).toBe(original);
+
+		// Branch-edit a previous version: a NEW version (parent recorded) becomes head.
+		await browser.executeObsidian(
+			(_obs, parent) => window.mica.versionsEdit("Versioned.md", "blk-e2e-1", parent, "branched from v1\n"),
+			versions[0].hash,
+		);
+		const afterEdit = await browser.executeObsidian(() => window.mica.versionsList("Versioned.md", "blk-e2e-1"));
+		expect(afterEdit.length).toBe(3);
+		const branched = await browser.executeObsidian(() => window.mica.blockRead("Versioned.md", "blk-e2e-1"));
+		expect(branched).toBe("branched from v1\n");
 	});
 
 	it("migrates the real legacy tabs shape losslessly", async function () {
@@ -97,7 +107,25 @@ describe("runtime contracts (window.mica)", function () {
 		const sidecar = await browser.executeObsidian(({ app }) =>
 			Boolean(app.vault.getAbstractFileByPath("Legacy Tabs.mica/ledger.jsonl")),
 		);
-		expect(sidecar).toBe(true); // migration snapshots v1 into real history
+		expect(sidecar).toBe(true); // migration snapshots the head into real history
+
+		// The killer feature: the manual archive callouts became REAL versions.
+		const blocks = await browser.executeObsidian(() => window.mica.blockList("Legacy Tabs.md"));
+		const blockId = blocks.find((b) => b.id)?.id as string;
+		expect(blockId).toBeTruthy();
+		const versions = await browser.executeObsidian(
+			(_obs, id) => window.mica.versionsList("Legacy Tabs.md", id),
+			blockId,
+		);
+		const labels = versions.map((v) => v.label);
+		expect(labels).toContain("V1.0"); // [!success]- Review Kernel (V1.0)
+		expect(labels).toContain("V0.3"); // [!bug]- Frame Gate (V0.3)
+		expect(versions.length).toBeGreaterThanOrEqual(3); // imported + migrated head
+	});
+
+	it("migrate.scan verb reports (and is empty once converted)", async function () {
+		const scan = await browser.executeObsidian(() => window.mica.migrateScan());
+		expect(Array.isArray(scan)).toBe(true);
 	});
 
 	it("file-bridge: inbox instruction produces an outbox result", async function () {

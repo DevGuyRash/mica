@@ -13,6 +13,7 @@ import {
 import { readObject } from "../storage/sidecar";
 import { ensureBlockIds, ensureNoteId } from "../identity/identity";
 import { repair, type RepairReport } from "../identity/reconcile";
+import { migrateFile, migrateVault, type MigrateFileReport } from "../migrate/migrate";
 
 const INBOX = "mica-bridge/inbox";
 const OUTBOX = "mica-bridge/outbox";
@@ -97,6 +98,10 @@ export class MicaApi {
 		return [(await readObject(vault, file, baseHash)) ?? "", (await readObject(vault, file, otherHash)) ?? ""];
 	}
 
+	async versionsEdit(notePath: string, blockId: string, parentHash: string, content: string): Promise<void> {
+		await this.plugin.engine.editVersion(this.note(notePath), blockId, parentHash, content);
+	}
+
 	async prepare(notePath: string): Promise<string> {
 		const file = this.note(notePath);
 		const id = await ensureNoteId(this.plugin, file);
@@ -106,6 +111,20 @@ export class MicaApi {
 
 	async repair(): Promise<RepairReport> {
 		return repair(this.plugin);
+	}
+
+	/** Dry-run report of every convertible legacy-tabs note in the vault. */
+	async migrateScan(): Promise<MigrateFileReport[]> {
+		return migrateVault(this.plugin, true);
+	}
+
+	/** Migrate one note (path given) or the whole vault (no args). */
+	async migrateRun(notePath?: string): Promise<MigrateFileReport[]> {
+		if (notePath) {
+			const report = await migrateFile(this.plugin, this.note(notePath), false);
+			return report ? [report] : [];
+		}
+		return migrateVault(this.plugin, false);
 	}
 
 	// --- dispatch + file-bridge ------------------------------------------
@@ -120,6 +139,9 @@ export class MicaApi {
 			"versions.revert": (n, id, h) => this.versionsRevert(n, id, h),
 			"versions.diff": (n, b, o, g) => this.versionsDiff(n, b, o, g),
 			"versions.patch": (n, b, o) => this.versionsPatch(n, b, o),
+			"versions.edit": (n, id, parent, c) => this.versionsEdit(n, id, parent, c),
+			"migrate.scan": () => this.migrateScan(),
+			"migrate.run": (n?) => this.migrateRun(n),
 			prepare: (n) => this.prepare(n),
 			repair: () => this.repair(),
 		};

@@ -39,12 +39,14 @@ Every save snapshots changed blocks into a visible, co-located `<Note>.mica/` si
 
 - **Prepare note for Mica (add ids)** — add `mica-id` frontmatter + block ids.
 - **Snapshot versions now** · **Compare block versions** · **Repair history (reconcile)**.
-- **Migrate tabs → Mica (active note)** — convert legacy `obsidian-tabs` blocks.
+- **Migrate tabs → Mica** — dry-run or convert, for the active note or the whole vault. Lossless: the original note is backed up as a content-addressed object first, tab bodies are copied verbatim, Templater notes are skipped, and `[!success]-`/`[!bug]-`/`[!todo]-` callouts with `(Vx.y)` titles are imported as **real labeled version history**.
 - **Run instruction (JSON from clipboard)** — drive the API manually.
+
+Every rendered block also carries a **version chip** (`v<count>`, with a dirty dot when the inline content differs from the stored head) — click it for history, Meld-style diffing (inline / side-by-side / 3-up vs a swappable base / patch), and **branch-editing any previous version** (the edit becomes a new version whose `parent` records where it came from).
 
 ## Scripting API
 
-Everything is reachable headlessly via `window.mica` (dev console, js-engine / customjs / templater) or the **file-bridge**: drop `{ "verb": "versions.diff", "args": [...] }` into `mica-bridge/inbox/<id>.json`; Mica executes it and writes `mica-bridge/outbox/<id>.json`. Verbs: `block.list/read/update`, `versions.list/snapshot/revert/diff/patch`, `prepare`, `repair`.
+Everything is reachable headlessly via `window.mica` (dev console, js-engine / customjs / templater) or the **file-bridge**: drop `{ "verb": "versions.diff", "args": [...] }` into `mica-bridge/inbox/<id>.json`; Mica executes it, consumes the instruction, and writes `mica-bridge/outbox/<id>.json`. Verbs: `block.list/read/update`, `versions.list/snapshot/revert/diff/patch/edit`, `migrate.scan/run`, `prepare`, `repair`.
 
 ## Develop
 

@@ -9,7 +9,7 @@ import {
 	type BlockState,
 	type LedgerEvent,
 } from "../wasm/bridge";
-import { appendEvents, ensureSidecar, readLedger, readObject, writeObject } from "../storage/sidecar";
+import { appendEvents, ensureSidecar, readLedger, readObject, writeManifest, writeObject } from "../storage/sidecar";
 
 /**
  * Snapshots each block's content into its note's sidecar on save, and drives
@@ -30,10 +30,15 @@ export class VersionEngine {
 		if (file.path.includes(".mica/")) return;
 		let bounce = this.debouncers.get(file.path);
 		if (!bounce) {
-			bounce = debounce((f: TFile) => void this.snapshot(f), 1500, true);
+			bounce = debounce((f: TFile) => void this.snapshot(f), this.plugin.settings.snapshotDebounceMs, true);
 			this.debouncers.set(file.path, bounce);
 		}
 		bounce(file);
+	}
+
+	/** Drop cached debouncers (e.g. after the debounce setting changes). */
+	resetDebouncers(): void {
+		this.debouncers.clear();
 	}
 
 	async state(file: TFile): Promise<Record<string, BlockState>> {
@@ -74,6 +79,18 @@ export class VersionEngine {
 			events.push({ type: "set-head", eid: newId(), ts, block: id, hash });
 		}
 		await appendEvents(vault, file, events);
+		if (events.length) {
+			const names: Record<string, string> = {};
+			for (const b of blocks) if (b.id) names[b.id] = b.name ?? "";
+			const fm = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
+				Record<string, unknown> | undefined;
+			await writeManifest(vault, file, {
+				noteId: typeof fm?.["mica-id"] === "string" ? (fm["mica-id"] as string) : null,
+				path: file.path,
+				blocks: names,
+				updated: Date.now(),
+			});
+		}
 	}
 
 	/**
@@ -89,5 +106,25 @@ export class VersionEngine {
 		if (next === null) return;
 		await vault.modify(file, next);
 		await appendEvents(vault, file, [{ type: "set-head", eid: newId(), ts: Date.now(), block: blockId, hash }]);
+	}
+
+	/**
+	 * Edit a previous version in place — branch semantics: the result is a NEW
+	 * version whose `parent` records the version it was derived from, and it
+	 * becomes the head. Nothing is ever rewritten.
+	 */
+	async editVersion(file: TFile, blockId: string, parentHash: string, content: string): Promise<void> {
+		const vault = this.plugin.app.vault;
+		await this.snapshot(file); // preserve current inline state first
+		const hash = hashContent(content);
+		await ensureSidecar(vault, file);
+		await writeObject(vault, file, hash, content);
+		const ts = Date.now();
+		await appendEvents(vault, file, [
+			{ type: "add-version", eid: newId(), ts, block: blockId, hash, parent: parentHash },
+			{ type: "set-head", eid: newId(), ts, block: blockId, hash },
+		]);
+		const next = replaceBlockContent(await vault.read(file), blockId, content);
+		if (next !== null) await vault.modify(file, next);
 	}
 }

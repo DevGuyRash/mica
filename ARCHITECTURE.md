@@ -41,7 +41,7 @@ The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMar
 
 ## Storage & versioning
 
-- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: content-addressed objects (`objects/b3-….mica.md`) and an append-only `ledger.jsonl` (authoritative; folded in `(ts, eid)` order so Sync/git line-unions converge). A derived `state.json` cache, `manifest.json`, and `.graveyard/` are planned (see `state.md`).
+- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: content-addressed objects (`objects/b3-….mica.md`), an append-only `ledger.jsonl` (authoritative; folded in `(ts, eid)` order so Sync/git line-unions converge — `add-version` events may carry a `parent` hash for branch lineage), and a `manifest.json` summary (note anchor, path hint, block names) refreshed on snapshot. A derived `state.json` cache and `.graveyard/` remain planned (see `state.md`).
 - Visible (not hidden) because hidden dot-folders emit no Vault events — which would break self-healing — and visible files ride Obsidian Sync / obsidian-git and stay human-readable.
 - Snapshot-on-save is change-gated by a BLAKE3 hash (no snapshot storms). Append-only + content-addressed ⇒ Sync/git see only additions ⇒ no history merge conflicts.
 
@@ -51,7 +51,7 @@ The Rust `similar` crate provides char/word/line granularity, intra-line emphasi
 
 ## Scriptable API
 
-`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/snapshot/revert/diff/patch`, `prepare`, `repair`), mirrored by palette commands and a file-bridge: an agent drops `{verb,args}` JSON in `mica-bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, **consumes the inbox file**, and writes `mica-bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. Destructive verbs snapshot before writing. `migrate.*` verbs and a desktop loopback CLI are planned.
+`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/snapshot/revert/diff/patch/edit`, `migrate.scan/run`, `prepare`, `repair`), mirrored by palette commands and a file-bridge: an agent drops `{verb,args}` JSON in `mica-bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, **consumes the inbox file**, and writes `mica-bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. Destructive verbs snapshot before writing. A desktop loopback CLI remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
 
 ## Build & distribution
 

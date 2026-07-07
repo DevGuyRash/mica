@@ -1,6 +1,6 @@
 [package]
 name = "mica-core"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 description = "Pure Rust core for the Mica Obsidian plugin: fence scanner, CST, serializer, diff, hashing, and identity."
 license = "MIT"

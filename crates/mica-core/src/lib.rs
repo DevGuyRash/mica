@@ -20,7 +20,7 @@ mod scanner;
 mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
-pub use migrate::{migrate_tabs_impl, MigratedBlock, MigrationResult};
+pub use migrate::{migrate_tabs_impl, MigratedBlock, MigratedVersion, MigrationResult};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use edit::{block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, BlockEdit};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};

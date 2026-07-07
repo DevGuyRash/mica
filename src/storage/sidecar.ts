@@ -62,6 +62,30 @@ export async function readLedger(vault: Vault, file: TFile): Promise<LedgerEvent
 	return readEventsAt(vault, ledgerPath(file));
 }
 
+/** Human/tool-readable sidecar summary: note anchor, path hint, block names. */
+export interface SidecarManifest {
+	noteId: string | null;
+	path: string;
+	blocks: Record<string, string>;
+	updated: number;
+}
+
+export async function writeManifest(vault: Vault, file: TFile, manifest: SidecarManifest): Promise<void> {
+	const path = `${sidecarDir(file)}/manifest.json`;
+	const body = JSON.stringify(manifest, null, "\t") + "\n";
+	const af = vault.getAbstractFileByPath(path);
+	if (af instanceof TFile) {
+		await vault.modify(af, body);
+		return;
+	}
+	try {
+		await vault.create(path, body);
+	} catch {
+		const raced = vault.getAbstractFileByPath(path);
+		if (raced instanceof TFile) await vault.modify(raced, body);
+	}
+}
+
 export async function appendEvents(vault: Vault, file: TFile, events: LedgerEvent[]): Promise<void> {
 	if (!events.length) return;
 	const path = ledgerPath(file);

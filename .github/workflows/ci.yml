@@ -1,0 +1,55 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 11
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: wasm32-unknown-unknown
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: crates/mica-core
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: wasm-pack
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            # Tier 1+gate: format, typecheck, lint, Rust unit/regression tests.
+            - name: Check
+              run: pnpm run check
+
+            # Tier 2: build the WASM core + bundle, then boundary smoke in Node.
+            - name: Build
+              run: pnpm run build
+            - name: Smoke
+              run: pnpm run smoke
+
+            # Tier 3: contract + rendering specs inside a real downloaded Obsidian.
+            - name: Cache Obsidian binaries
+              uses: actions/cache@v4
+              with:
+                  path: .obsidian-cache
+                  key: obsidian-${{ runner.os }}
+            - name: E2E (real Obsidian under Xvfb)
+              run: xvfb-run -a pnpm run e2e

@@ -63,6 +63,10 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		const activePanels = await displayed(".mica-tab-panel.is-active");
 		expect(activePanels.length).toBe(1);
 		await expect(activePanels[0]).toHaveText(expect.stringContaining("second tab body"));
+
+		// Version chip canary: the affordance for history is present per block.
+		const chips = await displayed(".mica-chip");
+		expect(chips.length).toBe(1);
 	});
 
 	it("live preview replaces the fence with the Mica widget when the cursor is outside", async function () {

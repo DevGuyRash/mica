@@ -1,6 +1,5 @@
 import { Notice, Plugin, TFile } from "obsidian";
-import { coreVersion, hashContent, initCore, migrateTabs, scanBlocksView } from "./wasm/bridge";
-import { ensureSidecar, writeObject } from "./storage/sidecar";
+import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
@@ -9,17 +8,21 @@ import { repair } from "./identity/reconcile";
 import { sidecarDir } from "./storage/sidecar";
 import { DiffModal } from "./diff/diffModal";
 import { MicaApi } from "./api/mica";
+import { migrateFile, migrateVault, type MigrateFileReport } from "./migrate/migrate";
+import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings";
 
 /**
- * Mica plugin entry point. Wires the WASM core, the three-mode renderer, and the
- * versioning engine. The scriptable API (M7) is added on top of these.
+ * Mica plugin entry point. Wires the WASM core, the three-mode renderer, the
+ * versioning engine, settings, and the scriptable API + agent bridge.
  */
 export default class MicaPlugin extends Plugin {
 	engine!: VersionEngine;
 	api!: MicaApi;
+	settings!: MicaSettings;
 
 	async onload(): Promise<void> {
 		await initCore();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
 		this.engine = new VersionEngine(this);
 		this.api = new MicaApi(this);
 		this.api.registerBridge();
@@ -27,6 +30,7 @@ export default class MicaPlugin extends Plugin {
 
 		registerReadingRenderer(this);
 		this.registerEditorExtension(micaLivePreview(this));
+		this.addSettingTab(new MicaSettingTab(this));
 
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
@@ -38,6 +42,10 @@ export default class MicaPlugin extends Plugin {
 				if (file instanceof TFile && file.extension === "md") void this.followRename(file, oldPath);
 			}),
 		);
+
+		this.app.workspace.onLayoutReady(() => {
+			if (this.settings.reconcileOnLoad) void this.reconcileOnLoad();
+		});
 
 		this.addCommand({
 			id: "prepare-note",
@@ -67,12 +75,22 @@ export default class MicaPlugin extends Plugin {
 		this.addCommand({
 			id: "migrate-tabs-dry-run",
 			name: "Migrate tabs → Mica (dry run, active note)",
-			callback: () => void this.migrateActiveNote(true),
+			callback: () => void this.migrateActive(true),
 		});
 		this.addCommand({
 			id: "migrate-tabs",
 			name: "Migrate tabs → Mica (active note)",
-			callback: () => void this.migrateActiveNote(false),
+			callback: () => void this.migrateActive(false),
+		});
+		this.addCommand({
+			id: "migrate-vault-dry-run",
+			name: "Migrate tabs → Mica (dry run, whole vault)",
+			callback: () => void this.migrateWholeVault(true),
+		});
+		this.addCommand({
+			id: "migrate-vault",
+			name: "Migrate tabs → Mica (whole vault)",
+			callback: () => void this.migrateWholeVault(false),
 		});
 
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
@@ -81,6 +99,22 @@ export default class MicaPlugin extends Plugin {
 	onunload(): void {
 		delete (window as unknown as { mica?: MicaApi }).mica;
 		console.info("Mica: unloaded");
+	}
+
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+	}
+
+	private async reconcileOnLoad(): Promise<void> {
+		try {
+			const { actions, rehomed } = await repair(this);
+			if (actions.length || rehomed.length) {
+				new Notice(`Mica: reconciled — ${rehomed.length} rehomed, ${actions.length} issue(s). See console.`);
+				console.info("Mica startup reconcile:", { rehomed, actions });
+			}
+		} catch (e) {
+			console.error("Mica: startup reconcile failed", e);
+		}
 	}
 
 	private async prepareActiveNote(): Promise<void> {
@@ -128,28 +162,33 @@ export default class MicaPlugin extends Plugin {
 		}
 	}
 
-	private async migrateActiveNote(dryRun: boolean): Promise<void> {
+	private async migrateActive(dryRun: boolean): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return;
-		const original = await this.app.vault.read(file);
-		const result = migrateTabs(original);
-		if (!result.changed) {
+		const report = await migrateFile(this, file, dryRun);
+		if (!report) {
 			new Notice("No convertible obsidian-tabs blocks found (Templater notes are skipped).");
 			return;
 		}
-		if (dryRun) {
-			new Notice(`Dry run: ${result.blocks.length} block(s) would convert. Preview in console.`);
-			console.info("Mica migration dry run for", file.path, "\n", result.doc);
+		this.noticeMigration([report], dryRun);
+	}
+
+	private async migrateWholeVault(dryRun: boolean): Promise<void> {
+		const reports = await migrateVault(this, dryRun);
+		if (!reports.length) {
+			new Notice("No convertible obsidian-tabs blocks found anywhere in the vault.");
 			return;
 		}
-		// Store the ENTIRE original document as a content-addressed object
-		// before touching anything — migration is always recoverable.
-		await ensureSidecar(this.app.vault, file);
-		const backup = hashContent(original);
-		await writeObject(this.app.vault, file, backup, original);
-		await this.app.vault.modify(file, result.doc);
-		await ensureNoteId(this, file);
-		await this.engine.snapshot(file);
-		new Notice(`Mica: migrated ${result.blocks.length} block(s); original backed up as ${backup}.`);
+		this.noticeMigration(reports, dryRun);
+	}
+
+	private noticeMigration(reports: MigrateFileReport[], dryRun: boolean): void {
+		const blocks = reports.reduce((n, r) => n + r.blocks, 0);
+		const versions = reports.reduce((n, r) => n + r.versionsImported, 0);
+		const verb = dryRun ? "would convert" : "converted";
+		new Notice(
+			`Mica: ${reports.length} note(s), ${blocks} block(s) ${verb}, ${versions} archived version(s) imported. Details in console.`,
+		);
+		console.info(`Mica migration ${dryRun ? "(dry run)" : ""}:`, reports);
 	}
 }

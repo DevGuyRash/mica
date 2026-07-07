@@ -7,10 +7,26 @@ use crate::new_id_impl;
 use crate::scanner::scan_tag_impl;
 use serde::Serialize;
 
+/// A versioned artifact extracted from a legacy tab body: in this vault's
+/// convention, each `[!success]-` / `[!bug]-` / `[!todo]-` callout wraps one
+/// fenced payload and its title carries a `(Vx.y)` marker.
+#[derive(Serialize, Debug, PartialEq, Clone)]
+pub struct MigratedVersion {
+    /// `V0.3`-style label parsed from the callout title, else the title itself.
+    pub label: String,
+    /// Callout type: `success` (active) | `bug` (archived) | `todo` (wip).
+    pub status: String,
+    /// The dequoted payload (inner fence stripped when the body is one fence).
+    pub content: String,
+}
+
 #[derive(Serialize, Debug, PartialEq)]
 pub struct MigratedBlock {
     pub id: String,
     pub name: Option<String>,
+    /// Extracted historical versions, in document order (oldest intent first
+    /// is the vault's own ordering; the migrated head is snapshotted last).
+    pub versions: Vec<MigratedVersion>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -76,6 +92,7 @@ fn convert(content: &str) -> (String, MigratedBlock) {
 
     let id = new_id_impl();
     let block_name = tabs.first().map(|(n, _)| n.clone());
+    let versions = tabs.iter().flat_map(|(_, b)| extract_versions(b)).collect();
 
     let mut inner = preamble;
     if !inner.is_empty() && !inner.ends_with('\n') {
@@ -96,7 +113,96 @@ fn convert(content: &str) -> (String, MigratedBlock) {
 
     let run = max_fence_run(&inner);
     let fence = "`".repeat(if run == 0 { 3 } else { run + 1 });
-    (format!("{fence}mica id={id}\n{inner}{fence}\n"), MigratedBlock { id, name: block_name })
+    (
+        format!("{fence}mica id={id}\n{inner}{fence}\n"),
+        MigratedBlock { id, name: block_name, versions },
+    )
+}
+
+/// Extract versioned callouts from a legacy tab body. Recognizes top-level
+/// `> [!success|bug|todo]±  Title (Vx.y)` callouts; the payload is the callout
+/// body dequoted, with a single wrapping code fence stripped when present.
+fn extract_versions(body: &str) -> Vec<MigratedVersion> {
+    let mut out = Vec::new();
+    let mut lines = body.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some((status, title)) = parse_callout_header(line) else {
+            continue;
+        };
+        if !matches!(status.as_str(), "success" | "bug" | "todo") {
+            continue;
+        }
+        // Collect the quoted body.
+        let mut quoted: Vec<String> = Vec::new();
+        while let Some(next) = lines.peek() {
+            if let Some(dequoted) = dequote(next) {
+                quoted.push(dequoted);
+                lines.next();
+            } else {
+                break;
+            }
+        }
+        out.push(MigratedVersion {
+            label: parse_version_label(&title),
+            status,
+            content: strip_wrapping_fence(&quoted),
+        });
+    }
+    out
+}
+
+/// `> [!type]- Title` → `(type, title)`.
+fn parse_callout_header(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix('>')?.trim_start();
+    let rest = rest.strip_prefix("[!")?;
+    let close = rest.find(']')?;
+    let status = rest[..close].trim().to_ascii_lowercase();
+    let mut title = rest[close + 1..].trim_start();
+    title = title.strip_prefix(['-', '+']).unwrap_or(title);
+    Some((status, title.trim().to_string()))
+}
+
+/// Strip one level of `> ` quoting; `None` when the line is not quoted.
+fn dequote(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('>')?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest).to_string())
+}
+
+/// `Review Kernel (V1.0)` → `V1.0`; otherwise the whole (nonempty) title.
+fn parse_version_label(title: &str) -> String {
+    if let Some(open) = title.rfind("(V") {
+        if let Some(len) = title[open + 1..].find(')') {
+            let candidate = &title[open + 1..open + 1 + len];
+            if candidate[1..].chars().all(|c| c.is_ascii_digit() || c == '.') && candidate.len() > 1 {
+                return candidate.to_string();
+            }
+        }
+    }
+    if title.is_empty() {
+        "imported".to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+/// When the dequoted body is exactly one fenced block, return its inside;
+/// otherwise return the body joined as-is.
+fn strip_wrapping_fence(lines: &[String]) -> String {
+    let significant: Vec<usize> = (0..lines.len()).filter(|&i| !lines[i].trim().is_empty()).collect();
+    if let (Some(&first), Some(&last)) = (significant.first(), significant.last()) {
+        let open = lines[first].trim_start();
+        let fc = open.as_bytes().first().copied();
+        if (fc == Some(b'`') || fc == Some(b'~')) && first != last {
+            let ch = fc.unwrap();
+            let run = open.bytes().take_while(|&b| b == ch).count();
+            let close = lines[last].trim_start();
+            let close_run = close.bytes().take_while(|&b| b == ch).count();
+            if run >= 3 && close_run >= run && close[close_run..].trim().is_empty() {
+                return lines[first + 1..last].join("\n");
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 fn max_fence_run(content: &str) -> usize {
@@ -176,6 +282,55 @@ mod tests {
         let r = migrate_tabs_impl(doc);
         assert!(!r.changed);
         assert_eq!(r.doc, doc);
+    }
+
+    #[test]
+    fn extracts_versioned_callouts_from_real_shape() {
+        // Mirrors the vault's actual convention: callout title carries (Vx.y),
+        // body is a quoted 4-backtick fenced payload.
+        let doc = concat!(
+            "`````tabs\n",
+            "tab: Kernel\n",
+            "> [!success]- Review Kernel (V1.0)\n",
+            "> ````md\n",
+            "> KERNEL LINE ONE\n",
+            "> KERNEL LINE TWO\n",
+            "> ````\n",
+            "\n",
+            "tab: Frame Gate\n",
+            "> [!bug]- Frame Gate (V0.3)\n",
+            "> ````md\n",
+            "> OLD FRAME BODY\n",
+            "> ````\n",
+            "`````\n",
+        );
+        let r = migrate_tabs_impl(doc);
+        assert_eq!(r.blocks.len(), 1);
+        let vs = &r.blocks[0].versions;
+        assert_eq!(vs.len(), 2, "one version per callout: {vs:?}");
+        assert_eq!(vs[0].label, "V1.0");
+        assert_eq!(vs[0].status, "success");
+        assert_eq!(vs[0].content, "KERNEL LINE ONE\nKERNEL LINE TWO");
+        assert_eq!(vs[1].label, "V0.3");
+        assert_eq!(vs[1].status, "bug");
+        assert_eq!(vs[1].content, "OLD FRAME BODY");
+    }
+
+    #[test]
+    fn non_version_callouts_are_not_extracted() {
+        let doc = "```tabs\ntab: A\n> [!example]- Sample Data\n> stuff\nbody\n```\n";
+        let r = migrate_tabs_impl(doc);
+        assert!(r.blocks[0].versions.is_empty());
+    }
+
+    #[test]
+    fn unfenced_callout_body_is_taken_verbatim() {
+        let doc = "```tabs\ntab: A\n> [!todo]- Draft idea\n> plain line\n> another\n```\n";
+        let r = migrate_tabs_impl(doc);
+        let vs = &r.blocks[0].versions;
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].label, "Draft idea");
+        assert_eq!(vs[0].content, "plain line\nanother");
     }
 
     #[test]

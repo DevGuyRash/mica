@@ -18,6 +18,9 @@ pub enum Event {
         label: Option<String>,
         #[serde(default)]
         origin: Option<String>,
+        /// Lineage: the hash this version was derived from (branch/edit-previous).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     SetHead {
         eid: String,
@@ -87,6 +90,7 @@ mod tests {
             hash: hash.into(),
             label: None,
             origin: None,
+            parent: None,
         }
     }
     fn set(block: &str, hash: &str, ts: u64) -> Event {

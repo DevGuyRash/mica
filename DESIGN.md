@@ -79,7 +79,7 @@ Mica (colon-nested, version tracked in history):
 ## Customization surface
 
 - CSS custom properties under `.mica` (see `styles.css`) — override in a theme or the Style Settings plugin.
-- Settings (M3+): autosave/debounce, snapshot cadence, sidecar visibility, default diff granularity, default edit mode (branch/amend), theming presets.
+- Settings (shipped): snapshot debounce, default diff granularity, default diff mode (inline / side-by-side / patch), version-chip visibility, reconcile-on-startup. Future: sidecar location, theming presets.
 
 ## Accessibility
 

@@ -1,5 +1,7 @@
-import { App, Component, MarkdownRenderer } from "obsidian";
-import { serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
+import { App, Component, MarkdownRenderer, TFile } from "obsidian";
+import type MicaPlugin from "../main";
+import { hashContent, serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
+import { DiffModal } from "../diff/diffModal";
 
 /** Hooks that make a rendered block editable (Live Preview only). */
 export interface EditHooks {
@@ -11,11 +13,21 @@ export interface EditHooks {
 	save: (path: number[], expectedTitle: string, newText: string) => void;
 }
 
+/** Everything the version chip needs to show state and open history. */
+export interface ChipInfo {
+	plugin: MicaPlugin;
+	file: TFile;
+	blockId: string;
+	/** Current inline content, for the dirty-vs-head indicator. */
+	content: string;
+}
+
 export interface RenderCtx {
 	app: App;
 	sourcePath: string;
 	component: Component;
 	editable?: EditHooks;
+	chip?: ChipInfo;
 }
 
 type Container = Extract<MicaNode, { kind: "container" }>;
@@ -24,6 +36,35 @@ type Container = Extract<MicaNode, { kind: "container" }>;
 export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	el.addClass("mica");
 	renderNodes(cst.children, el, ctx, []);
+	if (ctx.chip) renderChip(el, ctx.chip);
+}
+
+/**
+ * The per-block version chip: `v<count>` with a dirty dot when the inline
+ * content differs from the stored head; clicking opens the history/diff modal.
+ */
+function renderChip(root: HTMLElement, chip: ChipInfo): void {
+	const bar = root.createDiv({ cls: "mica-chipbar" });
+	const btn = bar.createEl("button", {
+		cls: "mica-chip",
+		text: "v…",
+		attr: { type: "button", "aria-label": "Version history" },
+	});
+	btn.addEventListener("click", () => new DiffModal(chip.plugin, chip.file, chip.blockId).open());
+	void (async () => {
+		try {
+			const state = (await chip.plugin.engine.state(chip.file))[chip.blockId];
+			const count = state?.versions.length ?? 0;
+			// The renderer may or may not include the trailing newline; accept both.
+			const dirty = state?.head
+				? hashContent(chip.content) !== state.head && hashContent(`${chip.content}\n`) !== state.head
+				: true;
+			btn.setText(`v${count}${dirty ? " ●" : ""}`);
+			btn.toggleClass("is-dirty", dirty);
+		} catch {
+			btn.setText("v?");
+		}
+	})();
 }
 
 function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, basePath: number[]): void {
@@ -126,14 +167,28 @@ function openInlineEditor(tab: Container, panel: HTMLElement, ctx: RenderCtx, ta
 	panel.empty();
 	const ta = panel.createEl("textarea", { cls: "mica-edit-area" });
 	ta.value = serializeCst({ children: tab.children });
-	ta.rows = Math.min(24, ta.value.split("\n").length + 1);
+	const save = (): void => ctx.editable?.save(tabPath, tab.title, ta.value);
+	const cancel = (): void => renderTabBody(tab, panel, ctx, tabPath);
+	// Autosize to content, save on Ctrl/Cmd+Enter, cancel on Escape.
+	const fit = (): void => {
+		ta.style.height = "auto";
+		ta.style.height = `${Math.min(ta.scrollHeight + 2, 600)}px`;
+	};
+	ta.addEventListener("input", fit);
+	ta.addEventListener("keydown", (ev) => {
+		if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+			ev.preventDefault();
+			save();
+		} else if (ev.key === "Escape") {
+			ev.preventDefault();
+			cancel();
+		}
+	});
 	const bar = panel.createDiv({ cls: "mica-tab-actions" });
-	bar.createEl("button", { cls: "mod-cta", text: "Save", attr: { type: "button" } }).addEventListener("click", () => {
-		ctx.editable?.save(tabPath, tab.title, ta.value);
-	});
-	bar.createEl("button", { text: "Cancel", attr: { type: "button" } }).addEventListener("click", () => {
-		renderTabBody(tab, panel, ctx, tabPath);
-	});
+	bar.createEl("button", { cls: "mod-cta", text: "Save", attr: { type: "button" } }).addEventListener("click", save);
+	bar.createEl("button", { text: "Cancel", attr: { type: "button" } }).addEventListener("click", cancel);
+	fit();
+	ta.focus();
 }
 
 function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
