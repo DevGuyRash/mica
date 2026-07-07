@@ -1,0 +1,10 @@
+{
+	"id": "mica",
+	"name": "Mica",
+	"version": "0.0.1",
+	"minAppVersion": "1.5.0",
+	"description": "Versioned, structured content blocks — fast nested tabs and grids with first-class version history and Meld-class diffing.",
+	"author": "DevGuyRash",
+	"authorUrl": "https://github.com/DevGuyRash",
+	"isDesktopOnly": false
+}

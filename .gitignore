@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+main.js
+main.js.map
+*.js.map
+dist/
+*.tsbuildinfo
+
+# Rust / WASM
+target/
+src/wasm/pkg/
+
+# Agent / local (house convention)
+.local/
+.claude/
+.codex/
+/AGENTS.md
+/CLAUDE.md
+*repomix*.xml
+
+# OS
+.DS_Store

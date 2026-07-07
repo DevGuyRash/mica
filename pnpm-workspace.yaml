@@ -1,0 +1,4 @@
+# pnpm settings (pnpm 11 reads config from here, not the package.json "pnpm" field).
+# Allow esbuild to run its postinstall so its native binary is installed.
+allowBuilds:
+    esbuild: true

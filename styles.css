@@ -1,0 +1,30 @@
+/*
+ * Mica styles.
+ *
+ * Customization is first-class: everything visual is driven by CSS custom
+ * properties under `.mica`, so themes and the Style Settings plugin can
+ * override them without touching plugin internals. These are seed defaults;
+ * M2+ add the component styles that consume them.
+ */
+
+.mica {
+	--mica-radius: 8px;
+	--mica-gap: 8px;
+	--mica-pad: 0.75em 1em;
+	--mica-border: var(--background-modifier-border);
+	--mica-tab-bg: var(--background-secondary);
+	--mica-tab-bg-active: var(--background-primary);
+	--mica-tab-fg: var(--text-muted);
+	--mica-tab-fg-active: var(--text-normal);
+	--mica-accent: var(--interactive-accent);
+
+	/* diff surfaces */
+	--mica-diff-add: var(--color-green);
+	--mica-diff-del: var(--color-red);
+	--mica-diff-add-bg: rgba(var(--color-green-rgb), 0.12);
+	--mica-diff-del-bg: rgba(var(--color-red-rgb), 0.12);
+
+	border: 1px solid var(--mica-border);
+	border-radius: var(--mica-radius);
+	overflow: hidden;
+}

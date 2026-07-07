@@ -1,0 +1,41 @@
+{
+	"name": "mica",
+	"version": "0.0.1",
+	"description": "Versioned, structured content blocks for Obsidian — fast nested tabs and grids with first-class version history and Meld-class diffing.",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"wasm": "wasm-pack build crates/mica-core --target web --release --out-dir ../../src/wasm/pkg",
+		"build": "pnpm run wasm && node esbuild.config.mjs production",
+		"dev": "node esbuild.config.mjs",
+		"typecheck": "tsc --noEmit",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"test:rust": "cargo test --manifest-path crates/mica-core/Cargo.toml",
+		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:rust"
+	},
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"tabs",
+		"versioning",
+		"diff"
+	],
+	"author": "DevGuyRash",
+	"license": "MIT",
+	"devDependencies": {
+		"@codemirror/language": "latest",
+		"@codemirror/state": "latest",
+		"@codemirror/view": "latest",
+		"@types/node": "latest",
+		"builtin-modules": "^5.0.0",
+		"esbuild": "latest",
+		"eslint": "latest",
+		"obsidian": "latest",
+		"prettier": "latest",
+		"typescript": "latest",
+		"typescript-eslint": "latest"
+	}
+}
