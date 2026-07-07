@@ -4,11 +4,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- M1 — pushdown fence scanner + SoA CST + serializer with a byte-exact round-trip on the real 701 KB note; wire `WasmBridge` to instantiate the inlined binary and expose `scan`/`parse_block`. Verify `new_id()` (uuid v7) works at runtime on wasm, not just at compile time.
+- M2 — three-mode rendering + corruption-proof editing: reading-view code-block processor, Live Preview CM6 atomic widget hosting `EmbeddableMarkdownEditor`, transaction-based `EditBridge`, shared `LayoutEngine`. Exit: the append-bug regression test (grow content past old bounds → clean replace).
 
 ## Next
 
-- M2 — three-mode rendering + corruption-proof editing (CM6 atomic widget + `EmbeddableMarkdownEditor` + transaction-based `EditBridge`).
+- M3 — identity (`mica-id` frontmatter) + visible sidecar CAS + `ledger.jsonl` + change-gated snapshot-on-save + revert/edit-in-place.
 
 ## Confirmed defaults (revisit only if needed)
 
@@ -20,4 +20,4 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 - `EmbeddableMarkdownEditor` is a semi-internal Obsidian API — isolate behind an adapter with a plain-CM6 fallback (M2).
 - Live Preview widget staying interactive under `atomicRanges` without Obsidian revealing source (M2).
-- WASM build: confirm `uuid` v7 + `blake3` compile clean on `wasm32-unknown-unknown` (getrandom `js`).
+- WASM boundary currently uses `serde-wasm-bindgen` (structured clone), not yet the zero-copy typed-array path — deferred perf optimization (M8).

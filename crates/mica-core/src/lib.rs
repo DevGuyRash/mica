@@ -11,7 +11,9 @@
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+mod parser;
 mod scanner;
+pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use scanner::{scan_impl, BlockSpan};
 
 // --- Pure core (unit-tested natively) ------------------------------------
@@ -52,6 +54,25 @@ pub fn hash_content(text: &str) -> String {
 #[wasm_bindgen]
 pub fn new_id() -> String {
     new_id_impl()
+}
+
+/// Locate every top-level ` ```mica ` block in a document. Returns `BlockSpan[]`.
+#[wasm_bindgen]
+pub fn scan(src: &str) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&scan_impl(src)).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Parse one block's content into a `Cst`.
+#[wasm_bindgen]
+pub fn parse_block(content: &str) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&parse_block_impl(content)).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Serialize a `Cst` back to source (byte-exact for unedited trees).
+#[wasm_bindgen]
+pub fn serialize(cst: JsValue) -> Result<String, JsValue> {
+    let cst: Cst = serde_wasm_bindgen::from_value(cst).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(serialize_impl(&cst))
 }
 
 #[cfg(test)]

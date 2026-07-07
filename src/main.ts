@@ -1,4 +1,5 @@
 import { Plugin } from "obsidian";
+import { coreVersion, initCore } from "./wasm/bridge";
 
 /**
  * Mica plugin entry point.
@@ -9,7 +10,8 @@ import { Plugin } from "obsidian";
  */
 export default class MicaPlugin extends Plugin {
 	async onload(): Promise<void> {
-		console.info(`Mica: loaded (v${this.manifest.version})`);
+		await initCore();
+		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
 	}
 
 	onunload(): void {

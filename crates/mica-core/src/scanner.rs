@@ -6,11 +6,13 @@
 //! is derived from the fence grammar at scan time, never guessed by counting
 //! backticks nor cached as a line number.
 
+use serde::Serialize;
+
 /// Info string tag that marks a Mica block.
 const MICA_TAG: &str = "mica";
 
 /// Byte-offset span of one top-level ` ```mica ` block within a document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockSpan {
     /// Offset of the first byte of the opening fence line.
     pub start: usize,

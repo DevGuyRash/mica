@@ -23,6 +23,9 @@ const context = await esbuild.context({
 	outfile: "main.js",
 	// The Rust core is inlined as a Uint8Array (never fetch() — sandboxed in Electron).
 	loader: { ".wasm": "binary" },
+	// wasm-pack's web glue references import.meta.url only in a dead default path
+	// (we always pass the inlined bytes to init), so neutralize it for a clean CJS bundle.
+	define: { "import.meta.url": JSON.stringify("file:///mica") },
 	external: [
 		"obsidian",
 		"electron",

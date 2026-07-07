@@ -5,7 +5,8 @@
 	"type": "module",
 	"private": true,
 	"scripts": {
-		"wasm": "wasm-pack build crates/mica-core --target web --release --out-dir ../../src/wasm/pkg",
+		"wasm": "wasm-pack build crates/mica-core --target web --release --out-dir ../../src/wasm/pkg && rm -f src/wasm/pkg/mica_core_bg.wasm.d.ts",
+		"smoke": "node tests/smoke.mjs",
 		"build": "pnpm run wasm && node esbuild.config.mjs production",
 		"dev": "node esbuild.config.mjs",
 		"typecheck": "tsc --noEmit",
