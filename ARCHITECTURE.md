@@ -8,19 +8,18 @@ Two halves over one shared **Rust → WASM** core. TypeScript owns everything th
 
 ```text
 mica-core (Rust -> WASM)          TypeScript shell (Obsidian plugin)
-  fence scanner + CST               WasmBridge (typed-array boundary)
+  fence scanner + CST               WasmBridge (serde boundary)
   serializer + fence normalizer     Reading renderer (code-block processor)
-  diff (similar)                    Live Preview widget (CM6 ViewPlugin/StateField)
-  BLAKE3 hashing                    EditBridge (transaction-based edits)
-  UUIDv7                            storage/sidecar, version engine, reconcile
-                                    diff UI, scriptable API + file-bridge, migration
+  diff (similar)                    Live Preview widget (CM6 StateField)
+  BLAKE3 hashing · UUIDv7           version engine + sidecar storage
+  block edits · migration           reconcile, diff UI, window.mica + file-bridge
 ```
 
 ## Core principle: derive state, never cache it
 
 Every correctness guarantee comes from one discipline repeated at three layers:
 
-- **Editing.** Block boundaries live only in a CodeMirror `RangeSet` that is remapped through _every_ transaction. No line number is ever stored. Edits are `{from,to,insert}` change specs derived live — never a cached-coordinate overwrite. (That overwrite is exactly what corrupts `obsidian-tabs`.)
+- **Editing.** Block boundaries are recomputed from a live scan at every decision point — render and write alike. No line number or node path is ever trusted after the document may have changed. Edits are `{from,to,insert}` change specs derived at dispatch time — never a cached-coordinate overwrite. (That overwrite is exactly what corrupts `obsidian-tabs`.)
 - **Versioning.** Current state is a fold over an append-only `ledger.jsonl`; version objects are immutable and content-addressed. Revert flips a pointer; nothing is rewritten.
 - **Identity.** The note↔history link is derived by matching content-carried UUIDs, not paths — so it self-heals across renames and moves.
 
@@ -42,7 +41,7 @@ The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMar
 
 ## Storage & versioning
 
-- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: content-addressed objects (`objects/b3-….mica.md`), an append-only `ledger.jsonl` (authoritative), a derived `state.json` cache, a `manifest.json`, and a `.graveyard/`.
+- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: content-addressed objects (`objects/b3-….mica.md`) and an append-only `ledger.jsonl` (authoritative; folded in `(ts, eid)` order so Sync/git line-unions converge). A derived `state.json` cache, `manifest.json`, and `.graveyard/` are planned (see `state.md`).
 - Visible (not hidden) because hidden dot-folders emit no Vault events — which would break self-healing — and visible files ride Obsidian Sync / obsidian-git and stay human-readable.
 - Snapshot-on-save is change-gated by a BLAKE3 hash (no snapshot storms). Append-only + content-addressed ⇒ Sync/git see only additions ⇒ no history merge conflicts.
 
@@ -52,7 +51,7 @@ The Rust `similar` crate provides char/word/line granularity, intra-line emphasi
 
 ## Scriptable API
 
-`window.mica` exposes UUID-addressed verbs (`block.*`, `version.*`, `migrate.*`, `repair`, `reconcile`), mirrored by palette commands and a file-bridge: an agent drops `{verb,args}` JSON in an inbox folder; `vault.on('create')` executes it and writes an outbox result — working on desktop, mobile, and over Sync with no server. An optional desktop loopback adds a real `mica` CLI.
+`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/snapshot/revert/diff/patch`, `prepare`, `repair`), mirrored by palette commands and a file-bridge: an agent drops `{verb,args}` JSON in `mica-bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, **consumes the inbox file**, and writes `mica-bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. Destructive verbs snapshot before writing. `migrate.*` verbs and a desktop loopback CLI are planned.
 
 ## Build & distribution
 
@@ -60,4 +59,11 @@ pnpm + esbuild (bundle `src/main.ts` → `main.js`, CommonJS, externalizing `obs
 
 ## Load-bearing files
 
-`crates/mica-core/src/lib.rs`, `src/cm/micaViewPlugin.ts`, `src/cm/micaBlockWidget.ts`, `src/render/*`, `src/storage/sidecar.ts`, `src/version/engine.ts`, `src/identity/reconcile.ts`, `src/api/mica.ts`, `src/migrate/tabs.ts`.
+Rust: `crates/mica-core/src/{scanner,parser,edit,versions,diff,reconcile,migrate}.rs` (+ `lib.rs` wasm exports). TS: `src/cm/micaLivePreview.ts`, `src/render/{layoutEngine,readingRenderer}.ts`, `src/storage/sidecar.ts`, `src/version/engine.ts`, `src/identity/{identity,reconcile}.ts`, `src/api/mica.ts`, `src/main.ts` (commands incl. migration).
+
+## Testing tiers
+
+1. `cargo test` — 51 unit/regression tests on the pure core (incl. the obsidian-tabs append-bug cases).
+2. `pnpm smoke` — the WASM boundary end-to-end in Node (ids, hashing, scan/parse/serialize, migrate+edit+diff).
+3. `just e2e` — wdio-obsidian-service: 7 contract + rendering specs inside a real downloaded Obsidian under Xvfb (this tier caught the CM6 block-decoration crash nothing offline could).
+4. `just e2e-cli` — contract checks via the official Obsidian CLI against the running app; skips with instructions when the CLI isn't activated.
