@@ -15,9 +15,11 @@ mod edit;
 mod parser;
 mod scanner;
 mod util;
-pub use edit::{block_content_edit_impl, replace_block_content_impl, BlockEdit};
+mod versions;
+pub use edit::{block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, BlockEdit};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
+pub use versions::{fold_ledger_impl, BlockState, Event, VersionMeta};
 
 // --- Pure core (unit-tested natively) ------------------------------------
 
@@ -93,6 +95,31 @@ pub fn block_content_edit(doc: &str, id: &str, new_content: &str) -> Result<JsVa
         Some(e) => serde_wasm_bindgen::to_value(&e).map_err(|e| JsValue::from_str(&e.to_string())),
         None => Ok(JsValue::NULL),
     }
+}
+
+/// Replace block `id`'s content in `doc`; returns the full new document, or null.
+#[wasm_bindgen]
+pub fn replace_block_content(doc: &str, id: &str, new_content: &str) -> Result<JsValue, JsValue> {
+    match replace_block_content_impl(doc, id, new_content) {
+        Some(s) => Ok(JsValue::from_str(&s)),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// Insert a fresh `id=` into any ` ```mica ` block that lacks one.
+#[wasm_bindgen]
+pub fn ensure_ids(doc: &str) -> String {
+    ensure_ids_impl(doc)
+}
+
+/// Fold an append-only ledger (array of events) into current per-block state,
+/// returned as a plain object keyed by block id.
+#[wasm_bindgen]
+pub fn fold_ledger(events: JsValue) -> Result<JsValue, JsValue> {
+    use serde::Serialize;
+    let events: Vec<Event> = serde_wasm_bindgen::from_value(events).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    fold_ledger_impl(&events).serialize(&ser).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]

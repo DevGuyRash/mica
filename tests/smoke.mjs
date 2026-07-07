@@ -4,7 +4,16 @@
 // launching Obsidian. Run: `pnpm smoke`.
 
 import { readFile } from "node:fs/promises";
-import init, { hash_content, mica_version, new_id, parse_block, scan, serialize } from "../src/wasm/pkg/mica_core.js";
+import init, {
+	ensure_ids,
+	fold_ledger,
+	hash_content,
+	mica_version,
+	new_id,
+	parse_block,
+	scan,
+	serialize,
+} from "../src/wasm/pkg/mica_core.js";
 
 const bytes = await readFile(new URL("../src/wasm/pkg/mica_core_bg.wasm", import.meta.url));
 await init({ module_or_path: bytes });
@@ -34,5 +43,18 @@ const content = doc.slice(spans[0].content_start, spans[0].content_end);
 const cst = parse_block(content);
 assert(cst.children.length === 1 && cst.children[0].kind === "container", "parsed a tab container");
 assert(serialize(cst) === content, "round-trip serialize == content");
+
+// M3 boundary: identity + ledger fold.
+const withIds = ensure_ids("```mica\nx\n```\n");
+assert(/^```mica id=[0-9a-f-]{36}\n/.test(withIds), `ensure_ids adds an id: ${withIds}`);
+
+const state = fold_ledger([
+	{ type: "add-version", eid: "e1", ts: 1, block: "b", hash: "h1" },
+	{ type: "set-head", eid: "s1", ts: 1, block: "b", hash: "h1" },
+	{ type: "add-version", eid: "e2", ts: 2, block: "b", hash: "h2" },
+	{ type: "set-head", eid: "s2", ts: 2, block: "b", hash: "h2" },
+]);
+assert(state && typeof state === "object" && !(state instanceof Map), "fold_ledger returns a plain object");
+assert(state.b?.head === "h2" && state.b?.versions?.length === 2, `fold_ledger state: ${JSON.stringify(state)}`);
 
 console.log(`SMOKE OK — core v${version}, id ${id}, ${hash}`);

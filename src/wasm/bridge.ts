@@ -1,9 +1,12 @@
 import init, {
 	block_content_edit,
+	ensure_ids,
+	fold_ledger,
 	hash_content,
 	mica_version,
 	new_id,
 	parse_block,
+	replace_block_content,
 	scan,
 	scan_view,
 	serialize,
@@ -111,4 +114,44 @@ export interface BlockEdit {
  */
 export function blockContentEdit(doc: string, id: string, newContent: string): BlockEdit | null {
 	return block_content_edit(doc, id, newContent) as BlockEdit | null;
+}
+
+/** Replace block `id`'s content in `doc`, returning the full new document. */
+export function replaceBlockContent(doc: string, id: string, newContent: string): string | null {
+	return replace_block_content(doc, id, newContent) as string | null;
+}
+
+/** Insert a fresh `id=` into any ` ```mica ` block that lacks one. */
+export function ensureIds(doc: string): string {
+	return ensure_ids(doc);
+}
+
+// --- Versioning (mirrors the Rust ledger types) --------------------------
+
+export type LedgerEvent =
+	| {
+			type: "add-version";
+			eid: string;
+			ts: number;
+			block: string;
+			hash: string;
+			label?: string | null;
+			origin?: string | null;
+	  }
+	| { type: "set-head"; eid: string; ts: number; block: string; hash: string };
+
+export interface VersionMeta {
+	hash: string;
+	ts: number;
+	label: string | null;
+}
+
+export interface BlockState {
+	head: string | null;
+	versions: VersionMeta[];
+}
+
+/** Fold an append-only ledger into current per-block state, keyed by block id. */
+export function foldLedger(events: LedgerEvent[]): Record<string, BlockState> {
+	return fold_ledger(events) as Record<string, BlockState>;
 }
