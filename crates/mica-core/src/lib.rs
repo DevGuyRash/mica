@@ -11,6 +11,9 @@
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+mod scanner;
+pub use scanner::{scan_impl, BlockSpan};
+
 // --- Pure core (unit-tested natively) ------------------------------------
 
 /// Crate version, for a plugin/core version handshake at load time.

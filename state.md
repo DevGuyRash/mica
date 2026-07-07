@@ -4,11 +4,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- M0 scaffold — verifying the toolchain end to end: `cargo test` green, `wasm-pack` produces a `.wasm`, esbuild bundles `main.js`, plugin loads in-vault via symlink.
+- M1 — pushdown fence scanner + SoA CST + serializer with a byte-exact round-trip on the real 701 KB note; wire `WasmBridge` to instantiate the inlined binary and expose `scan`/`parse_block`. Verify `new_id()` (uuid v7) works at runtime on wasm, not just at compile time.
 
 ## Next
 
-- M1 — pushdown fence scanner + SoA CST + serializer with a byte-exact round-trip on the real 701 KB note; wire `WasmBridge` to instantiate the inlined binary and expose `scan`/`parse_block`.
+- M2 — three-mode rendering + corruption-proof editing (CM6 atomic widget + `EmbeddableMarkdownEditor` + transaction-based `EditBridge`).
 
 ## Confirmed defaults (revisit only if needed)
 
