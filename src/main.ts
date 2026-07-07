@@ -7,6 +7,7 @@ import { ensureBlockIds, ensureNoteId } from "./identity/identity";
 import { repair } from "./identity/reconcile";
 import { sidecarDir } from "./storage/sidecar";
 import { DiffModal } from "./diff/diffModal";
+import { MicaApi } from "./api/mica";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, and the
@@ -14,10 +15,14 @@ import { DiffModal } from "./diff/diffModal";
  */
 export default class MicaPlugin extends Plugin {
 	engine!: VersionEngine;
+	api!: MicaApi;
 
 	async onload(): Promise<void> {
 		await initCore();
 		this.engine = new VersionEngine(this);
+		this.api = new MicaApi(this);
+		this.api.registerBridge();
+		(window as unknown as { mica?: MicaApi }).mica = this.api;
 
 		registerReadingRenderer(this);
 		this.registerEditorExtension(micaLivePreview(this));
@@ -53,11 +58,17 @@ export default class MicaPlugin extends Plugin {
 			name: "Repair history (reconcile)",
 			callback: () => void this.runRepair(),
 		});
+		this.addCommand({
+			id: "run-instruction",
+			name: "Run instruction (JSON from clipboard)",
+			callback: () => void this.runInstructionFromClipboard(),
+		});
 
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
 	}
 
 	onunload(): void {
+		delete (window as unknown as { mica?: MicaApi }).mica;
 		console.info("Mica: unloaded");
 	}
 
@@ -94,5 +105,15 @@ export default class MicaPlugin extends Plugin {
 		const { actions, rehomed } = await repair(this);
 		new Notice(`Mica repair: ${rehomed.length} rehomed, ${actions.length} issue(s). See console.`);
 		if (actions.length || rehomed.length) console.info("Mica repair:", { rehomed, actions });
+	}
+
+	private async runInstructionFromClipboard(): Promise<void> {
+		try {
+			const result = await this.api.runInstruction(JSON.parse(await navigator.clipboard.readText()));
+			new Notice("Mica: instruction ran (result in console).");
+			console.info("Mica instruction result:", result);
+		} catch (e) {
+			new Notice(`Mica instruction failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
 	}
 }
