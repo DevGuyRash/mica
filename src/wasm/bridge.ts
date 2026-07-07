@@ -1,4 +1,13 @@
-import init, { hash_content, mica_version, new_id, parse_block, scan, serialize } from "./pkg/mica_core.js";
+import init, {
+	block_content_edit,
+	hash_content,
+	mica_version,
+	new_id,
+	parse_block,
+	scan,
+	scan_view,
+	serialize,
+} from "./pkg/mica_core.js";
 import wasmBinary from "./pkg/mica_core_bg.wasm";
 
 /** Byte-offset span of a top-level ` ```mica ` block (mirrors Rust `BlockSpan`). */
@@ -69,4 +78,37 @@ export function parseBlock(content: string): Cst {
 /** Serialize a CST back to source (byte-exact for unedited trees). */
 export function serializeCst(cst: Cst): string {
 	return serialize(cst);
+}
+
+/** A block located with UTF-16 offsets + id/name (mirrors Rust `BlockView`). */
+export interface BlockView {
+	start: number;
+	end: number;
+	content_start: number;
+	content_end: number;
+	fence_len: number;
+	closed: boolean;
+	id: string | null;
+	name: string | null;
+}
+
+/** Locate all ` ```mica ` blocks with CodeMirror (UTF-16) offsets. */
+export function scanBlocksView(src: string): BlockView[] {
+	return scan_view(src) as BlockView[];
+}
+
+/** A position-mapped edit (UTF-16 offsets) — mirrors Rust `BlockEdit`. */
+export interface BlockEdit {
+	from: number;
+	to: number;
+	insert: string;
+}
+
+/**
+ * Compute the CodeMirror change that replaces block `id`'s content with
+ * `newContent`. Bounds are recomputed from a live scan, so it can never
+ * append-instead-of-replace. Returns `null` if the block is not found.
+ */
+export function blockContentEdit(doc: string, id: string, newContent: string): BlockEdit | null {
+	return block_content_edit(doc, id, newContent) as BlockEdit | null;
 }

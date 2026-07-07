@@ -11,10 +11,13 @@
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+mod edit;
 mod parser;
 mod scanner;
+mod util;
+pub use edit::{block_content_edit_impl, replace_block_content_impl, BlockEdit};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
-pub use scanner::{scan_impl, BlockSpan};
+pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
 
 // --- Pure core (unit-tested natively) ------------------------------------
 
@@ -62,6 +65,12 @@ pub fn scan(src: &str) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&scan_impl(src)).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// Locate blocks with UTF-16 offsets + id/name, for CodeMirror decorations.
+#[wasm_bindgen]
+pub fn scan_view(src: &str) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&scan_view_impl(src)).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 /// Parse one block's content into a `Cst`.
 #[wasm_bindgen]
 pub fn parse_block(content: &str) -> Result<JsValue, JsValue> {
@@ -73,6 +82,17 @@ pub fn parse_block(content: &str) -> Result<JsValue, JsValue> {
 pub fn serialize(cst: JsValue) -> Result<String, JsValue> {
     let cst: Cst = serde_wasm_bindgen::from_value(cst).map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(serialize_impl(&cst))
+}
+
+/// Compute the CodeMirror change (UTF-16 offsets) that replaces block `id`'s
+/// content with `new_content`. Returns `null` if the block is not found. Bounds
+/// are recomputed live, so this can never append-instead-of-replace.
+#[wasm_bindgen]
+pub fn block_content_edit(doc: &str, id: &str, new_content: &str) -> Result<JsValue, JsValue> {
+    match block_content_edit_impl(doc, id, new_content) {
+        Some(e) => serde_wasm_bindgen::to_value(&e).map_err(|e| JsValue::from_str(&e.to_string())),
+        None => Ok(JsValue::NULL),
+    }
 }
 
 #[cfg(test)]

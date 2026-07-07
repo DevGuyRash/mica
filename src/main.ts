@@ -1,5 +1,7 @@
 import { Plugin } from "obsidian";
 import { coreVersion, initCore } from "./wasm/bridge";
+import { micaLivePreview } from "./cm/micaLivePreview";
+import { registerReadingRenderer } from "./render/readingRenderer";
 
 /**
  * Mica plugin entry point.
@@ -11,6 +13,8 @@ import { coreVersion, initCore } from "./wasm/bridge";
 export default class MicaPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await initCore();
+		registerReadingRenderer(this);
+		this.registerEditorExtension(micaLivePreview(this));
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
 	}
 
