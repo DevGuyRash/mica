@@ -4,7 +4,7 @@ import type { Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { blockContentEdit, nodeAtPath, parseBlock, scanBlocksView, serializeCst } from "../wasm/bridge";
+import { blockContentEdit, nodeAtPath, parseBlock, scanBlocksView, serializeCst, type BlockView } from "../wasm/bridge";
 import { renderCst } from "../render/layoutEngine";
 
 /**
@@ -70,12 +70,22 @@ class MicaWidget extends WidgetType {
 	}
 }
 
+// Cache the last scan so cursor moves (selectionSet with no doc change) skip the
+// WASM scan entirely; a re-scan happens only when the document actually changes.
+let scanCache: { doc: string; blocks: BlockView[] } | null = null;
+function scanCached(doc: string): BlockView[] {
+	if (scanCache && scanCache.doc === doc) return scanCache.blocks;
+	const blocks = scanBlocksView(doc);
+	scanCache = { doc, blocks };
+	return blocks;
+}
+
 function build(plugin: MicaPlugin, view: EditorView): DecorationSet {
 	if (!view.state.field(editorLivePreviewField)) return Decoration.none;
 	const doc = view.state.doc.toString();
 	const sel = view.state.selection.main;
 	const builder = new RangeSetBuilder<Decoration>();
-	for (const b of scanBlocksView(doc)) {
+	for (const b of scanCached(doc)) {
 		if (!b.closed) continue;
 		// Reveal the raw source while the cursor/selection is inside the block.
 		if (sel.from <= b.end && sel.to >= b.start) continue;

@@ -6,6 +6,7 @@ import init, {
 	hash_content,
 	make_patch,
 	mica_version,
+	migrate_tabs,
 	new_id,
 	parse_block,
 	reconcile,
@@ -226,4 +227,22 @@ export type ReconcileAction =
 /** Classify content vs sidecar block-id indexes into reconciliation actions. */
 export function reconcileIndexes(content: ContentRef[], sidecar: SidecarRef[]): ReconcileAction[] {
 	return reconcile(content, sidecar) as ReconcileAction[];
+}
+
+// --- Migration -----------------------------------------------------------
+
+export interface MigratedBlock {
+	id: string;
+	name: string | null;
+}
+
+export interface MigrationResult {
+	doc: string;
+	blocks: MigratedBlock[];
+	changed: boolean;
+}
+
+/** Convert every legacy ` ```tabs ` block in `doc` into a ` ```mica ` block. */
+export function migrateTabs(doc: string): MigrationResult {
+	return migrate_tabs(doc) as MigrationResult;
 }

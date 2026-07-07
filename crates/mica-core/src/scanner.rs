@@ -56,10 +56,14 @@ struct Open {
 }
 
 /// Scan `src` for every top-level ` ```mica ` block, in document order.
-///
-/// Only the outermost blocks are returned; nested structure (colon-fence
-/// directives, inner code fences) is the CST parser's job.
 pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
+    scan_tag_impl(src, MICA_TAG)
+}
+
+/// Scan for fenced blocks whose info tag is `tag` (`mica`, or `tabs` for migration).
+///
+/// Only the outermost blocks are returned; nested structure is the parser's job.
+pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
     let mut blocks = Vec::new();
     let mut offset = 0usize;
     let mut open: Option<Open> = None;
@@ -72,7 +76,7 @@ pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
 
         match &open {
             None => {
-                if let Some((fence_char, fence_len, attrs)) = parse_open_fence(text) {
+                if let Some((fence_char, fence_len, attrs)) = parse_open_fence(text, tag) {
                     open = Some(Open {
                         start: line_start,
                         fence_char,
@@ -117,7 +121,7 @@ pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
 }
 
 /// If `text` opens a ` ```mica ` fence, return `(fence_char, fence_len, attrs)`.
-fn parse_open_fence(text: &str) -> Option<(u8, usize, Vec<(String, String)>)> {
+fn parse_open_fence(text: &str, tag: &str) -> Option<(u8, usize, Vec<(String, String)>)> {
     let indent = leading_spaces(text);
     if indent > 3 {
         return None;
@@ -135,8 +139,8 @@ fn parse_open_fence(text: &str) -> Option<(u8, usize, Vec<(String, String)>)> {
     if fence_char == b'`' && info.contains('`') {
         return None;
     }
-    let (tag, attr_str) = info.split_once(|c: char| c.is_whitespace()).unwrap_or((info, ""));
-    if tag != MICA_TAG {
+    let (found, attr_str) = info.split_once(|c: char| c.is_whitespace()).unwrap_or((info, ""));
+    if found != tag {
         return None;
     }
     Some((fence_char, fence_len, parse_attrs(attr_str.trim())))

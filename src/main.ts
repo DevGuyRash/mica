@@ -1,5 +1,5 @@
 import { Notice, Plugin, TFile } from "obsidian";
-import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
+import { coreVersion, initCore, migrateTabs, scanBlocksView } from "./wasm/bridge";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
@@ -63,6 +63,11 @@ export default class MicaPlugin extends Plugin {
 			name: "Run instruction (JSON from clipboard)",
 			callback: () => void this.runInstructionFromClipboard(),
 		});
+		this.addCommand({
+			id: "migrate-tabs",
+			name: "Migrate tabs → Mica (active note)",
+			callback: () => void this.migrateActiveNote(),
+		});
 
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
 	}
@@ -115,5 +120,19 @@ export default class MicaPlugin extends Plugin {
 		} catch (e) {
 			new Notice(`Mica instruction failed: ${e instanceof Error ? e.message : String(e)}`);
 		}
+	}
+
+	private async migrateActiveNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+		const result = migrateTabs(await this.app.vault.read(file));
+		if (!result.changed) {
+			new Notice("No obsidian-tabs blocks found in this note.");
+			return;
+		}
+		await this.app.vault.modify(file, result.doc);
+		await ensureNoteId(this, file);
+		await this.engine.snapshot(file);
+		new Notice(`Mica: migrated ${result.blocks.length} block(s) and snapshotted v1.`);
 	}
 }

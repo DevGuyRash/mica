@@ -13,12 +13,14 @@ use wasm_bindgen::prelude::*;
 
 mod diff;
 mod edit;
+mod migrate;
 mod parser;
 mod reconcile;
 mod scanner;
 mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
+pub use migrate::{migrate_tabs_impl, MigratedBlock, MigrationResult};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use edit::{block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, BlockEdit};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
@@ -145,6 +147,12 @@ pub fn reconcile(content: JsValue, sidecar: JsValue) -> Result<JsValue, JsValue>
     let content: Vec<ContentRef> = serde_wasm_bindgen::from_value(content).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let sidecar: Vec<SidecarRef> = serde_wasm_bindgen::from_value(sidecar).map_err(|e| JsValue::from_str(&e.to_string()))?;
     serde_wasm_bindgen::to_value(&reconcile_impl(&content, &sidecar)).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Convert every legacy ```tabs block in `doc` into a ```mica block.
+#[wasm_bindgen]
+pub fn migrate_tabs(doc: &str) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&migrate_tabs_impl(doc)).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]
