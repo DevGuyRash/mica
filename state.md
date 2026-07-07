@@ -4,15 +4,15 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- M5 — nesting + layout: deep colon-fence containers (tabs/grid/cell), `LayoutEngine` id+hash memoization, and the Live Preview upgrade to an atomic widget with inline per-tab editing.
+- M6 — self-healing reconciliation: rename-follow hook + `Mica: Repair` (report + rehome), pure conflict classifier in Rust.
 
 ## Next
 
-- M6 — self-healing reconciliation: on-load + `Mica: Repair` + rename/delete/create hooks; the 6 conflict cases.
+- M7 — scriptable API (`window.mica`) + command palette + inbox/outbox file-bridge for agents.
 
 ## Deferred (revisit at the noted milestone)
 
-- M5 upgrades Live Preview from the current reveal-on-overlap widget to a persistent atomic widget with true inline per-tab editing (`EmbeddableMarkdownEditor`). The corruption-proof `block_content_edit` is already in the core, unused by the UI until then.
+- Inline per-tab editing now works via a plain textarea inside the reveal-on-overlap widget (corruption-proof). A richer inline editor (`EmbeddableMarkdownEditor`, markdown rendering while editing) and a persistent atomic widget remain a polish upgrade.
 - In-Obsidian runtime verification of the M2 renderer/widget is pending (built + typechecked + bundled; not yet loaded in a live vault here).
 
 ## Confirmed defaults (revisit only if needed)

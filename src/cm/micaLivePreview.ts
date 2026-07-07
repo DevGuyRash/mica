@@ -4,19 +4,21 @@ import type { Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { parseBlock, scanBlocksView } from "../wasm/bridge";
+import { blockContentEdit, nodeAtPath, parseBlock, scanBlocksView, serializeCst } from "../wasm/bridge";
 import { renderCst } from "../render/layoutEngine";
 
 /**
  * The rendered widget shown in place of a ` ```mica ` block in Live Preview.
  * `eq()` keyed on (id, content) lets CodeMirror reuse the DOM across unrelated
- * keystrokes instead of rebuilding it.
+ * keystrokes. Editing a tab dispatches a live-recomputed change (never a cached
+ * offset), so it can't corrupt the document.
  */
 class MicaWidget extends WidgetType {
 	private child: MarkdownRenderChild | null = null;
 
 	constructor(
 		private readonly plugin: MicaPlugin,
+		private readonly view: EditorView,
 		private readonly id: string | null,
 		private readonly content: string,
 	) {
@@ -37,8 +39,23 @@ class MicaWidget extends WidgetType {
 			app: this.plugin.app,
 			sourcePath: this.plugin.app.workspace.getActiveFile()?.path ?? "",
 			component: child,
+			editable: this.id ? { save: (path, text) => this.save(path, text) } : undefined,
 		});
 		return el;
+	}
+
+	private save(path: number[], newText: string): void {
+		if (!this.id) return;
+		const doc = this.view.state.doc.toString();
+		const live = scanBlocksView(doc).find((b) => b.id === this.id);
+		if (!live) return;
+		const cst = parseBlock(doc.slice(live.content_start, live.content_end));
+		const target = nodeAtPath(cst, path);
+		if (!target || target.kind !== "container") return;
+		target.children = parseBlock(newText).children;
+		const change = blockContentEdit(doc, this.id, serializeCst(cst));
+		if (!change) return;
+		this.view.dispatch({ changes: { from: change.from, to: change.to, insert: change.insert } });
 	}
 
 	destroy(): void {
@@ -49,13 +66,10 @@ class MicaWidget extends WidgetType {
 	}
 
 	ignoreEvent(): boolean {
-		// The widget owns its clicks (tab switching); CodeMirror shouldn't treat
-		// them as editor gestures.
 		return true;
 	}
 }
 
-/** Build replace-decorations for every closed ` ```mica ` block not under the cursor. */
 function build(plugin: MicaPlugin, view: EditorView): DecorationSet {
 	if (!view.state.field(editorLivePreviewField)) return Decoration.none;
 	const doc = view.state.doc.toString();
@@ -66,14 +80,18 @@ function build(plugin: MicaPlugin, view: EditorView): DecorationSet {
 		// Reveal the raw source while the cursor/selection is inside the block.
 		if (sel.from <= b.end && sel.to >= b.start) continue;
 		const content = doc.slice(b.content_start, b.content_end);
-		builder.add(b.start, b.end, Decoration.replace({ widget: new MicaWidget(plugin, b.id, content), block: true }));
+		builder.add(
+			b.start,
+			b.end,
+			Decoration.replace({ widget: new MicaWidget(plugin, view, b.id, content), block: true }),
+		);
 	}
 	return builder.finish();
 }
 
 /** The Live Preview editor extension. Registered via `registerEditorExtension`. */
 export function micaLivePreview(plugin: MicaPlugin): Extension {
-	const plugin$ = ViewPlugin.fromClass(
+	const vp = ViewPlugin.fromClass(
 		class {
 			decorations: DecorationSet;
 			constructor(view: EditorView) {
@@ -88,5 +106,5 @@ export function micaLivePreview(plugin: MicaPlugin): Extension {
 		{ decorations: (v) => v.decorations },
 	);
 	// Beat Obsidian's built-in fenced-code widget.
-	return Prec.highest(plugin$);
+	return Prec.highest(vp);
 }

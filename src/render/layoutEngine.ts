@@ -1,11 +1,17 @@
 import { App, Component, MarkdownRenderer } from "obsidian";
-import type { Cst, MicaNode } from "../wasm/bridge";
+import { serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
 
-/** Everything the renderer needs to draw a block and render nested markdown. */
+/** Hooks that make a rendered block editable (Live Preview only). */
+export interface EditHooks {
+	/** Persist a tab's new source; `path` locates the tab node in the CST. */
+	save: (path: number[], newText: string) => void;
+}
+
 export interface RenderCtx {
 	app: App;
 	sourcePath: string;
 	component: Component;
+	editable?: EditHooks;
 }
 
 type Container = Extract<MicaNode, { kind: "container" }>;
@@ -13,15 +19,14 @@ type Container = Extract<MicaNode, { kind: "container" }>;
 /** Render a parsed block into `el`. Shared by reading view and Live Preview. */
 export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	el.addClass("mica");
-	renderNodes(cst.children, el, ctx);
+	renderNodes(cst.children, el, ctx, []);
 }
 
-function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx): void {
+function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, basePath: number[]): void {
 	let i = 0;
 	while (i < nodes.length) {
 		const node = nodes[i];
 		if (node.kind === "leaf") {
-			// Group consecutive leaves so markdown stays coherent within a block.
 			let md = "";
 			while (i < nodes.length) {
 				const n = nodes[i];
@@ -32,59 +37,84 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx): void {
 			renderMarkdown(md, el, ctx);
 			continue;
 		}
-		renderContainer(node, el, ctx);
+		renderContainer(node, el, ctx, [...basePath, i]);
 		i++;
 	}
 }
 
-function renderContainer(node: Container, el: HTMLElement, ctx: RenderCtx): void {
+function renderContainer(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	if (node.name === "tabs") {
-		renderTabs(node, el, ctx);
+		renderTabs(node, el, ctx, path);
 	} else if (node.name === "grid") {
-		renderGrid(node, el, ctx);
+		renderGrid(node, el, ctx, path);
 	} else {
-		// `tab`/`cell` outside their parent, or an unknown directive: render inline.
-		renderNodes(node.children, el.createDiv({ cls: `mica-${node.name}` }), ctx);
+		renderNodes(node.children, el.createDiv({ cls: `mica-${node.name}` }), ctx, path);
 	}
 }
 
-function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx): void {
-	const tabs = node.children.filter((c): c is Container => c.kind === "container" && c.name === "tab");
+function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-tabs" });
 	const nav = wrap.createDiv({ cls: "mica-tab-nav", attr: { role: "tablist" } });
 	const panels = wrap.createDiv({ cls: "mica-tab-panels" });
 	const btns: HTMLElement[] = [];
 	const panelEls: HTMLElement[] = [];
-
 	const activate = (k: number): void => {
 		btns.forEach((b, m) => b.toggleClass("is-active", m === k));
 		panelEls.forEach((p, m) => p.toggleClass("is-active", m === k));
 	};
 
-	tabs.forEach((tab, k) => {
+	node.children.forEach((c, idx) => {
+		if (c.kind !== "container" || c.name !== "tab") return;
+		const k = btns.length;
 		const btn = nav.createEl("button", {
 			cls: "mica-tab-btn",
-			text: tab.title || `Tab ${k + 1}`,
+			text: c.title || `Tab ${k + 1}`,
 			attr: { type: "button", role: "tab" },
 		});
 		const panel = panels.createDiv({ cls: "mica-tab-panel", attr: { role: "tabpanel" } });
-		renderNodes(tab.children, panel, ctx);
+		renderTabBody(c, panel, ctx, [...path, idx]);
 		btn.addEventListener("click", () => activate(k));
 		btns.push(btn);
 		panelEls.push(panel);
 	});
 
-	if (tabs.length) activate(0);
+	if (btns.length) activate(0);
 }
 
-function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx): void {
+function renderTabBody(tab: Container, panel: HTMLElement, ctx: RenderCtx, tabPath: number[]): void {
+	panel.empty();
+	renderNodes(tab.children, panel.createDiv({ cls: "mica-tab-body" }), ctx, tabPath);
+	if (ctx.editable) {
+		const bar = panel.createDiv({ cls: "mica-tab-actions" });
+		bar.createEl("button", { cls: "mica-edit-btn", text: "✎ Edit", attr: { type: "button" } }).addEventListener(
+			"click",
+			() => openInlineEditor(tab, panel, ctx, tabPath),
+		);
+	}
+}
+
+function openInlineEditor(tab: Container, panel: HTMLElement, ctx: RenderCtx, tabPath: number[]): void {
+	panel.empty();
+	const ta = panel.createEl("textarea", { cls: "mica-edit-area" });
+	ta.value = serializeCst({ children: tab.children });
+	ta.rows = Math.min(24, ta.value.split("\n").length + 1);
+	const bar = panel.createDiv({ cls: "mica-tab-actions" });
+	bar.createEl("button", { cls: "mod-cta", text: "Save", attr: { type: "button" } }).addEventListener("click", () => {
+		ctx.editable?.save(tabPath, ta.value);
+	});
+	bar.createEl("button", { text: "Cancel", attr: { type: "button" } }).addEventListener("click", () => {
+		renderTabBody(tab, panel, ctx, tabPath);
+	});
+}
+
+function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const grid = el.createDiv({ cls: "mica-grid" });
 	grid.style.setProperty("--mica-cols", parseAttr(node.title, "cols") ?? "2");
-	for (const c of node.children) {
+	node.children.forEach((c, idx) => {
 		if (c.kind === "container" && c.name === "cell") {
-			renderNodes(c.children, grid.createDiv({ cls: "mica-cell" }), ctx);
+			renderNodes(c.children, grid.createDiv({ cls: "mica-cell" }), ctx, [...path, idx]);
 		}
-	}
+	});
 }
 
 function renderMarkdown(md: string, el: HTMLElement, ctx: RenderCtx): void {

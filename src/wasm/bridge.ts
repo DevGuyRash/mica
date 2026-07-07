@@ -191,3 +191,16 @@ export function diffText(base: string, other: string, granularity: DiffGranulari
 export function makePatch(base: string, other: string, context = 3): string {
 	return make_patch(base, other, context);
 }
+
+/** Navigate a CST to the node at `path` (child indices from the root). */
+export function nodeAtPath(cst: Cst, path: number[]): MicaNode | null {
+	let nodes: MicaNode[] = cst.children;
+	let node: MicaNode | null = null;
+	for (const idx of path) {
+		const next = nodes[idx];
+		if (!next) return null;
+		node = next;
+		nodes = next.kind === "container" ? next.children : [];
+	}
+	return node;
+}
