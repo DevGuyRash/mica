@@ -1,8 +1,10 @@
 import init, {
 	block_content_edit,
+	diff,
 	ensure_ids,
 	fold_ledger,
 	hash_content,
+	make_patch,
 	mica_version,
 	new_id,
 	parse_block,
@@ -154,4 +156,38 @@ export interface BlockState {
 /** Fold an append-only ledger into current per-block state, keyed by block id. */
 export function foldLedger(events: LedgerEvent[]): Record<string, BlockState> {
 	return fold_ledger(events) as Record<string, BlockState>;
+}
+
+// --- Diff (mirrors the Rust diff types) ----------------------------------
+
+export type DiffGranularity = "line" | "word" | "char";
+
+export interface DiffSpan {
+	tag: "same" | "emph";
+	text: string;
+}
+
+export interface DiffChange {
+	tag: "equal" | "delete" | "insert";
+	value: string;
+	inline: DiffSpan[];
+}
+
+export interface DiffHunk {
+	changes: DiffChange[];
+}
+
+export interface DiffResult {
+	hunks: DiffHunk[];
+	similarity: number;
+}
+
+/** Diff `base` vs `other` at the given granularity, grouped into hunks. */
+export function diffText(base: string, other: string, granularity: DiffGranularity = "line", context = 3): DiffResult {
+	return diff(base, other, granularity, context) as DiffResult;
+}
+
+/** A unified-diff patch (line granularity) between `base` and `other`. */
+export function makePatch(base: string, other: string, context = 3): string {
+	return make_patch(base, other, context);
 }

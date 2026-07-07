@@ -1,9 +1,10 @@
-import { Plugin, TFile } from "obsidian";
-import { coreVersion, initCore } from "./wasm/bridge";
+import { Notice, Plugin, TFile } from "obsidian";
+import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
 import { ensureBlockIds, ensureNoteId } from "./identity/identity";
+import { DiffModal } from "./diff/diffModal";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, and the
@@ -35,6 +36,11 @@ export default class MicaPlugin extends Plugin {
 			name: "Snapshot versions now",
 			callback: () => void this.snapshotActiveNote(),
 		});
+		this.addCommand({
+			id: "diff-versions",
+			name: "Compare block versions",
+			callback: () => void this.diffActiveBlock(),
+		});
 
 		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
 	}
@@ -53,5 +59,16 @@ export default class MicaPlugin extends Plugin {
 	private async snapshotActiveNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (file) await this.engine.snapshot(file);
+	}
+
+	private async diffActiveBlock(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+		const block = scanBlocksView(await this.app.vault.read(file)).find((b) => b.id);
+		if (!block?.id) {
+			new Notice("No Mica block with an id in this note. Run “Prepare note for Mica” first.");
+			return;
+		}
+		new DiffModal(this, file, block.id).open();
 	}
 }

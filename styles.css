@@ -88,3 +88,88 @@
 .mica-lp {
 	margin: 0.5em 0;
 }
+
+/* Diff */
+.mica-diff {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+}
+
+.mica-diff-row {
+	display: flex;
+}
+
+.mica-diff-gutter {
+	flex: 0 0 1.5em;
+	text-align: center;
+	color: var(--text-faint);
+	user-select: none;
+}
+
+.mica-diff-text {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.mica-diff-row.is-delete {
+	background: var(--mica-diff-del-bg);
+}
+
+.mica-diff-row.is-insert {
+	background: var(--mica-diff-add-bg);
+}
+
+.mica-diff-emph {
+	border-radius: 3px;
+	padding: 0 1px;
+	font-weight: 600;
+}
+
+.is-delete .mica-diff-emph {
+	background: var(--mica-diff-del);
+	color: var(--text-on-accent);
+}
+
+.is-insert .mica-diff-emph {
+	background: var(--mica-diff-add);
+	color: var(--text-on-accent);
+}
+
+.mica-diff-sbs {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+}
+
+.mica-diff-srow {
+	display: contents;
+}
+
+.mica-diff-cell {
+	padding: 0 6px;
+	border-left: 1px solid var(--mica-border);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.mica-diff-cell.is-delete {
+	background: var(--mica-diff-del-bg);
+}
+
+.mica-diff-cell.is-insert {
+	background: var(--mica-diff-add-bg);
+}
+
+.mica-diff-cell.is-empty {
+	background: var(--background-secondary);
+}
+
+.mica-diff-controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.mica-diff-modal {
+	width: min(90vw, 900px);
+}

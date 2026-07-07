@@ -11,11 +11,13 @@
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+mod diff;
 mod edit;
 mod parser;
 mod scanner;
 mod util;
 mod versions;
+pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
 pub use edit::{block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, BlockEdit};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
@@ -120,6 +122,19 @@ pub fn fold_ledger(events: JsValue) -> Result<JsValue, JsValue> {
     let events: Vec<Event> = serde_wasm_bindgen::from_value(events).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
     fold_ledger_impl(&events).serialize(&ser).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Diff `base` vs `other` (`granularity` = line|word|char) with `context` lines.
+#[wasm_bindgen]
+pub fn diff(base: &str, other: &str, granularity: &str, context: usize) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&diff_impl(base, other, granularity, context))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// A unified-diff patch (line granularity) between `base` and `other`.
+#[wasm_bindgen]
+pub fn make_patch(base: &str, other: &str, context: usize) -> String {
+    make_patch_impl(base, other, context)
 }
 
 #[cfg(test)]

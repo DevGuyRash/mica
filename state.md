@@ -4,11 +4,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Now
 
-- M3 — identity (`mica-id` frontmatter) + visible sidecar CAS + `ledger.jsonl` + change-gated snapshot-on-save + revert/edit-in-place.
+- M5 — nesting + layout: deep colon-fence containers (tabs/grid/cell), `LayoutEngine` id+hash memoization, and the Live Preview upgrade to an atomic widget with inline per-tab editing.
 
 ## Next
 
-- M4 — diff engine (`similar` → wasm): char/word/line + inline emphasis + patches; N-way vs swappable base; the 5 diff UI modes.
+- M6 — self-healing reconciliation: on-load + `Mica: Repair` + rename/delete/create hooks; the 6 conflict cases.
 
 ## Deferred (revisit at the noted milestone)
 
