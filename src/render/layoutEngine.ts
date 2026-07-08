@@ -61,7 +61,12 @@ function takeRegionReveal(ctx: RenderCtx, path: number[]): boolean {
 export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	el.addClass("mica");
 	const autoOpen = takeRegionReveal(ctx, []);
-	renderNodes(cst.children, el, ctx, [], { insert: true, autoOpen });
+	// Only offer a block-root "+ insert a group" when the block has no group yet
+	// (to bootstrap an empty block). Once a tabs/grid exists, adding tabs happens
+	// in the nav and nesting happens inside a tab — so there's no confusing second
+	// insert below the group.
+	const rootInsert = !cst.children.some((c) => c.kind === "container");
+	renderNodes(cst.children, el, ctx, [], { insert: rootInsert, autoOpen });
 	if (ctx.chip) renderFooter(el, ctx, ctx.chip);
 }
 
@@ -180,7 +185,7 @@ function renderRegion(
 	autoOpen: boolean,
 ): void {
 	const region = el.createDiv({ cls: "mica-region" });
-	paintRegionView(region, ctx, path, start, end, md);
+	paintRegionView(region, ctx, md);
 	// Attach the open-on-click handlers ONCE (not in paintRegionView, which reruns
 	// on cancel) and keep the events off CodeMirror — a click reaching CM would
 	// move the caret into the block and flip Live Preview to raw source.
@@ -199,14 +204,7 @@ function renderRegion(
 	if (autoOpen) queueMicrotask(() => openRegionEditor(region, ctx, path, start, end, md));
 }
 
-function paintRegionView(
-	region: HTMLElement,
-	ctx: RenderCtx,
-	path: number[],
-	start: number,
-	end: number,
-	md: string,
-): void {
+function paintRegionView(region: HTMLElement, ctx: RenderCtx, md: string): void {
 	region.empty();
 	region.removeClass("is-editing");
 	region.toggleClass("is-editable", Boolean(ctx.editable));
@@ -216,13 +214,8 @@ function paintRegionView(
 	} else if (ctx.editable) {
 		view.createDiv({ cls: "mica-ghost", text: "Click to write…" });
 	}
-	if (!ctx.editable) return;
-	region
-		.createEl("button", { cls: "mica-region-edit", text: "✎", attr: { type: "button", "aria-label": "Edit text" } })
-		.addEventListener("click", (e) => {
-			e.stopPropagation();
-			openRegionEditor(region, ctx, path, start, end, md);
-		});
+	// Clicking anywhere in the region opens the editor (wired once in
+	// renderRegion) — no separate pencil affordance.
 }
 
 function openRegionEditor(
@@ -245,7 +238,7 @@ function openRegionEditor(
 		ta.style.height = `${ta.scrollHeight + 2}px`;
 	};
 	if (ctx.editorAutosize ?? true) ta.addEventListener("input", fit);
-	const restore = (): void => paintRegionView(region, ctx, path, start, end, original);
+	const restore = (): void => paintRegionView(region, ctx, original);
 	const commit = (explicit: boolean): void => {
 		const val = ta.value;
 		if (val === original) return restore();
@@ -341,6 +334,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		});
 		btn.addEventListener("click", () => activate(k));
 		if (ctx.editable) {
+			chip.addClass("mica-chip-editable"); // reserves button right-padding for the ×
 			btn.addEventListener("dblclick", (e) => {
 				e.preventDefault();
 				startRename(chip, btn, ctx, path, x.idx, tab.title);
@@ -363,17 +357,15 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	});
 
 	if (ctx.editable) {
-		const at = tabs[active] ? tabs[active].idx + 1 : node.children.length;
-		// Sticky controls live outside the scrollable nav so they never scroll away.
+		// The "+" sits right after the last tab (inside the scrollable row), so it is
+		// always next to the rightmost tab; when tabs overflow it scrolls with them.
+		nav.createEl("button", {
+			cls: "mica-add mica-tab-add",
+			text: "+",
+			attr: { type: "button", "aria-label": "Add tab", title: "Add a tab" },
+		}).addEventListener("click", () => ctx.editable?.apply({ op: "insertTab", path, at: node.children.length }));
+		// The group-delete × stays sticky so it's reachable no matter how many tabs.
 		const sticky = navOuter.createDiv({ cls: "mica-tab-nav-sticky" });
-		sticky
-			.createEl("button", {
-				cls: "mica-add",
-				text: "+",
-				attr: { type: "button", "aria-label": "Add tab", title: "Add a tab after this one" },
-			})
-			.addEventListener("click", () => ctx.editable?.apply({ op: "insertTab", path, at }));
-		sticky.createDiv({ cls: "mica-nav-spacer" });
 		mkGroupDelete(sticky, ctx, node, path, "tab group");
 	}
 

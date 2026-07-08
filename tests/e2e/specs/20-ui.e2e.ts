@@ -50,6 +50,30 @@ async function seedAndOpen(path: string, block: string, mode: "preview" | "live"
 	);
 }
 
+/**
+ * Force the global auto-save setting to a known state (persisted + awaited).
+ * `autoSnapshotEnabled` lives in data.json, which survives across runs, so
+ * footer tests must set it explicitly rather than inherit a prior toggle.
+ */
+async function setAutoSave(enabled: boolean): Promise<void> {
+	await browser.executeObsidian(async ({ app }, on) => {
+		const plugins = (
+			app as unknown as {
+				plugins: {
+					getPlugin(
+						id: string,
+					): { settings: { autoSnapshotEnabled: boolean }; saveSettings(): Promise<void> } | null;
+				};
+			}
+		).plugins;
+		const p = plugins.getPlugin("mica");
+		if (p) {
+			p.settings.autoSnapshotEnabled = on;
+			await p.saveSettings();
+		}
+	}, enabled);
+}
+
 describe("rendering canaries (plugin-owned hooks only)", function () {
 	before(async function () {
 		await browser.executeObsidian(async ({ app }, content) => {
@@ -116,15 +140,13 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
-					() => document.querySelectorAll(".mica-lp .mica-tab-nav-sticky .mica-add").length > 0,
+					() => document.querySelectorAll(".mica-lp .mica-tab-nav .mica-tab-add").length > 0,
 				),
-			{ timeout: 8000, timeoutMsg: "the + button never appeared in the tab nav" },
+			{ timeout: 8000, timeoutMsg: "the + button never appeared next to the tabs" },
 		);
 		await browser.executeObsidian(() => {
-			const add = Array.from(document.querySelectorAll(".mica-lp .mica-tab-nav-sticky .mica-add")).find(
-				(b) => b.textContent === "+",
-			);
-			(add as HTMLElement | undefined)?.click();
+			// The "+" is inline in the scrollable nav, right after the last tab.
+			(document.querySelector(".mica-lp .mica-tab-nav .mica-tab-add") as HTMLElement | null)?.click();
 		});
 		// The new tab lands in the live editor (friendly `tab:` style, matched)…
 		await browser.waitUntil(
@@ -192,6 +214,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 	});
 
 	it("the auto-save pill toggles Auto ↔ Manual", async function () {
+		await setAutoSave(true); // known state, independent of prior runs' data.json
 		await seedAndOpen("Toggle.md", "Intro line.\n\n```mica id=tg-1\ntab: One\nbody\n```\n", "live");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-auto"))),
@@ -217,10 +240,8 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			() => document.querySelector(".mica-lp .mica-auto")?.textContent ?? "",
 		);
 		expect(after).toContain("Manual");
-		// Restore auto-save so later specs aren't affected by this global toggle.
-		await browser.executeObsidian(() =>
-			(document.querySelector(".mica-lp .mica-auto") as HTMLElement | null)?.click(),
-		);
+		// Restore auto-save reliably (awaited), so later tests don't inherit Manual.
+		await setAutoSave(true);
 	});
 
 	it("a block with a group shows no stray root write region (no duplicate section)", async function () {
@@ -229,14 +250,18 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length > 0),
 			{ timeout: 8000, timeoutMsg: "the widget never rendered" },
 		);
-		// A tab with content shows no ghost anywhere, and NO region at the block root.
-		const rootRegions = await browser.executeObsidian(
-			() =>
-				Array.from(document.querySelectorAll(".mica-lp .mica-region")).filter(
+		// A tab with content shows no ghost anywhere, no region at the block root,
+		// and NO root-level insert "+" (the confusing second one) — inserts live only
+		// inside containers once a group exists.
+		const stray = await browser.executeObsidian(() => {
+			const rootLevel = (sel: string): number =>
+				Array.from(document.querySelectorAll(`.mica-lp ${sel}`)).filter(
 					(r) => !r.closest(".mica-tab-body") && !r.closest(".mica-cell"),
-				).length,
-		);
-		expect(rootRegions).toBe(0);
+				).length;
+			return { regions: rootLevel(".mica-region"), inserts: rootLevel(".mica-insert") };
+		});
+		expect(stray.regions).toBe(0);
+		expect(stray.inserts).toBe(0);
 	});
 
 	it("deleting the last tab removes the whole group", async function () {
@@ -265,6 +290,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 	});
 
 	it("the interval input opens in place, not at the far end", async function () {
+		await setAutoSave(true); // the interval chip only shows when auto-save is on
 		await seedAndOpen("Interval.md", "Intro line.\n\n```mica id=in-2\ntab: A\nx\n```\n", "live");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-auto-secs"))),

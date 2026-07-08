@@ -105,6 +105,7 @@ export default class MicaPlugin extends Plugin {
 		delete (window as unknown as { mica?: MicaApi }).mica;
 		document.body.style.removeProperty("--mica-content-max-height");
 		document.body.style.removeProperty("--mica-editor-max-height");
+		document.body.style.removeProperty("--mica-tab-gap");
 		console.info("Mica: unloaded");
 	}
 
@@ -120,6 +121,7 @@ export default class MicaPlugin extends Plugin {
 			s.limitContentHeight ? `${s.contentMaxHeightPx}px` : "none",
 		);
 		document.body.style.setProperty("--mica-editor-max-height", `${s.editorMaxHeightPx}px`);
+		document.body.style.setProperty("--mica-tab-gap", `${s.tabGapPx}px`);
 	}
 
 	private async reconcileOnLoad(): Promise<void> {

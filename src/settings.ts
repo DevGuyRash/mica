@@ -19,6 +19,8 @@ export interface MicaSettings {
 	/** Grow the inline editor with content (up to its max); otherwise fixed + scroll. */
 	editorAutosize: boolean;
 	editorMaxHeightPx: number;
+	/** Gap (px) between tab chips in the tab bar. */
+	tabGapPx: number;
 	/** Comma-separated callout types imported as versions on migration (empty = any). */
 	versionCalloutTypes: string;
 }
@@ -35,6 +37,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	contentMaxHeightPx: 400,
 	editorAutosize: true,
 	editorMaxHeightPx: 400,
+	tabGapPx: 6,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 };
 
@@ -183,6 +186,21 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange(async (v) => {
 						this.micaPlugin.settings.editorMaxHeightPx = v;
+						this.micaPlugin.applyStyleVars();
+						await this.micaPlugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Tab spacing")
+			.setDesc("Gap (px) between tab chips in the tab bar.")
+			.addSlider((s) =>
+				s
+					.setLimits(0, 24, 1)
+					.setValue(this.micaPlugin.settings.tabGapPx)
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						this.micaPlugin.settings.tabGapPx = v;
 						this.micaPlugin.applyStyleVars();
 						await this.micaPlugin.saveSettings();
 					}),

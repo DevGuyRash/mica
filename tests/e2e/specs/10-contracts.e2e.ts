@@ -115,15 +115,27 @@ describe("runtime contracts (window.mica)", function () {
 		expect(doc).toContain("Prose before the block.");
 		expect(doc).toContain("Prose after the block.");
 
-		const sidecar = await browser.executeObsidian(({ app }) =>
-			Boolean(app.vault.getAbstractFileByPath("Legacy Tabs.mica/ledger.jsonl")),
+		// Migration imports the archive callouts as versions asynchronously (after
+		// the doc rewrite the previous wait caught) — wait for that OUTCOME, not a
+		// point-in-time snapshot, so the sidecar/version assertions aren't racy.
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app }) =>
+					Boolean(app.vault.getAbstractFileByPath("Legacy Tabs.mica/ledger.jsonl")),
+				),
+			{ timeout: 10_000, timeoutMsg: "migration never created the sidecar ledger" },
 		);
-		expect(sidecar).toBe(true); // migration snapshots the head into real history
 
 		// The killer feature: the manual archive callouts became REAL versions.
 		const blocks = await browser.executeObsidian(() => window.mica.blockList("Legacy Tabs.md"));
 		const blockId = blocks.find((b) => b.id)?.id as string;
 		expect(blockId).toBeTruthy();
+		await browser.waitUntil(
+			async () =>
+				(await browser.executeObsidian((_o, id) => window.mica.versionsList("Legacy Tabs.md", id), blockId))
+					.length >= 4,
+			{ timeout: 10_000, timeoutMsg: "archived callouts were not imported as versions" },
+		);
 		const versions = await browser.executeObsidian(
 			(_obs, id) => window.mica.versionsList("Legacy Tabs.md", id),
 			blockId,
