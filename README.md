@@ -133,16 +133,26 @@ Open the command palette (Ctrl/Cmd-P) and type "Mica":
 
 ## Settings
 
-**Settings → Mica:**
+**Settings → Mica** is grouped by intent — **Versioning**, **Comparing**, **Appearance**, **Migration**:
 
-- **Auto-snapshot versions** + **interval** — master switch and idle time (500–10000 ms) for smart auto-snapshotting; also toggled per session from each block's footer pill.
-- **Default diff granularity / mode** — what the compare window opens with.
-- **Show version chip on blocks** — toggle the per-block chip.
-- **Layout & editing** — cap tab/cell height with a scrollbar, and control whether the inline editor grows with content and its max height.
-- **Reconcile history on startup** — scan for orphaned/moved histories when the vault opens.
-- **Version callout types (migration)** — which callout types import as history (default: all built-in types; empty = any).
+- **Versioning** — **Auto-snapshot** master switch + **interval** (1–15 s) for smart auto-snapshotting (also toggled per session from each block's footer pill), whether ids are stamped automatically, and **Reconcile history on startup**.
+- **Comparing** — the **granularity** (char / word / line) and **mode** the compare window opens with.
+- **Appearance** — see below.
+- **Migration** — which **callout types** import as history (default: all built-in types; empty = any).
 
-Everything visual is themeable via CSS custom properties on `body` (see `styles.css`; e.g. `--mica-diff-add`, `--mica-editor-max-height`) — the [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) plugin or your theme can override them.
+### Appearance
+
+Mica's chrome is a real design surface, driven by **one accent** — pick a look, then tweak any single piece; per-item overrides win over the theme:
+
+- **Theme** — 7 presets: _Match Obsidian_ (default, borrows your theme's accent), _Slate, Ocean, Forest, Sunset, Grape, Rose_.
+- **Accent color** — override the theme's accent with a color picker (tab fills, borders, and the version chip all retint from it); reset to fall back to the preset.
+- **Density** — _comfortable_ or _compact_ (retunes control heights, gaps, padding).
+- **Corner radius** — 0–20 px.
+- **Tab style** — _connected_ (tabs merge into the panel), _underline_, or _pill_.
+- **Animations** — panel fade-in + a pulse when a version is saved; honors your OS "reduce motion" setting, and can be turned off.
+- Plus the per-block **version chip** toggle, **tab spacing**, and **layout** knobs (grow-with-content inline editor + max heights, cap tab/cell height with a scrollbar).
+
+Everything resolves to CSS custom properties on `body` (`--mica-accent`, `--mica-radius`, `--mica-tab-gap`, …; see `styles.css`), so the [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) plugin or your own theme can override anything further. To eyeball the themes without launching Obsidian, open **`preview.html`** in any browser — it imports the real `styles.css` and lets you flip theme / tab style / density / accent live.
 
 ---
 
@@ -194,6 +204,8 @@ pnpm smoke       # WASM boundary test in Node (no Obsidian needed)
 just e2e         # full contract + rendering suite in a REAL sandboxed Obsidian (Xvfb)
 just e2e-cli     # contract checks via the official Obsidian CLI (skips if not activated)
 ```
+
+Open **`preview.html`** in a browser to iterate on appearance (themes, tab styles, density, accent) against the real `styles.css` — no Obsidian, no build step.
 
 Requirements: Node + pnpm, the Rust toolchain with `wasm-pack` and the `wasm32-unknown-unknown` target, and `just`. CI runs all tiers on every push.
 

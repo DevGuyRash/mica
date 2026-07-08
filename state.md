@@ -25,9 +25,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - Block ids are auto-stamped on edit (setting `autoAddIds`, default on).
 - `mica-id` is a separate frontmatter field from the existing `uuid`.
 - Edit-a-previous-version defaults to `branch` (parent recorded); no in-place amend.
+- Appearance is **one-accent-driven**: `--mica-accent` retints chrome/borders/chip via `color-mix`; themes are `body.mica-theme-*` classes that only set that accent, density/tab-style are `data-` attrs, per-item settings write inline CSS vars that win over the preset. Add a theme = add a class + a `MICA_THEMES` entry; do not spread per-element colors.
 
 ## Risks to watch
 
 - Obsidian Sync racing a `ledger.jsonl` append mid-write is reasoned-safe (append-only + order-independent fold) but not reproduced under real Sync.
 - `EmbeddableMarkdownEditor` is semi-internal and has broken before (Obsidian 1.5.8) — adapter + fallback required when adopted.
 - The virtualized reading view renders nothing under headless Xvfb; reading-mode e2e coverage therefore drives the code-block processor via `MarkdownRenderer.render` rather than the live preview. The official Obsidian CLI test tier (`just e2e-cli`) is likewise unexercised until the local app ships/activates the CLI.
+- `color-mix` on always-visible chrome hangs CDP screenshot capture under Xvfb (software compositing) — so appearance is validated by **computed styles** (the 20-ui theming canary), not pixels. Any future visual-diff tier needs a real GPU/display; use `preview.html` for human eyeballing meanwhile.
