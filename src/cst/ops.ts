@@ -19,7 +19,8 @@ export type StructOp =
 	| { op: "setCols"; path: number[]; cols: number }
 	| { op: "insertGroup"; path: number[]; at: number; kind: "tabs" | "grid" }
 	| { op: "deleteGroup"; path: number[]; index: number }
-	| { op: "deleteNode"; path: number[] };
+	| { op: "deleteNode"; path: number[] }
+	| { op: "moveNode"; from: number[]; toParent: number[]; toIndex: number };
 
 /** Where the renderer should place focus after an op re-renders the block. */
 export interface Reveal {
@@ -143,6 +144,26 @@ function removeNodeAt(cst: Cst, path: number[]): boolean {
 	return true;
 }
 
+/** Remove a container node from the tree by reference (used after a move empties it). */
+function detachContainer(cst: Cst, target: Container): void {
+	const walk = (parent: { children: MicaNode[] }): boolean => {
+		const idx = parent.children.indexOf(target);
+		if (idx >= 0) {
+			parent.children.splice(idx, 1);
+			return true;
+		}
+		return parent.children.some((c) => c.kind === "container" && walk(c));
+	};
+	walk(cst);
+}
+
+/** A group with no tabs (tabs) or no cells (grid) left — pure scaffolding. */
+function isEmptyGroup(node: Container): boolean {
+	if (node.name === "tabs") return !node.children.some((c) => c.kind === "container" && c.name === "tab");
+	if (node.name === "grid") return !node.children.some((c) => c.kind === "container" && c.name === "cell");
+	return false;
+}
+
 /**
  * Apply a structural op to `cst` in place. Returns false (a no-op) when the
  * target can't be found or a `saveRegion`'s expected text no longer matches —
@@ -218,6 +239,35 @@ export function applyOp(cst: Cst, op: StructOp): boolean {
 		}
 		case "deleteNode":
 			return removeNodeAt(cst, op.path);
+		case "moveNode": {
+			const fromParent = containerAt(cst, op.from.slice(0, -1));
+			const fromIdx = op.from[op.from.length - 1];
+			const toParent = containerAt(cst, op.toParent);
+			if (!fromParent || !toParent) return false;
+			const moved = fromParent.children[fromIdx];
+			if (!moved || moved.kind !== "container") return false;
+			// Type compatibility: tabs hold tabs, grids hold cells.
+			const dest = op.toParent.length ? nodeAtPath(cst, op.toParent) : null;
+			if (dest && dest.kind === "container") {
+				if (moved.name === "tab" && dest.name !== "tabs") return false;
+				if (moved.name === "cell" && dest.name !== "grid") return false;
+			}
+			fromParent.children.splice(fromIdx, 1);
+			let at = op.toIndex;
+			if (fromParent === toParent && fromIdx < at) at -= 1; // removal shifted indices
+			at = Math.max(0, Math.min(at, toParent.children.length));
+			if (fromParent === toParent && at === fromIdx) {
+				// no-op move — put it back and report no change
+				toParent.children.splice(fromIdx, 0, moved);
+				return false;
+			}
+			toParent.children.splice(at, 0, moved);
+			// A cross-container move can empty the source group — drop the scaffolding.
+			if (fromParent !== toParent && fromParent !== cst && isEmptyGroup(fromParent as Container)) {
+				detachContainer(cst, fromParent as Container);
+			}
+			return true;
+		}
 	}
 }
 

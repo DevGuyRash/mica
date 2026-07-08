@@ -299,4 +299,44 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-stepper-input"))),
 		).toBe(true);
 	});
+
+	it("dragging a tab reorders it", async function () {
+		await seedAndOpen("Drag.md", "Intro line.\n\n```mica id=dg-1\ntab: One\naaa\n\ntab: Two\nbbb\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-chip").length >= 2),
+			{ timeout: 8000, timeoutMsg: "the tab chips never rendered" },
+		);
+		// Drive HTML5 drag via synthetic events (the impl keys off a module payload
+		// set on dragstart and read on drop, so this exercises the real path).
+		await browser.executeObsidian(() => {
+			const chips = Array.from(document.querySelectorAll(".mica-lp .mica-tab-chip")) as HTMLElement[];
+			const [src, dst] = chips;
+			const fire = (el: HTMLElement, type: string, x?: number): void => {
+				const r = el.getBoundingClientRect();
+				el.dispatchEvent(
+					new DragEvent(type, {
+						bubbles: true,
+						cancelable: true,
+						clientX: x ?? r.left + r.width / 2,
+						clientY: r.top + r.height / 2,
+					}),
+				);
+			};
+			const rd = dst.getBoundingClientRect();
+			fire(src, "dragstart");
+			fire(dst, "dragover", rd.left + rd.width * 0.75); // past midpoint → drop AFTER
+			fire(dst, "drop", rd.left + rd.width * 0.75);
+			fire(src, "dragend");
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					const two = v.indexOf("tab: Two");
+					const one = v.indexOf("tab: One");
+					return two >= 0 && one >= 0 && two < one; // Two now precedes One
+				}),
+			{ timeout: 8000, timeoutMsg: "the tab order did not change after drag" },
+		);
+	});
 });

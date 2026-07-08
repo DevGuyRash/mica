@@ -404,6 +404,54 @@ body {
 	font-variant-numeric: tabular-nums;
 }
 
+/* ---------- Drag & drop ---------- */
+.mica-dragging {
+	opacity: 0.4;
+}
+
+.mica-tab-chip.mica-drop-before {
+	box-shadow: inset 2px 0 0 0 var(--mica-accent);
+}
+
+.mica-tab-chip.mica-drop-after {
+	box-shadow: inset -2px 0 0 0 var(--mica-accent);
+}
+
+.mica-cell.mica-drop-before {
+	box-shadow: inset 3px 0 0 0 var(--mica-accent);
+}
+
+.mica-cell.mica-drop-after {
+	box-shadow: inset -3px 0 0 0 var(--mica-accent);
+}
+
+.mica-cell-drag {
+	position: absolute;
+	top: 4px;
+	left: 4px;
+	display: grid;
+	place-items: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--text-faint);
+	line-height: 1;
+	cursor: grab;
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+
+.mica-cell:hover .mica-cell-drag {
+	opacity: 0.7;
+}
+
+.mica-cell-drag:active {
+	cursor: grabbing;
+}
+
 /* ---------- Live Preview wrapper ---------- */
 .mica-lp {
 	margin: 0.5em 0;

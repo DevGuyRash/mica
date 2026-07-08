@@ -105,6 +105,71 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 
 const INTERACTIVE = "a, button, input, textarea, .internal-link";
 
+// --- Drag and drop --------------------------------------------------------
+// One drag at a time, so a module-level payload is enough (dataTransfer can't
+// be read during dragover). Carries the dragged node's absolute path + kind.
+interface DragState {
+	from: number[];
+	kind: "tab" | "cell";
+}
+let micaDrag: DragState | null = null;
+
+/** Make `el` a drag source that carries the node at `fromPath`. */
+function makeDraggable(el: HTMLElement, fromPath: number[], kind: "tab" | "cell"): void {
+	el.setAttribute("draggable", "true");
+	el.addEventListener("dragstart", (e) => {
+		micaDrag = { from: fromPath, kind };
+		el.addClass("mica-dragging");
+		if (e.dataTransfer) {
+			e.dataTransfer.effectAllowed = "move";
+			e.dataTransfer.setData("text/plain", "mica"); // some engines need data to start a drag
+		}
+		e.stopPropagation();
+	});
+	el.addEventListener("dragend", () => {
+		micaDrag = null;
+		el.removeClass("mica-dragging");
+	});
+}
+
+/**
+ * Make `el` accept a dragged node of `kind`, dropping it into `parentPath` at
+ * `selfIndex` (before/after decided by the pointer). Works within a group
+ * (reorder) and across groups of the same kind (move).
+ */
+function makeDropTarget(
+	el: HTMLElement,
+	ctx: RenderCtx,
+	kind: "tab" | "cell",
+	parentPath: number[],
+	selfIndex: number,
+): void {
+	const clear = (): void => {
+		el.removeClass("mica-drop-before");
+		el.removeClass("mica-drop-after");
+	};
+	el.addEventListener("dragover", (e) => {
+		if (!micaDrag || micaDrag.kind !== kind) return;
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+		const r = el.getBoundingClientRect();
+		const after = e.clientX > r.left + r.width / 2;
+		el.toggleClass("mica-drop-after", after);
+		el.toggleClass("mica-drop-before", !after);
+	});
+	el.addEventListener("dragleave", clear);
+	el.addEventListener("drop", (e) => {
+		if (!micaDrag || micaDrag.kind !== kind) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const toIndex = el.hasClass("mica-drop-after") ? selfIndex + 1 : selfIndex;
+		const from = micaDrag.from;
+		clear();
+		micaDrag = null;
+		ctx.editable?.apply({ op: "moveNode", from, toParent: parentPath, toIndex });
+	});
+}
+
 function renderRegion(
 	el: HTMLElement,
 	ctx: RenderCtx,
@@ -285,6 +350,8 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				e.stopPropagation();
 				ctx.editable?.apply({ op: "deleteTab", path, index: x.idx });
 			});
+			makeDraggable(chip, [...path, x.idx], "tab"); // drag to reorder / move between groups
+			makeDropTarget(chip, ctx, "tab", path, x.idx);
 		}
 		const panel = panels.createDiv({ cls: "mica-tab-panel", attr: { role: "tabpanel" } });
 		renderTabBody(tab, panel, ctx, [...path, x.idx], revealTab === k);
@@ -374,6 +441,15 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		const cell = grid.createDiv({ cls: "mica-cell" });
 		renderNodes(c.children, cell, ctx, cellPath, { autoOpen: takeRegionReveal(ctx, cellPath) });
 		if (ctx.editable) {
+			// Drag handle keeps dragging from fighting click-to-edit; the cell is the
+			// drop target (reorder within, or move across, grids).
+			const drag = cell.createEl("button", {
+				cls: "mica-cell-drag",
+				text: "⠿",
+				attr: { type: "button", "aria-label": "Move cell", title: "Drag to move this cell" },
+			});
+			makeDraggable(drag, cellPath, "cell");
+			makeDropTarget(cell, ctx, "cell", path, idx);
 			cell.createEl("button", {
 				cls: "mica-cell-x",
 				text: "×",
