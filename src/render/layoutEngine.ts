@@ -580,7 +580,7 @@ function buildFooter(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo, repaint: 
 
 	const pill = bar.createEl("button", {
 		cls: `mica-auto ${on ? "is-on" : "is-off"}`,
-		text: on ? "⏺ Auto" : "⏸ Manual",
+		text: on ? "Auto" : "Manual", // the state color is a CSS dot (::before), not an emoji
 		attr: { type: "button", title: on ? "Auto-save is on. Click for manual." : "Manual. Click to auto-save." },
 	});
 	pill.addEventListener("click", async () => {

@@ -42,6 +42,9 @@ body {
 }
 
 .mica {
+	/* A defined card surface — legible even over a translucent theme, rather
+	 * than floating content on the note/wallpaper background. */
+	background: var(--background-primary);
 	border: 1px solid var(--mica-border);
 	border-radius: var(--mica-radius);
 	overflow: hidden;
@@ -430,8 +433,7 @@ body {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	padding: 4px 12px 8px;
-	border-top: 1px solid var(--mica-border);
+	padding: 2px 12px 8px;
 }
 
 .mica-stepper {
@@ -566,81 +568,78 @@ body {
 	margin: 0.5em 0;
 }
 
-/* ---------- Footer: auto-save toggle + version chip ---------- */
+/* ---------- Footer: a quiet status line (not a toolbar) ---------- */
 
 /*
- * Footer row: all items use --mica-ctrl-h so the pill, the interval chip, the
- * "Save version" button and the version chip are all the same height and
- * baseline-aligned without needing per-element padding hacks.
+ * Flat: no separate tray background — the footer sits on the block's own
+ * surface, separated by a single hairline. Controls are borderless and muted,
+ * so this reads as a calm status line rather than a bar of buttons.
  */
 .mica-footer {
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	padding: 4px 8px;
+	gap: 2px;
+	padding: 3px 6px 3px 8px;
 	border-top: 1px solid var(--mica-border);
-	background: var(--mica-tab-bg);
+	font-size: var(--font-ui-smaller);
 }
 
 .mica-footer-spacer {
 	flex: 1 1 auto;
 }
 
-/* Auto-save pill — just "⏺ Auto" or "⏸ Manual". */
-.mica-auto {
-	display: inline-flex;
-	align-items: center;
-	gap: 5px;
-	height: var(--mica-ctrl-h);
-	border: 1px solid var(--mica-border);
-	border-radius: 99px; /* capsule */
-	padding: 0 10px;
-	background: transparent;
-	color: var(--text-muted);
-	cursor: pointer;
-	font-size: var(--font-ui-smaller);
-	white-space: nowrap;
-	transition:
-		background 0.1s,
-		color 0.1s,
-		border-color 0.1s;
-}
-
-.mica-auto.is-on {
-	color: var(--mica-diff-add);
-	border-color: color-mix(in srgb, var(--mica-diff-add) 45%, var(--mica-border));
-	background: color-mix(in srgb, var(--mica-diff-add) 10%, transparent);
-}
-
-.mica-auto.is-off {
-	color: var(--mica-diff-del);
-	border-color: color-mix(in srgb, var(--mica-diff-del) 45%, var(--mica-border));
-	background: color-mix(in srgb, var(--mica-diff-del) 10%, transparent);
-}
-
-/* Interval chip ("5s") and "Save version" — same geometry as version chip. */
+/*
+ * Every footer control shares one calm treatment: borderless, muted, with a
+ * subtle hover background — no filled pills competing with the content.
+ */
+.mica-auto,
 .mica-auto-secs,
-.mica-save-now {
+.mica-save-now,
+.mica-chip {
 	display: inline-flex;
 	align-items: center;
 	height: var(--mica-ctrl-h);
-	border: 1px solid var(--mica-border);
+	padding: 0 8px;
+	border: none;
 	border-radius: var(--mica-ctrl-radius);
-	padding: 0 var(--mica-ctrl-pad-x);
 	background: transparent;
 	color: var(--text-muted);
 	cursor: pointer;
 	font-size: var(--font-ui-smaller);
 	white-space: nowrap;
 	transition:
-		background 0.1s,
-		color 0.1s;
+		background 0.12s,
+		color 0.12s;
 }
 
+.mica-auto:hover,
 .mica-auto-secs:hover,
-.mica-save-now:hover {
+.mica-save-now:hover,
+.mica-chip:hover {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
+}
+
+/* Auto-save state is a small colored dot, not a bright capsule. */
+.mica-auto {
+	gap: 6px;
+}
+
+.mica-auto::before {
+	content: "";
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--text-faint);
+	transition: background 0.12s;
+}
+
+.mica-auto.is-on::before {
+	background: var(--mica-diff-add);
+}
+
+.mica-auto.is-off::before {
+	background: var(--mica-diff-del);
 }
 
 /* Interval inline input — replaces the chip in place. */
@@ -657,33 +656,9 @@ body {
 	color: var(--text-normal);
 }
 
-/* Version chip — consistent with mica-auto-secs. */
-.mica-chip {
-	display: inline-flex;
-	align-items: center;
-	height: var(--mica-ctrl-h);
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	background: transparent;
-	border: 1px solid var(--mica-border);
-	border-radius: var(--mica-ctrl-radius);
-	padding: 0 var(--mica-ctrl-pad-x);
-	cursor: pointer;
-	white-space: nowrap;
-	transition:
-		background 0.1s,
-		color 0.1s,
-		border-color 0.1s;
-}
-
-.mica-chip:hover {
-	color: var(--text-normal);
-	background: var(--background-modifier-hover);
-}
-
+/* A dirty block glows its version chip in the accent (the "●" is added in JS). */
 .mica-chip.is-dirty {
 	color: var(--mica-accent);
-	border-color: var(--mica-accent);
 }
 
 /* ---------- Diff ---------- */
