@@ -1,4 +1,4 @@
-import { App, Component, MarkdownRenderer, Notice, TFile } from "obsidian";
+import { App, Component, MarkdownRenderer, Notice, setIcon, TFile } from "obsidian";
 import type MicaPlugin from "../main";
 import { contentSignature, type Cst, type MicaNode } from "../wasm/bridge";
 import { readObject } from "../storage/sidecar";
@@ -41,6 +41,13 @@ export interface RenderCtx {
 
 type Container = Extract<MicaNode, { kind: "container" }>;
 type Leaf = Extract<MicaNode, { kind: "leaf" }>;
+
+/** A square icon button (Lucide via setIcon) with an accessible label. */
+function iconButton(parent: HTMLElement, cls: string, icon: string, label: string): HTMLButtonElement {
+	const b = parent.createEl("button", { cls, attr: { type: "button", "aria-label": label, title: label } });
+	setIcon(b, icon);
+	return b;
+}
 
 const pathKey = (path: number[]): string => path.join(",");
 const samePath = (a: number[], b: number[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -339,11 +346,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				e.preventDefault();
 				startRename(chip, btn, ctx, path, x.idx, tab.title);
 			});
-			chip.createEl("button", {
-				cls: "mica-chip-x",
-				text: "×",
-				attr: { type: "button", "aria-label": "Delete tab", title: "Delete tab" },
-			}).addEventListener("click", (e) => {
+			iconButton(chip, "mica-chip-x", "x", "Delete tab").addEventListener("click", (e) => {
 				e.stopPropagation();
 				ctx.editable?.apply({ op: "deleteTab", path, index: x.idx });
 			});
@@ -359,11 +362,9 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	if (ctx.editable) {
 		// The "+" sits right after the last tab (inside the scrollable row), so it is
 		// always next to the rightmost tab; when tabs overflow it scrolls with them.
-		nav.createEl("button", {
-			cls: "mica-add mica-tab-add",
-			text: "+",
-			attr: { type: "button", "aria-label": "Add tab", title: "Add a tab" },
-		}).addEventListener("click", () => ctx.editable?.apply({ op: "insertTab", path, at: node.children.length }));
+		iconButton(nav, "mica-add mica-tab-add", "plus", "Add a tab").addEventListener("click", () =>
+			ctx.editable?.apply({ op: "insertTab", path, at: node.children.length }),
+		);
 		// The group-delete × stays sticky so it's reachable no matter how many tabs.
 		const sticky = navOuter.createDiv({ cls: "mica-tab-nav-sticky" });
 		mkGroupDelete(sticky, ctx, node, path, "tab group");
@@ -442,18 +443,10 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		if (ctx.editable) {
 			// Drag handle keeps dragging from fighting click-to-edit; the cell is the
 			// drop target (reorder within, or move across, grids).
-			const drag = cell.createEl("button", {
-				cls: "mica-cell-drag",
-				text: "⠿",
-				attr: { type: "button", "aria-label": "Move cell", title: "Drag to move this cell" },
-			});
+			const drag = iconButton(cell, "mica-cell-drag", "grip-vertical", "Drag to move this cell");
 			makeDraggable(drag, cellPath, "cell");
 			makeDropTarget(cell, ctx, "cell", path, idx);
-			cell.createEl("button", {
-				cls: "mica-cell-x",
-				text: "×",
-				attr: { type: "button", "aria-label": "Delete cell", title: "Delete cell" },
-			}).addEventListener("click", (e) => {
+			iconButton(cell, "mica-cell-x", "x", "Delete cell").addEventListener("click", (e) => {
 				e.stopPropagation();
 				ctx.editable?.apply({ op: "deleteCell", path, index: idx });
 			});
@@ -475,11 +468,9 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 function stepper(bar: HTMLElement, label: string, value: number, onChange: (n: number) => void): void {
 	const s = bar.createDiv({ cls: "mica-stepper" });
 	s.createEl("span", { cls: "mica-stepper-label", text: label });
-	s.createEl("button", {
-		cls: "mica-step",
-		text: "−",
-		attr: { type: "button", "aria-label": "Fewer columns" },
-	}).addEventListener("click", () => onChange(Math.max(1, value - 1)));
+	iconButton(s, "mica-step", "minus", "Fewer columns").addEventListener("click", () =>
+		onChange(Math.max(1, value - 1)),
+	);
 	// The number is clickable — type a value directly instead of only ± .
 	const val = s.createEl("button", {
 		cls: "mica-stepper-val",
@@ -511,11 +502,7 @@ function stepper(bar: HTMLElement, label: string, value: number, onChange: (n: n
 		});
 		input.addEventListener("blur", commit);
 	});
-	s.createEl("button", {
-		cls: "mica-step",
-		text: "+",
-		attr: { type: "button", "aria-label": "More columns" },
-	}).addEventListener("click", () => onChange(value + 1));
+	iconButton(s, "mica-step", "plus", "More columns").addEventListener("click", () => onChange(value + 1));
 }
 
 /** True if any descendant leaf carries non-empty prose. */
@@ -526,11 +513,7 @@ function nodeHasContent(node: MicaNode): boolean {
 
 /** A hover-revealed "×" that deletes a whole group; confirms first if non-empty. */
 function mkGroupDelete(host: HTMLElement, ctx: RenderCtx, node: Container, path: number[], label: string): void {
-	host.createEl("button", {
-		cls: "mica-group-x",
-		text: "×",
-		attr: { type: "button", "aria-label": `Delete ${label}`, title: `Delete ${label}` },
-	}).addEventListener("click", (e) => {
+	iconButton(host, "mica-group-x", "trash-2", `Delete ${label}`).addEventListener("click", (e) => {
 		e.stopPropagation();
 		if (nodeHasContent(node) && !window.confirm(`Delete this ${label} and everything in it?`)) return;
 		ctx.editable?.apply({ op: "deleteNode", path });
@@ -540,11 +523,7 @@ function mkGroupDelete(host: HTMLElement, ctx: RenderCtx, node: Container, path:
 /** A quiet, contextual "+" that reveals "Tabs / Grid" — inserts a group here. */
 function renderInsert(el: HTMLElement, ctx: RenderCtx, path: number[], at: number): void {
 	const bar = el.createDiv({ cls: "mica-insert" });
-	const toggle = bar.createEl("button", {
-		cls: "mica-insert-toggle",
-		text: "+",
-		attr: { type: "button", "aria-label": "Insert a group", title: "Insert a tab group or grid here" },
-	});
+	const toggle = iconButton(bar, "mica-insert-toggle", "plus", "Insert a tab group or grid here");
 	const menu = bar.createDiv({ cls: "mica-insert-menu" });
 	menu.createEl("button", {
 		cls: "mica-insert-btn",
@@ -644,16 +623,15 @@ function editInterval(bar: HTMLElement, iv: HTMLElement, plugin: MicaPlugin, rep
 }
 
 function renderVersionChip(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo): void {
-	const btn = bar.createEl("button", {
-		cls: "mica-chip",
-		text: "v…",
-		attr: { type: "button", "aria-label": "Version history" },
-	});
+	const btn = bar.createEl("button", { cls: "mica-chip", attr: { type: "button", "aria-label": "Version history" } });
+	setIcon(btn.createSpan({ cls: "mica-chip-icon" }), "history");
+	const count = btn.createSpan({ cls: "mica-chip-count", text: "…" });
+	btn.createSpan({ cls: "mica-chip-dot" }); // dirty indicator (shown via .is-dirty)
 	btn.addEventListener("click", () => new DiffModal(chip.plugin, chip.file, chip.blockId).open());
 	const refresh = async (): Promise<void> => {
 		try {
 			const state = (await chip.plugin.engine.state(chip.file))[chip.blockId];
-			const count = state?.versions.length ?? 0;
+			const n = state?.versions.length ?? 0;
 			const sig = contentSignature(chip.content);
 			let dirty: boolean;
 			if (state?.head) {
@@ -662,10 +640,14 @@ function renderVersionChip(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo): vo
 			} else {
 				dirty = sig !== contentSignature("");
 			}
-			btn.setText(`v${count}${dirty ? " ●" : ""}`);
+			count.setText(String(n));
+			btn.setAttr(
+				"aria-label",
+				`Version history — ${n} version${n === 1 ? "" : "s"}${dirty ? ", unsaved changes" : ""}`,
+			);
 			btn.toggleClass("is-dirty", dirty);
 		} catch {
-			btn.setText("v?");
+			count.setText("?");
 		}
 	};
 	void refresh();

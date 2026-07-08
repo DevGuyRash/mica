@@ -36,9 +36,12 @@ body {
 	--mica-tab-gap: 6px;
 }
 
-/* The inline "+ add tab" sits with the chips; center it in the stretched nav. */
+/* The inline "+ add tab": a square icon button, centered in the stretched nav. */
 .mica-tab-add {
 	align-self: center;
+	width: var(--mica-ctrl-h);
+	padding: 0;
+	justify-content: center;
 }
 
 .mica {
@@ -48,6 +51,13 @@ body {
 	border: 1px solid var(--mica-border);
 	border-radius: var(--mica-radius);
 	overflow: hidden;
+}
+
+/* Lucide icons inside controls — crisp and uniformly sized (replaces the old
+ * unicode grab-bag of ×, ⠿, +, −). */
+.mica button .svg-icon {
+	width: 15px;
+	height: 15px;
 }
 
 /* ---------- Tabs ---------- */
@@ -122,9 +132,17 @@ body {
 }
 
 .mica-tab-btn.is-active {
+	position: relative;
+	z-index: 1;
 	color: var(--mica-tab-fg-active);
+	font-weight: 600;
 	background: var(--mica-tab-bg-active);
-	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	/* Accent bar on top; extend 1px down to cover the nav's bottom border so the
+	 * active tab reads as connected to the panel below (architectural, not a
+	 * floating button). */
+	box-shadow: inset 0 2px 0 0 var(--mica-accent);
+	margin-bottom: -1px;
+	padding-bottom: 7px;
 }
 
 /*
@@ -581,6 +599,10 @@ body {
 	gap: 2px;
 	padding: 3px 6px 3px 8px;
 	border-top: 1px solid var(--mica-border);
+	/* Recessed chrome surface (matches the tab header) so the card reads as
+	 * chrome / content / chrome — depth via tone, not just hairlines. Controls
+	 * on top stay borderless and quiet. */
+	background: var(--mica-tab-bg);
 	font-size: var(--font-ui-smaller);
 }
 
@@ -656,9 +678,42 @@ body {
 	color: var(--text-normal);
 }
 
-/* A dirty block glows its version chip in the accent (the "●" is added in JS). */
+/* Version chip: a history icon + count — the block's history, made present
+ * rather than hidden behind a gray "v". */
+.mica-chip {
+	gap: 5px;
+}
+
+.mica-chip-icon {
+	display: inline-flex;
+	color: var(--text-faint);
+	transition: color 0.12s;
+}
+
+.mica-chip-count {
+	font-variant-numeric: tabular-nums;
+}
+
+/* Unsaved-changes dot — only shown when dirty. */
+.mica-chip-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--mica-accent);
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+
 .mica-chip.is-dirty {
+	color: var(--text-normal);
+}
+
+.mica-chip.is-dirty .mica-chip-icon {
 	color: var(--mica-accent);
+}
+
+.mica-chip.is-dirty .mica-chip-dot {
+	opacity: 1;
 }
 
 /* ---------- Diff ---------- */
