@@ -4,14 +4,15 @@ import type { EditorState, Extension } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { blockContentEdit, nodeAtPath, parseBlock, scanBlocksView, serializeCst, type BlockView } from "../wasm/bridge";
+import { nodeAtPath, parseBlock, scanBlocksView, serializeCst, type BlockView } from "../wasm/bridge";
 import { renderCst } from "../render/layoutEngine";
 
 /**
  * The rendered widget shown in place of a ` ```mica ` block in Live Preview.
- * `eq()` keyed on (id, content) lets CodeMirror reuse the DOM across unrelated
- * keystrokes. Editing a tab dispatches a live-recomputed change (never a cached
- * offset), so it can't corrupt the document.
+ * Editing a tab dispatches a change whose bounds are recomputed from a live
+ * re-scan at save time (located by id when present, else by the block's start
+ * position), so it can't corrupt the document and works even before a block has
+ * an id.
  */
 class MicaWidget extends WidgetType {
 	private child: MarkdownRenderChild | null = null;
@@ -19,6 +20,7 @@ class MicaWidget extends WidgetType {
 	constructor(
 		private readonly plugin: MicaPlugin,
 		private readonly id: string | null,
+		private readonly start: number,
 		private readonly content: string,
 	) {
 		super();
@@ -34,8 +36,6 @@ class MicaWidget extends WidgetType {
 		const child = new MarkdownRenderChild(el);
 		this.child = child;
 		this.plugin.addChild(child);
-		// Resolve the note this editor actually hosts (correct across split
-		// panes/popouts, where getActiveFile() may point elsewhere).
 		const info = view.state.field(editorInfoField, false);
 		const chip =
 			this.plugin.settings.showVersionChip && this.id && info?.file
@@ -45,30 +45,27 @@ class MicaWidget extends WidgetType {
 			app: this.plugin.app,
 			sourcePath: info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "",
 			component: child,
-			editable: this.id ? { save: (path, title, text) => this.save(view, path, title, text) } : undefined,
+			editable: { save: (path, title, text) => this.save(view, path, title, text) },
 			chip,
 		});
 		return el;
 	}
 
 	private save(view: EditorView, path: number[], expectedTitle: string, newText: string): void {
-		if (!this.id) return;
 		const doc = view.state.doc.toString();
-		const live = scanBlocksView(doc).find((b) => b.id === this.id);
+		const live = scanBlocksView(doc).find((b) => (this.id ? b.id === this.id : b.start === this.start));
 		if (!live) return;
 		const cst = parseBlock(doc.slice(live.content_start, live.content_end));
 		const target = nodeAtPath(cst, path);
-		// The path was captured at render time; if the block changed underneath
-		// (sync, bridge, revert), the same indices may now point at a DIFFERENT
-		// node. Verify identity before writing — never write to a guessed node.
+		// The path was captured at render time; verify the tab still has the same
+		// identity before writing — never write to a guessed node.
 		if (!target || target.kind !== "container" || target.name !== "tab" || target.title !== expectedTitle) {
 			console.warn("Mica: tab changed underneath the editor; save aborted (re-open to edit).");
 			return;
 		}
 		target.children = parseBlock(newText).children;
-		const change = blockContentEdit(doc, this.id, serializeCst(cst));
-		if (!change) return;
-		view.dispatch({ changes: { from: change.from, to: change.to, insert: change.insert } });
+		// Dispatch against the LIVE content range (UTF-16 offsets from the re-scan).
+		view.dispatch({ changes: { from: live.content_start, to: live.content_end, insert: serializeCst(cst) } });
 	}
 
 	destroy(): void {
@@ -96,31 +93,29 @@ function scanCached(doc: string): BlockView[] {
 /**
  * Build replace-decorations for every closed ` ```mica ` block not under the
  * cursor. Runs in a StateField (not a ViewPlugin) because CodeMirror only
- * accepts block-level decorations when they are provided directly — a
- * ViewPlugin doing this throws "Block decorations may not be specified via
- * plugins" and takes the whole MarkdownView down with it.
+ * accepts block-level decorations when they are provided directly.
  */
 function build(plugin: MicaPlugin, state: EditorState): DecorationSet {
 	if (!state.field(editorLivePreviewField, false)) return Decoration.none;
 	const doc = state.doc.toString();
 	const sel = state.selection.main;
-	const decorations: { from: number; to: number; deco: Decoration }[] = [];
+	const ranges = [];
 	for (const b of scanCached(doc)) {
 		if (!b.closed) continue;
-		// End at the closing fence line's end, not past its newline: block
-		// replace decorations must cover whole lines exactly.
+		// End at the closing fence line's end, not past its newline: block replace
+		// decorations must cover whole lines exactly.
 		const to = doc.charCodeAt(b.end - 1) === 10 ? b.end - 1 : b.end;
-		// Reveal the raw source while the cursor/selection is inside the block
-		// (clamped range — the line AFTER the block must not count as inside).
+		// Reveal the raw source while the cursor/selection is inside the block.
 		if (sel.from <= to && sel.to >= b.start) continue;
 		const content = doc.slice(b.content_start, b.content_end);
-		decorations.push({
-			from: b.start,
-			to,
-			deco: Decoration.replace({ widget: new MicaWidget(plugin, b.id, content), block: true }),
-		});
+		ranges.push(
+			Decoration.replace({ widget: new MicaWidget(plugin, b.id, b.start, content), block: true }).range(
+				b.start,
+				to,
+			),
+		);
 	}
-	return Decoration.set(decorations.map((d) => d.deco.range(d.from, d.to)));
+	return Decoration.set(ranges, true);
 }
 
 /** The Live Preview editor extension. Registered via `registerEditorExtension`. */

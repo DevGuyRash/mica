@@ -23,28 +23,25 @@ Mica isn't in the community-plugin store yet, so install it manually:
 
 ## Quick start
 
-**1. Make a block.** Create a note and paste this:
+**1. Make a block.** Create a note and paste this — a `tab:` line starts each tab, and you never close anything:
 
 ````markdown
 ```mica
-:::tabs
-:::tab Overview
-This is the **first** tab — regular Markdown works here: lists, links, code, and callouts.
+tab: Overview
+This is the **first** tab. Regular Markdown works: lists, links, code, callouts.
 
 > [!tip] Callouts render normally inside tabs.
-:::
-:::tab Details
-Second tab. Switch between tabs by clicking the tab bar (or arrow-keys when focused).
-:::
-:::
+
+tab: Details
+The second tab. Click the tab bar to switch (or arrow keys when focused).
 ```
 ````
 
 Switch to **Reading view** or **Live Preview** and you'll see a tabbed block.
 
-**2. Turn on versioning.** Run the command **`Mica: Prepare note for Mica (add ids)`** (Ctrl/Cmd-P → type "Mica"). This stamps each block with a stable id and adds a `mica-id` to the note's frontmatter. Now every save snapshots your blocks.
+**2. Edit it.** In **Live Preview**, click into the block to edit the raw Markdown directly — or, when your cursor is elsewhere, click the small **✎ Edit** under a tab to edit just that tab. Either way it can't corrupt the note.
 
-**3. Edit and compare.** In Live Preview, click **✎ Edit** on a tab to edit it in place. After a couple of edits, click the **`v2 ●`** chip under the block → the compare window opens with your history.
+**3. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history — no command needed. A **`v2 ●`** chip appears under the block; click it to compare and restore versions.
 
 > **Already using `obsidian-tabs`?** Skip straight to [Migrating](#migrating-from-obsidian-tabs) — one command converts a note (or your whole vault) and turns your manual "archived" callouts into real version history.
 
@@ -52,42 +49,40 @@ Switch to **Reading view** or **Live Preview** and you'll see a tabbed block.
 
 ## Writing blocks
 
-A Mica block is a fenced code block tagged `mica`:
+Make tabs the easy way: inside a ` ```mica ` block, a `tab: Title` line starts each tab, running until the next `tab:`. **You never close anything.**
 
 ````markdown
-```mica id=0192abcd name="Review Instruments"
-… structure goes here …
+```mica
+tab: Kernel
+The Kernel tab — any Markdown works.
+
+tab: Frame Gate
+The Frame Gate tab.
 ```
 ````
 
-- `id=` — a stable UUID (added for you by **Prepare note for Mica**). Versioning and the API address blocks by this id; it survives renames and moves.
-- `name=` — an optional human label (quote it if it has spaces).
+That's the whole syntax for tabs. The extras:
 
-Inside the block, structure uses **colon-fence directives**, so nesting adds colons — never more backticks:
+- **Block header** (optional): ` ```mica id=… name="…" `. The `id` (added automatically) lets versioning and the API follow a block across renames; `name` is a label.
+- **Callouts** — any Obsidian callout (`> [!note]`, `> [!tip]`, `> [!warning]`, …) works, rendered natively.
+- **Grids / menus** — a `:::grid {cols=3}` … `:::` block containing `:::cell` … `:::` cells.
+- **Nesting** (a tab group _inside_ a tab) — the `tab:` shorthand is flat, so for nesting use the explicit form there: `:::tabs` … `:::` with `:::tab Title` … `:::` inside (add colons to go deeper — `::::tabs` wraps `:::tab`). You'll rarely type this by hand: migration generates it, and the ✎ editor edits one tab at a time.
 
-| Directive                  | What it does                                                   |
-| -------------------------- | -------------------------------------------------------------- |
-| `:::tabs` … `:::`          | A tab group.                                                   |
-| `:::tab Title` … `:::`     | One tab (the title shows on the tab bar).                      |
-| `:::grid {cols=3}` … `:::` | A responsive grid / menu.                                      |
-| `:::cell` … `:::`          | One grid cell.                                                 |
-| `> [!note] …`              | Any Obsidian callout — rendered natively, no special handling. |
-
-Everything between the directives is ordinary Markdown. **Nest freely** — a grid of tabs, tabs inside a tab, callouts anywhere. To go deeper, use more colons on the outer container (`::::tabs` wraps `:::tab`), exactly like Obsidian's own fence rules. Mica sizes the outer ` ```mica ` fence for you, so you never count backticks again.
+Everything is ordinary Markdown, and Mica sizes the outer ` ```mica ` fence for you — so you never count backticks.
 
 ### The three view modes
 
 Mica works in all of Obsidian's modes, and you choose per note:
 
 - **Reading view** — fully rendered, read-only tabs/grids; switch tabs, open history.
-- **Live Preview** — rendered tabs you can **edit in place** (the ✎ button). Click _into_ a block to drop to raw source; click away and it re-renders.
+- **Live Preview** — rendered, editable tabs. Click _into_ the block to edit its raw Markdown (friendly `tab:` and all), or click **✎ Edit** on a tab (cursor elsewhere) to edit just that tab.
 - **Source mode** — plain Markdown. Everything round-trips byte-for-byte; nothing is hidden or rewritten behind your back.
 
 ---
 
 ## Versioning
 
-Once a block has an id, Mica keeps its history automatically.
+Mica keeps each block's history automatically — it stamps the block with an id the first time you edit it (or run **Prepare note for Mica** to do it now; turn this off in settings if you prefer manual ids).
 
 - **Auto-snapshots.** A short while after you stop typing, each changed block is snapshotted. Unchanged blocks are never re-stored, so history stays clean.
 - **Where it lives.** Next to `My Note.md`, Mica creates a visible `My Note.mica/` folder holding your version objects (plain Markdown files), an append-only `ledger.jsonl`, and a `manifest.json`. It's human-readable, and it rides Obsidian Sync / Git like any other file.

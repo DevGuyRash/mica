@@ -9,6 +9,8 @@ export interface MicaSettings {
 	defaultDiffMode: "inline" | "side-by-side" | "patch";
 	showVersionChip: boolean;
 	reconcileOnLoad: boolean;
+	/** Auto-stamp a stable id on `mica` blocks so versioning + inline editing just work. */
+	autoAddIds: boolean;
 	/** Comma-separated callout types imported as versions on migration (empty = any). */
 	versionCalloutTypes: string;
 }
@@ -19,6 +21,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	defaultDiffMode: "inline",
 	showVersionChip: true,
 	reconcileOnLoad: true,
+	autoAddIds: true,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 };
 
@@ -69,6 +72,18 @@ export class MicaSettingTab extends PluginSettingTab {
 					await this.micaPlugin.saveSettings();
 				}),
 		);
+
+		new Setting(containerEl)
+			.setName("Automatically add block ids")
+			.setDesc(
+				"Stamp a stable id onto each Mica block shortly after you edit, so version history and the inline editor work without running a command. Turn off if you prefer to add ids manually.",
+			)
+			.addToggle((t) =>
+				t.setValue(this.micaPlugin.settings.autoAddIds).onChange(async (v) => {
+					this.micaPlugin.settings.autoAddIds = v;
+					await this.micaPlugin.saveSettings();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName("Show version chip on blocks")

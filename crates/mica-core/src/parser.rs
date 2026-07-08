@@ -47,7 +47,7 @@ pub enum Node {
 pub fn parse_block_impl(content: &str) -> Cst {
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let mut pos = 0;
-    let (children, _close) = parse_children(&lines, &mut pos, None);
+    let (children, _stop) = parse_children(&lines, &mut pos, None, false);
     Cst { children }
 }
 
@@ -79,47 +79,66 @@ fn write_node(node: &Node, out: &mut String) {
     }
 }
 
-/// Parse children until a closing colon fence of >= `close_colons` is consumed
-/// (when `Some`) or the input is exhausted. Returns the children and the exact
-/// closing line (empty if the container was unterminated / at root).
-fn parse_children(lines: &[&str], pos: &mut usize, close_colons: Option<usize>) -> (Vec<Node>, String) {
+/// Why [`parse_children`] stopped.
+enum Stop {
+    /// Input exhausted.
+    Eof,
+    /// A `:::` closer for the current container was consumed (its exact line).
+    Closed(String),
+    /// A `tab:` delimiter is next (not consumed) — only while parsing a tab body.
+    NextTab,
+    /// A `:::` closer for an ANCESTOR is next (not consumed) — only in a tab body.
+    AncestorClose,
+}
+
+/// Parse children until the current scope ends. Handles two tab syntaxes:
+/// the friendly, closer-free `tab: Title` delimiters (which auto-close at the
+/// next `tab:`, an enclosing `:::`, or end of block) and the explicit `:::`
+/// colon-fence directives used for nesting. Code fences are opaque.
+fn parse_children(lines: &[&str], pos: &mut usize, close_colons: Option<usize>, in_tab_body: bool) -> (Vec<Node>, Stop) {
     let mut children = Vec::new();
     let mut md = String::new();
-    let mut close_line = String::new();
 
     while *pos < lines.len() {
         let line = lines[*pos];
         let text = trim_eol(line);
 
-        // 1. A closing fence for the current container?
+        // 1. A closing fence for the current (or, in a tab body, an ancestor) container?
         if let Some(cc) = close_colons {
             if let Some(n) = colon_close_len(text) {
                 if n >= cc {
+                    flush_md(&mut children, &mut md);
+                    if in_tab_body {
+                        return (children, Stop::AncestorClose); // belongs to an ancestor
+                    }
                     *pos += 1;
-                    close_line = line.to_string();
-                    break;
+                    return (children, Stop::Closed(line.to_string()));
                 }
             }
         }
 
-        // 2. A colon-fence directive opens a nested container.
+        // 2. A `tab:` delimiter — the friendly, closer-free tab syntax.
+        if tab_delim(text).is_some() {
+            flush_md(&mut children, &mut md);
+            if in_tab_body {
+                return (children, Stop::NextTab); // end this tab; leave the delimiter
+            }
+            children.push(collect_delim_tabs(lines, pos, close_colons));
+            continue;
+        }
+
+        // 3. A colon-fence directive opens a nested container (explicit nesting).
         if let Some((colons, name, title)) = colon_open(text) {
             flush_md(&mut children, &mut md);
             let open_line = line.to_string();
             *pos += 1;
-            let (kids, close) = parse_children(lines, pos, Some(colons));
-            children.push(Node::Container {
-                name,
-                title,
-                colons,
-                open_line,
-                children: kids,
-                close_line: close,
-            });
+            let (kids, stop) = parse_children(lines, pos, Some(colons), false);
+            let close_line = if let Stop::Closed(l) = stop { l } else { String::new() };
+            children.push(Node::Container { name, title, colons, open_line, children: kids, close_line });
             continue;
         }
 
-        // 3. A code fence opens an opaque code leaf (colons inside are inert).
+        // 4. A code fence opens an opaque code leaf (colons/tabs inside are inert).
         if let Some((fc, fl)) = code_open(text) {
             flush_md(&mut children, &mut md);
             let mut code = String::from(line);
@@ -132,20 +151,58 @@ fn parse_children(lines: &[&str], pos: &mut usize, close_colons: Option<usize>) 
                     break;
                 }
             }
-            children.push(Node::Leaf {
-                text: code,
-                is_code: true,
-            });
+            children.push(Node::Leaf { text: code, is_code: true });
             continue;
         }
 
-        // 4. Ordinary markdown content.
+        // 5. Ordinary markdown content.
         md.push_str(line);
         *pos += 1;
     }
 
     flush_md(&mut children, &mut md);
-    (children, close_line)
+    (children, Stop::Eof)
+}
+
+/// Collect a run of consecutive `tab:` sections into an implicit `tabs`
+/// container. Each tab auto-closes at the next `tab:`, at an enclosing `:::`
+/// closer, or at end of block — no closing fence required. The `tabs` group
+/// and each `tab` are synthetic (empty open/close lines), so serialization
+/// reproduces exactly the original `tab:` lines and bodies.
+fn collect_delim_tabs(lines: &[&str], pos: &mut usize, close_colons: Option<usize>) -> Node {
+    let mut tabs = Vec::new();
+    while *pos < lines.len() {
+        let Some(name) = tab_delim(trim_eol(lines[*pos])) else {
+            break;
+        };
+        let open_line = lines[*pos].to_string();
+        *pos += 1;
+        let (body, stop) = parse_children(lines, pos, close_colons, true);
+        tabs.push(Node::Container {
+            name: "tab".to_string(),
+            title: name,
+            colons: 0,
+            open_line,
+            children: body,
+            close_line: String::new(),
+        });
+        if !matches!(stop, Stop::NextTab) {
+            break; // Eof or an ancestor's closer ends the group
+        }
+    }
+    Node::Container {
+        name: "tabs".to_string(),
+        title: String::new(),
+        colons: 0,
+        open_line: String::new(),
+        children: tabs,
+        close_line: String::new(),
+    }
+}
+
+/// `tab: Title` at column 0 → `Title` — the friendly, closer-free delimiter.
+fn tab_delim(text: &str) -> Option<String> {
+    Some(text.strip_prefix("tab:")?.trim().to_string())
 }
 
 fn flush_md(children: &mut Vec<Node>, md: &mut String) {
@@ -294,6 +351,51 @@ mod tests {
             }
             _ => panic!("expected grid"),
         }
+    }
+
+    #[test]
+    fn friendly_tab_delimiters_need_no_closers() {
+        let src = "tab: Kernel\nkernel body\n\ntab: Frame Gate\nframe body\n";
+        roundtrips(src);
+        let cst = parse_block_impl(src);
+        assert_eq!(cst.children.len(), 1);
+        let tabs = as_container(&cst.children[0], "tabs");
+        assert_eq!(tab_titles(tabs), vec!["Kernel", "Frame Gate"]);
+    }
+
+    #[test]
+    fn content_before_first_tab_delimiter_is_a_leaf() {
+        let src = "intro paragraph\n\ntab: A\nbody a\n";
+        roundtrips(src);
+        let cst = parse_block_impl(src);
+        assert!(matches!(&cst.children[0], Node::Leaf { .. }));
+        assert_eq!(tab_titles(as_container(&cst.children[1], "tabs")), vec!["A"]);
+    }
+
+    #[test]
+    fn tab_delimiter_body_can_hold_a_nested_directive_group() {
+        // Friendly outer tabs; explicit :::tabs only where nesting is needed.
+        let src = "tab: Outer\n:::tabs\n:::tab Inner\ndeep\n:::\n:::\n";
+        roundtrips(src);
+        let cst = parse_block_impl(src);
+        let tabs = as_container(&cst.children[0], "tabs");
+        let outer = tabs
+            .iter()
+            .find_map(|n| match n {
+                Node::Container { name, children, .. } if name == "tab" => Some(children.as_slice()),
+                _ => None,
+            })
+            .expect("outer tab");
+        assert_eq!(tab_titles(find(outer, "tabs")), vec!["Inner"]);
+    }
+
+    #[test]
+    fn tab_colon_not_matched_when_indented_or_different_word() {
+        // Only `tab:` at column 0 is a delimiter — not "tabs:" nor indented text.
+        let src = "tabs: not a delimiter\n  tab: indented\n";
+        let cst = parse_block_impl(src);
+        assert!(cst.children.iter().all(|n| matches!(n, Node::Leaf { .. })));
+        roundtrips(src);
     }
 
     #[test]

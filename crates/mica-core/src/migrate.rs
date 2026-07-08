@@ -103,22 +103,20 @@ fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock
     let block_name = tabs.first().map(|(n, _)| n.clone());
     let versions = tabs.iter().flat_map(|(_, b)| extract_versions(b, allowed_callouts)).collect();
 
+    // Emit the friendly, closer-free `tab:` form — the obsidian-tabs feel.
     let mut inner = preamble;
     if !inner.is_empty() && !inner.ends_with('\n') {
         inner.push('\n');
     }
-    inner.push_str(":::tabs\n");
     for (n, b) in &tabs {
-        inner.push_str(":::tab ");
+        inner.push_str("tab: ");
         inner.push_str(n);
         inner.push('\n');
         inner.push_str(b); // verbatim body — blank lines and dividers preserved
         if !b.is_empty() && !b.ends_with('\n') {
             inner.push('\n');
         }
-        inner.push_str(":::\n");
     }
-    inner.push_str(":::\n");
 
     let run = max_fence_run(&inner);
     let fence = "`".repeat(if run == 0 { 3 } else { run + 1 });
@@ -247,9 +245,9 @@ mod tests {
         assert_eq!(r.blocks.len(), 1);
         assert_eq!(r.blocks[0].name.as_deref(), Some("A"));
         assert_eq!(scan_impl(&r.doc).len(), 1);
-        assert!(r.doc.contains(":::tabs"));
-        assert!(r.doc.contains(":::tab A"));
-        assert!(r.doc.contains(":::tab B"));
+        assert!(r.doc.contains("tab: A"));
+        assert!(r.doc.contains("tab: B"));
+        assert!(!r.doc.contains(":::"), "friendly output uses no colon fences");
         assert!(r.doc.contains("hello") && r.doc.contains("world"));
         assert!(r.doc.starts_with("before\n"));
         assert!(r.doc.trim_end().ends_with("after"));
@@ -277,17 +275,17 @@ mod tests {
         let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.changed);
         assert!(r.doc.contains("PREAMBLE KEEP ME"), "preamble must survive: {}", r.doc);
-        // Preamble sits before the tabs container, inside the mica block.
+        // Preamble sits before the first tab, inside the mica block.
         let pre = r.doc.find("PREAMBLE").unwrap();
-        let tabs = r.doc.find(":::tabs").unwrap();
-        assert!(pre < tabs);
+        let first_tab = r.doc.find("tab: A").unwrap();
+        assert!(pre < first_tab);
     }
 
     #[test]
     fn tab_bodies_are_copied_verbatim_including_blank_runs() {
         let doc = "```tabs\ntab: A\nline\n\n\n%% divider %%\n\ntab: B\nx\n```\n";
         let r = migrate_tabs_impl(doc, "success, bug, todo");
-        assert!(r.doc.contains("line\n\n\n%% divider %%\n\n:::"), "blank runs preserved: {}", r.doc);
+        assert!(r.doc.contains("line\n\n\n%% divider %%\n\n"), "blank runs preserved: {}", r.doc);
     }
 
     #[test]

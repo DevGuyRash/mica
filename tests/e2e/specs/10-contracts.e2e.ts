@@ -97,8 +97,9 @@ describe("runtime contracts (window.mica)", function () {
 
 		const doc = await readNote("Legacy Tabs.md");
 		expect(doc).not.toContain("`````tabs");
-		expect(doc).toContain(":::tab Kernel");
-		expect(doc).toContain(":::tab Frame Gate");
+		expect(doc).toContain("tab: Kernel"); // friendly, closer-free syntax
+		expect(doc).toContain("tab: Frame Gate");
+		expect(doc).not.toContain(":::"); // no colon-fence scaffolding
 		expect(doc).toContain("> ````md"); // callout-quoted inner fence preserved verbatim
 		expect(doc).toContain("LOYALTY. Your only loyalty");
 		expect(doc).toContain("Prose before the block.");

@@ -1,17 +1,15 @@
 import { browser, expect, $, $$ } from "@wdio/globals";
 
+// Friendly, closer-free `tab:` syntax — the primary way users write blocks.
 const NOTE = [
 	"Leading paragraph so the cursor starts outside the block.",
 	"",
 	"```mica id=blk-ui-1",
-	":::tabs",
-	":::tab One",
+	"tab: One",
 	"first tab body",
-	":::",
-	":::tab Two",
+	"",
+	"tab: Two",
 	"second tab body",
-	":::",
-	":::",
 	"```",
 	"",
 	"Trailing paragraph.",

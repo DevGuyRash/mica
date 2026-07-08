@@ -1,15 +1,16 @@
 import { browser, expect } from "@wdio/globals";
 
-// tabs → tab B → grid → cell → tabs → (B1, B2): a tab-grid within a tab group.
+// Friendly outer tabs (`tab:`); explicit `:::` only for the nested grid+tabs
+// inside tab B — proving the two syntaxes compose (flat is effortless, nesting
+// is possible).
 const NESTED = [
 	"Lead paragraph.",
 	"",
 	"```mica id=blk-nest-1",
-	":::tabs",
-	":::tab A",
+	"tab: A",
 	"outer A",
-	":::",
-	":::tab B",
+	"",
+	"tab: B",
 	":::grid {cols=2}",
 	":::cell",
 	"inner grid cell one",
@@ -25,8 +26,6 @@ const NESTED = [
 	":::", // close inner tabs
 	":::", // close cell 2
 	":::", // close grid
-	":::", // close tab B
-	":::", // close outer tabs
 	"```",
 	"",
 	"Trailing.",

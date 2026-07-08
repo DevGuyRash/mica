@@ -17,17 +17,17 @@ A Mica block is a fenced code block tagged `mica` with a header attribute list:
 ```mica id=&lt;uuidv7&gt; name="…"
 </pre>
 
-Structure inside a block uses **colon-fence directives** (Pandoc/MyST-style), so nesting adds colons, not backticks:
+**Tabs use the friendly, closer-free `tab:` delimiter** — a `tab: Title` line at column 0 starts each tab, running until the next `tab:` (no closing fence). This is the primary syntax and matches the obsidian-tabs feel. For everything else (and for nesting), **colon-fence directives** are available:
 
-- `:::tabs` … `:::` — a tab group. Each tab is `:::tab &lt;Title&gt;` … `:::`.
+- `tab: Title` — the everyday way to write a tab. No closer.
 - `:::grid {cols=3 gap=8}` … `:::` — a grid/menu of `:::cell` … `:::`.
+- `:::tabs` … `:::` with `:::tab Title` … `:::` — the explicit form, used to NEST a tab group inside a tab (the flat `tab:` delimiter can't express nesting). Deeper nesting uses more colons (`::::tabs` wraps `:::tab`).
 - Callouts use Obsidian's native `> [!type]` syntax, unchanged, inside any body.
-- Deeper nesting uses more colons (`::::tabs` wraps `:::tab`), exactly like the CommonMark fence rule.
 
 Rules (testable):
 
 - WHEN Mica serializes a block THEN the outer ` ```mica ` fence length SHALL be strictly greater than every inner code fence it contains.
-- WHEN a block is parsed and re-serialized with no intervening edit THEN the output SHALL equal the input byte-for-byte.
+- WHEN a block is parsed and re-serialized with no intervening edit THEN the output SHALL equal the input byte-for-byte (both `tab:` and `:::` forms).
 - The version marker SHALL NOT live in the block body or title; the block `id` plus the sidecar ledger are the source of truth.
 
 ### Before / after
@@ -44,17 +44,14 @@ tab: Kernel
 `````
 </pre>
 
-Mica (colon-nested, version tracked in history):
+Mica (same friendly `tab:` syntax; version tracked in history, not the title):
 
 <pre>
 ```mica id=0192f4a1-…-7c name="Review Instruments"
-:::tabs
-:::tab Kernel
+tab: Kernel
 > [!success] Review Kernel
 
 …
-:::
-:::
 ```
 </pre>
 

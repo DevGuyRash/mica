@@ -1,6 +1,7 @@
 import { debounce, TFile } from "obsidian";
 import type MicaPlugin from "../main";
 import {
+	ensureIds,
 	foldLedger,
 	hashContent,
 	newId,
@@ -60,8 +61,19 @@ export class VersionEngine {
 
 	private async doSnapshot(file: TFile): Promise<void> {
 		const vault = this.plugin.app.vault;
-		const doc = await vault.read(file);
-		const blocks = scanBlocksView(doc);
+		let doc = await vault.read(file);
+		let blocks = scanBlocksView(doc);
+		if (!blocks.some((b) => b.closed)) return; // no Mica blocks at all
+
+		// Auto-stamp ids so versioning + inline editing work without a command.
+		if (this.plugin.settings.autoAddIds && blocks.some((b) => b.closed && !b.id)) {
+			const next = ensureIds(doc);
+			if (next !== doc) {
+				await vault.modify(file, next);
+				doc = next;
+				blocks = scanBlocksView(doc);
+			}
+		}
 		if (!blocks.some((b) => b.id && b.closed)) return;
 
 		const state = await this.state(file);

@@ -17,7 +17,8 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 
 ## Confirmed defaults (revisit only if needed)
 
-- Authoring syntax: colon-fence directives inside a ` ```mica ` fence.
+- Authoring syntax: friendly closer-free `tab:` delimiters (primary); `:::` colon-fence directives for grids and nesting. Migration emits the `tab:` form.
+- Block ids are auto-stamped on edit (setting `autoAddIds`, default on).
 - `mica-id` is a separate frontmatter field from the existing `uuid`.
 - Edit-a-previous-version defaults to `branch` (parent recorded); no in-place amend.
 

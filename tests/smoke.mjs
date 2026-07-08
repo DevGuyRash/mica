@@ -66,11 +66,13 @@ const legacy =
 	"# Note\n\n`````tabs\ntab: Kernel\n> [!success]- Kernel (V1.0)\n> ````md\n> LOYALTY\n> ````\ntab: Frame\nframe body\n`````\n\ntail\n";
 const mig = migrate_tabs(legacy, "success, bug, todo");
 assert(mig.changed && mig.blocks.length === 1, "migrate produced one block");
-assert(mig.doc.includes(":::tab Kernel") && mig.doc.includes(":::tab Frame"), "tabs -> directives");
+assert(mig.doc.includes("```mica") && !mig.doc.includes("`````tabs"), "converted to a mica block");
+assert(mig.doc.includes("tab: Kernel") && mig.doc.includes("tab: Frame"), "friendly tab: syntax preserved");
+assert(!mig.doc.includes(":::"), "friendly output has no colon-fence scaffolding");
 const idAttr = scan(mig.doc)[0].attrs.find(([k]) => k === "id");
 assert(idAttr, "migrated block has an id");
 
-const grown = ":::tabs\n:::tab Kernel\nMUCH longer\nline2\nline3\n:::\n:::tab Frame\nframe body\n:::\n:::\n";
+const grown = "tab: Kernel\nMUCH longer\nline2\nline3\n\ntab: Frame\nframe body\n";
 const e2 = block_content_edit(mig.doc, idAttr[1], grown);
 assert(e2 && e2.insert === grown, "edit computed");
 const applied = mig.doc.slice(0, e2.from) + e2.insert + mig.doc.slice(e2.to);

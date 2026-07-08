@@ -25,7 +25,7 @@ Every correctness guarantee comes from one discipline repeated at three layers:
 
 ## Rust → WASM core
 
-- A **context-tracking line scanner** (`None` / inside-a-foreign-fence / inside-a-mica-block) delimits blocks in one O(bytes) pass — replacing backtick-counting. Per CommonMark, everything inside any fence is literal until that fence's closer, so a ` ```mica ` example _quoted_ inside a longer documentation fence is never treated as a real block. The serializer guarantees the outer fence is strictly longer than every inner one on write. Colon-fence directives (`:::tabs` / `:::tab` / `:::grid` / `:::cell`) are parsed _inside_ a block by a recursive descent that treats inner code fences as opaque.
+- A **context-tracking line scanner** (`None` / inside-a-foreign-fence / inside-a-mica-block) delimits blocks in one O(bytes) pass — replacing backtick-counting. Per CommonMark, everything inside any fence is literal until that fence's closer, so a ` ```mica ` example _quoted_ inside a longer documentation fence is never treated as a real block. The serializer guarantees the outer fence is strictly longer than every inner one on write. Inside a block, tabs use the friendly closer-free `tab:` delimiter (each `tab:` line auto-closes at the next one); colon-fence directives (`:::tabs` / `:::tab` / `:::grid` / `:::cell`) provide grids and explicit nesting. Both are parsed by one recursive descent that treats inner code fences as opaque and stores exact source strings, so every shape round-trips byte-for-byte.
 - The parse result is a **CST of containers and opaque leaves**; every node stores its exact source strings, so `serialize(parse(x)) == x` byte-for-byte for unedited trees. Leaf content is never re-flowed; Mica parses structure, not markdown inline syntax.
 - **Boundary.** All calls cross via `serde-wasm-bindgen` (structured clone) today; a zero-copy typed-array path is a planned optimization. A full-document scan of the real 711 KB note measures ~0.7 ms. Offsets crossing to CodeMirror are converted to UTF-16 in a single forward pass. The `.wasm` is inlined into `main.js` as a `Uint8Array` (esbuild `binary` loader) and instantiated once.
 
@@ -37,7 +37,7 @@ Every correctness guarantee comes from one discipline repeated at three layers:
 
 ## Editing (corruption-proof)
 
-The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMarkdownEditor` upgrade is planned). Save re-scans the **live** document for the block by id, re-parses it, verifies the target tab's identity (name + title) — refusing to write if the block changed underneath the editor — swaps that tab's children in the CST, re-serializes, and dispatches a `{from,to,insert}` change whose bounds were recomputed at that instant. No cached offset or node path is ever trusted at write time.
+The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMarkdownEditor` upgrade is planned), and always available — no id required. Save re-scans the **live** document for the block (by id, or by its start position before an id exists), re-parses it, verifies the target tab's identity (name + title) — refusing to write if the block changed underneath the editor — swaps that tab's children in the CST, re-serializes, and dispatches a `{from,to,insert}` change whose bounds were recomputed at that instant. No cached offset or node path is ever trusted at write time. Block ids are auto-stamped on the debounced save path (setting-gated) so versioning and the chip appear without any command.
 
 ## Storage & versioning
 
