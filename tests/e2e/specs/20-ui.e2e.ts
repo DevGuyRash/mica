@@ -264,6 +264,25 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(stray.inserts).toBe(0);
 	});
 
+	it("an empty tab shows the write invitation with its icon", async function () {
+		// Leading line so the Live Preview cursor lands OUTSIDE the block (otherwise
+		// the block shows source and the widget — hence the ghost — never renders).
+		await seedAndOpen("Empty.md", "Intro line.\n\n```mica id=eg-1\ntab: Blank\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-ghost").length > 0),
+			{ timeout: 8000, timeoutMsg: "the empty-state ghost never rendered" },
+		);
+		const ghost = await browser.executeObsidian(() => {
+			const g = document.querySelector(".mica-lp .mica-ghost");
+			return {
+				label: g?.querySelector(".mica-ghost-label")?.textContent ?? "",
+				hasIcon: Boolean(g?.querySelector(".mica-ghost-icon svg")),
+			};
+		});
+		expect(ghost.label).toBe("Click to write…"); // the invitation copy is a product contract
+		expect(ghost.hasIcon).toBe(true); // …and it reads as an affordance, not stray text
+	});
+
 	it("deleting the last tab removes the whole group", async function () {
 		await seedAndOpen("DelTab.md", "Intro line.\n\n```mica id=dt-1\ntab: Only\nbody\n```\n", "live");
 		await browser.waitUntil(

@@ -219,7 +219,9 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, md: string): void 
 	if (md.trim()) {
 		renderMarkdown(md, view, ctx);
 	} else if (ctx.editable) {
-		view.createDiv({ cls: "mica-ghost", text: "Click to write…" });
+		const ghost = view.createDiv({ cls: "mica-ghost" });
+		setIcon(ghost.createSpan({ cls: "mica-ghost-icon" }), "pencil-line");
+		ghost.createSpan({ cls: "mica-ghost-label", text: "Click to write…" });
 	}
 	// Clicking anywhere in the region opens the editor (wired once in
 	// renderRegion) — no separate pencil affordance.

@@ -286,9 +286,30 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	background: var(--background-modifier-hover);
 }
 
+/* Empty-region invitation: a calm, accent-aware affordance (not stray text). */
 .mica-ghost {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4em;
+	padding: 0.35em 0.6em;
+	border: 1px dashed var(--mica-border);
+	border-radius: var(--mica-radius);
 	color: var(--text-faint);
 	font-style: italic;
+	transition:
+		color 120ms ease,
+		border-color 120ms ease;
+}
+
+.mica-ghost-icon {
+	display: inline-flex;
+	opacity: 0.8;
+}
+
+/* Lift the invitation when the reader is about to act on the region. */
+.mica-region.is-editable:hover .mica-ghost {
+	color: color-mix(in srgb, var(--mica-accent) 55%, var(--text-muted));
+	border-color: color-mix(in srgb, var(--mica-accent) 45%, var(--mica-border));
 }
 
 .mica-edit-area {
