@@ -8,32 +8,61 @@
  */
 
 body {
-	--mica-radius: 8px;
-	--mica-gap: 8px;
-	--mica-pad: 0.75em 1em;
-	--mica-border: var(--background-modifier-border);
-	--mica-tab-bg: var(--background-secondary);
-	--mica-tab-bg-active: var(--background-primary);
+	/* ---- Identity: ONE accent drives chrome + border tints (see below) ---- */
+	--mica-accent: var(--interactive-accent);
 	--mica-tab-fg: var(--text-muted);
 	--mica-tab-fg-active: var(--text-normal);
-	--mica-accent: var(--interactive-accent);
+	--mica-tab-bg-active: var(--background-primary);
+	/* Chrome (tab header + footer) and borders pick up a hint of the accent so a
+	 * theme change retints the whole card from a single variable. */
+	--mica-tab-bg: color-mix(in srgb, var(--mica-accent) 8%, var(--background-secondary));
+	--mica-border: color-mix(in srgb, var(--mica-accent) 14%, var(--background-modifier-border));
 
 	/* Diff/state colors — fall back to safe hex if a theme omits --color-*. */
 	--mica-diff-add: var(--color-green, #3fb950);
 	--mica-diff-del: var(--color-red, #f85149);
 
-	--mica-content-max-height: none; /* tab/cell scroll cap (set by settings) */
-	--mica-editor-min-height: 3.5em;
-	--mica-editor-max-height: 24em; /* inline editor cap (set by settings) */
-	--mica-diff-max-height: 60vh;
-
-	/* Shared control token — every small button/chip/input targets this height. */
-	--mica-ctrl-h: 22px;
+	/* ---- Shape + rhythm ---- */
+	--mica-radius: 10px; /* card (set by settings) */
+	--mica-gap: 8px;
+	--mica-pad: 0.75em 1em;
+	--mica-ctrl-h: 24px; /* every small control targets this height */
 	--mica-ctrl-radius: 6px;
 	--mica-ctrl-pad-x: 8px;
+	--mica-tab-gap: 6px; /* set by settings */
 
-	/* Gap between tab chips (set by settings; better default than the old 2px). */
-	--mica-tab-gap: 6px;
+	/* ---- Editor / diff sizing (some set by settings) ---- */
+	--mica-content-max-height: none;
+	--mica-editor-min-height: 3.5em;
+	--mica-editor-max-height: 24em;
+	--mica-diff-max-height: 60vh;
+}
+
+/* ---------- Themes: each sets the accent; chrome + borders follow ---------- */
+body.mica-theme-slate {
+	--mica-accent: #5b7cfa;
+}
+body.mica-theme-ocean {
+	--mica-accent: #1ca9c9;
+}
+body.mica-theme-forest {
+	--mica-accent: #3aa675;
+}
+body.mica-theme-sunset {
+	--mica-accent: #f0883e;
+}
+body.mica-theme-grape {
+	--mica-accent: #a371f7;
+}
+body.mica-theme-rose {
+	--mica-accent: #ec6a9c;
+}
+
+/* ---------- Density ---------- */
+body[data-mica-density="compact"] {
+	--mica-ctrl-h: 20px;
+	--mica-gap: 6px;
+	--mica-pad: 0.5em 0.75em;
 }
 
 /* The inline "+ add tab": a square icon button, centered in the stretched nav. */
@@ -143,6 +172,35 @@ body {
 	box-shadow: inset 0 2px 0 0 var(--mica-accent);
 	margin-bottom: -1px;
 	padding-bottom: 7px;
+}
+
+/* Tab style: UNDERLINE — minimal accent underline, no surface change/merge. */
+body[data-mica-tabstyle="underline"] .mica-tab-btn.is-active {
+	background: transparent;
+	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	margin-bottom: 0;
+	padding-bottom: 6px;
+}
+
+/* Tab style: PILL — the active tab is a filled, accent-tinted capsule. */
+body[data-mica-tabstyle="pill"] .mica-tab-nav-outer,
+body[data-mica-tabstyle="pill"] .mica-tab-nav {
+	align-items: center;
+}
+body[data-mica-tabstyle="pill"] .mica-tab-nav-outer {
+	padding: 5px 4px;
+}
+body[data-mica-tabstyle="pill"] .mica-tab-btn {
+	height: auto;
+	border-radius: 999px;
+	padding: 3px 12px;
+}
+body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
+	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
+	color: var(--mica-accent);
+	box-shadow: none;
+	margin-bottom: 0;
+	padding-bottom: 3px;
 }
 
 /*
@@ -714,6 +772,50 @@ body {
 
 .mica-chip.is-dirty .mica-chip-dot {
 	opacity: 1;
+}
+
+/* ---------- Motion (opt-in via settings; respects reduced-motion) ---------- */
+body.mica-animate .mica-tab-panel.is-active {
+	animation: mica-fade 140ms ease;
+}
+
+@keyframes mica-fade {
+	from {
+		opacity: 0;
+		transform: translateY(3px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+/* A brief pulse on the version chip when a snapshot lands (added in JS). */
+body.mica-animate .mica-chip.mica-pulse {
+	animation: mica-pulse 0.5s ease;
+}
+
+body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
+	color: var(--mica-accent);
+}
+
+@keyframes mica-pulse {
+	0% {
+		transform: scale(1);
+	}
+	45% {
+		transform: scale(1.14);
+	}
+	100% {
+		transform: scale(1);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	body.mica-animate .mica-tab-panel.is-active,
+	body.mica-animate .mica-chip.mica-pulse {
+		animation: none;
+	}
 }
 
 /* ---------- Diff ---------- */

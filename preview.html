@@ -1,0 +1,307 @@
+<!doctype html>
+<!--
+  Mica — standalone appearance preview.
+
+  Open this file in any browser to eyeball the themes, tab styles, density, and
+  accent live, without launching Obsidian. It imports the real styles.css and
+  provides an Obsidian-like variable shim so the block renders faithfully. It's
+  a design reference — the block markup mirrors what layoutEngine.ts emits, so
+  it can drift if that structure changes; the source of truth is the plugin.
+-->
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Mica — appearance preview</title>
+		<style>
+			/* --- Obsidian variable shim (approx. dark theme) so styles.css resolves --- */
+			:root {
+				--background-primary: #1e1e22;
+				--background-primary-alt: #26262b;
+				--background-secondary: #26262b;
+				--background-secondary-alt: #2d2d33;
+				--background-modifier-border: #3a3a42;
+				--background-modifier-hover: #ffffff14;
+				--text-normal: #dcdde1;
+				--text-muted: #9aa0ab;
+				--text-faint: #6b7280;
+				--text-on-accent: #ffffff;
+				--text-error: #f85149;
+				--interactive-accent: #7c6cf0;
+				--color-green: #3fb950;
+				--color-red: #f85149;
+				--font-ui-small: 13px;
+				--font-ui-smaller: 12px;
+				--font-monospace: ui-monospace, monospace;
+				--size-4-3: 12px;
+			}
+			body.mica-light {
+				--background-primary: #ffffff;
+				--background-secondary: #f3f4f6;
+				--background-secondary-alt: #e9ebef;
+				--background-modifier-border: #e0e2e7;
+				--background-modifier-hover: #00000010;
+				--text-normal: #23262b;
+				--text-muted: #5b616b;
+				--text-faint: #99a0ab;
+			}
+			html {
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+				background: var(--background-primary);
+				color: var(--text-normal);
+			}
+			body {
+				margin: 0;
+				padding: 28px;
+				background:
+					radial-gradient(1200px 600px at 20% -10%, #2a2140 0%, transparent 60%), var(--background-primary);
+				min-height: 100vh;
+			}
+			.controls {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 14px 22px;
+				align-items: center;
+				margin-bottom: 26px;
+				padding: 12px 14px;
+				border: 1px solid var(--background-modifier-border);
+				border-radius: 10px;
+				background: var(--background-secondary);
+				font-size: 13px;
+			}
+			.controls label {
+				display: inline-flex;
+				gap: 6px;
+				align-items: center;
+				color: var(--text-muted);
+			}
+			.controls select,
+			.controls input {
+				background: var(--background-primary);
+				color: var(--text-normal);
+				border: 1px solid var(--background-modifier-border);
+				border-radius: 6px;
+				padding: 3px 6px;
+			}
+			.stage {
+				max-width: 720px;
+				margin: 0 auto;
+				display: flex;
+				flex-direction: column;
+				gap: 22px;
+			}
+			.mica-md-inner p {
+				margin: 0.3em 0;
+			}
+			.callout {
+				margin: 10px 0 2px;
+				padding: 10px 14px;
+				border-radius: 8px;
+				border-inline-start: 3px solid var(--mica-accent);
+				background: color-mix(in srgb, var(--mica-accent) 12%, transparent);
+				color: color-mix(in srgb, var(--mica-accent) 60%, var(--text-normal));
+				font-weight: 600;
+			}
+			.svg-icon {
+				width: 15px;
+				height: 15px;
+				stroke: currentColor;
+				fill: none;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+		</style>
+		<link rel="stylesheet" href="styles.css" />
+	</head>
+	<body class="mica-theme-default mica-animate" data-mica-density="comfortable" data-mica-tabstyle="connected">
+		<div class="controls">
+			<strong style="color: var(--text-normal)">Mica preview</strong>
+			<label
+				>Theme
+				<select id="theme">
+					<option value="default">Match Obsidian</option>
+					<option value="slate">Slate</option>
+					<option value="ocean">Ocean</option>
+					<option value="forest">Forest</option>
+					<option value="sunset">Sunset</option>
+					<option value="grape">Grape</option>
+					<option value="rose">Rose</option>
+				</select>
+			</label>
+			<label
+				>Tab style
+				<select id="tabstyle">
+					<option value="connected">Connected</option>
+					<option value="underline">Underline</option>
+					<option value="pill">Pill</option>
+				</select>
+			</label>
+			<label
+				>Density
+				<select id="density">
+					<option value="comfortable">Comfortable</option>
+					<option value="compact">Compact</option>
+				</select>
+			</label>
+			<label>Accent <input type="color" id="accent" value="#7c6cf0" /></label>
+			<label><input type="checkbox" id="accenton" /> use accent</label>
+			<label><input type="checkbox" id="light" /> light base</label>
+		</div>
+
+		<div class="stage">
+			<!-- Tabs block -->
+			<div class="mica-lp">
+				<div class="mica">
+					<div class="mica-tab-nav-outer">
+						<div class="mica-tab-nav" role="tablist">
+							<div class="mica-tab-chip mica-chip-editable">
+								<button class="mica-tab-btn is-active" role="tab">Overview</button>
+							</div>
+							<div class="mica-tab-chip mica-chip-editable">
+								<button class="mica-tab-btn" role="tab">Details</button>
+							</div>
+							<div class="mica-tab-chip mica-chip-editable">
+								<button class="mica-tab-btn" role="tab">Notes</button>
+							</div>
+							<button class="mica-add mica-tab-add" aria-label="Add tab">
+								<svg class="svg-icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+							</button>
+						</div>
+						<div class="mica-tab-nav-sticky"></div>
+					</div>
+					<div class="mica-tab-panels">
+						<div class="mica-tab-panel is-active" role="tabpanel">
+							<div class="mica-tab-body">
+								<div class="mica-region is-editable">
+									<div class="mica-md">
+										<div class="mica-md-inner">
+											<p>The <strong>first</strong> tab — ordinary Markdown works here.</p>
+											<div class="callout">🔥 Callouts render natively inside a tab.</div>
+										</div>
+									</div>
+								</div>
+								<div class="mica-insert">
+									<button class="mica-insert-toggle" aria-label="Insert a group">
+										<svg class="svg-icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+									</button>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="mica-footer">
+						<button class="mica-auto is-on">Auto</button>
+						<button class="mica-auto-secs">5s</button>
+						<div class="mica-footer-spacer"></div>
+						<button class="mica-chip is-dirty">
+							<span class="mica-chip-icon"
+								><svg class="svg-icon" viewBox="0 0 24 24">
+									<path d="M3 3v5h5" />
+									<path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+									<path d="M12 7v5l4 2" /></svg
+							></span>
+							<span class="mica-chip-count">4</span>
+							<span class="mica-chip-dot"></span>
+						</button>
+					</div>
+				</div>
+			</div>
+
+			<!-- Grid block -->
+			<div class="mica-lp">
+				<div class="mica">
+					<div class="mica-tab-nav-outer">
+						<div class="mica-tab-nav" role="tablist">
+							<div class="mica-tab-chip mica-chip-editable">
+								<button class="mica-tab-btn is-active" role="tab">Layout</button>
+							</div>
+							<button class="mica-add mica-tab-add" aria-label="Add tab">
+								<svg class="svg-icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+							</button>
+						</div>
+						<div class="mica-tab-nav-sticky"></div>
+					</div>
+					<div class="mica-tab-panels">
+						<div class="mica-tab-panel is-active" role="tabpanel">
+							<div class="mica-tab-body">
+								<div class="mica-region is-editable">
+									<div class="mica-md">
+										<div class="mica-md-inner"><p>A two-column grid:</p></div>
+									</div>
+								</div>
+								<div class="mica-grid-wrap">
+									<div class="mica-grid" style="--mica-cols: 2">
+										<div class="mica-cell">
+											<div class="mica-region is-editable">
+												<div class="mica-md">
+													<div class="mica-md-inner"><p>Left cell.</p></div>
+												</div>
+											</div>
+										</div>
+										<div class="mica-cell">
+											<div class="mica-region is-editable">
+												<div class="mica-md">
+													<div class="mica-md-inner"><p>Right cell.</p></div>
+												</div>
+											</div>
+										</div>
+									</div>
+									<div class="mica-grid-actions">
+										<div class="mica-stepper">
+											<span class="mica-stepper-label">Columns</span>
+											<button class="mica-step" aria-label="Fewer">
+												<svg class="svg-icon" viewBox="0 0 24 24"><path d="M5 12h14" /></svg>
+											</button>
+											<span class="mica-stepper-val">2</span>
+											<button class="mica-step" aria-label="More">
+												<svg class="svg-icon" viewBox="0 0 24 24">
+													<path d="M12 5v14M5 12h14" />
+												</svg>
+											</button>
+										</div>
+										<button class="mica-add">+ Cell</button>
+										<div class="mica-nav-spacer"></div>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="mica-footer">
+						<button class="mica-auto is-off">Manual</button>
+						<button class="mica-save-now">Save version</button>
+						<div class="mica-footer-spacer"></div>
+						<button class="mica-chip">
+							<span class="mica-chip-icon"
+								><svg class="svg-icon" viewBox="0 0 24 24">
+									<path d="M3 3v5h5" />
+									<path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+									<path d="M12 7v5l4 2" /></svg
+							></span>
+							<span class="mica-chip-count">0</span>
+							<span class="mica-chip-dot"></span>
+						</button>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<script>
+			const body = document.body;
+			const $ = (id) => document.getElementById(id);
+			const setTheme = () => {
+				for (const c of [...body.classList]) if (c.startsWith("mica-theme-")) body.classList.remove(c);
+				body.classList.add("mica-theme-" + $("theme").value);
+			};
+			$("theme").onchange = setTheme;
+			$("tabstyle").onchange = () => body.setAttribute("data-mica-tabstyle", $("tabstyle").value);
+			$("density").onchange = () => body.setAttribute("data-mica-density", $("density").value);
+			const applyAccent = () =>
+				$("accenton").checked
+					? body.style.setProperty("--mica-accent", $("accent").value)
+					: body.style.removeProperty("--mica-accent");
+			$("accent").oninput = applyAccent;
+			$("accenton").onchange = applyAccent;
+			$("light").onchange = () => body.classList.toggle("mica-light", $("light").checked);
+		</script>
+	</body>
+</html>

@@ -103,9 +103,20 @@ export default class MicaPlugin extends Plugin {
 
 	onunload(): void {
 		delete (window as unknown as { mica?: MicaApi }).mica;
-		document.body.style.removeProperty("--mica-content-max-height");
-		document.body.style.removeProperty("--mica-editor-max-height");
-		document.body.style.removeProperty("--mica-tab-gap");
+		const b = document.body;
+		for (const c of Array.from(b.classList)) if (c.startsWith("mica-theme-")) b.removeClass(c);
+		b.removeClass("mica-animate");
+		b.removeAttribute("data-mica-density");
+		b.removeAttribute("data-mica-tabstyle");
+		for (const k of [
+			"--mica-accent",
+			"--mica-radius",
+			"--mica-tab-gap",
+			"--mica-content-max-height",
+			"--mica-editor-max-height",
+		]) {
+			b.style.removeProperty(k);
+		}
 		console.info("Mica: unloaded");
 	}
 
@@ -113,15 +124,29 @@ export default class MicaPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	/** Push size-related settings into CSS custom properties on `body`. */
+	/**
+	 * Push appearance settings onto `body`: the theme as a class, density + tab
+	 * style as data-attributes, motion as a class, and per-item overrides as
+	 * inline CSS variables (which win over the theme preset). One accent drives
+	 * the whole palette (chrome + borders retint from it in CSS).
+	 */
 	applyStyleVars(): void {
 		const s = this.settings;
-		document.body.style.setProperty(
-			"--mica-content-max-height",
-			s.limitContentHeight ? `${s.contentMaxHeightPx}px` : "none",
-		);
-		document.body.style.setProperty("--mica-editor-max-height", `${s.editorMaxHeightPx}px`);
-		document.body.style.setProperty("--mica-tab-gap", `${s.tabGapPx}px`);
+		const b = document.body;
+		for (const c of Array.from(b.classList)) if (c.startsWith("mica-theme-")) b.removeClass(c);
+		b.addClass(`mica-theme-${s.theme}`);
+		b.setAttribute("data-mica-density", s.density);
+		b.setAttribute("data-mica-tabstyle", s.tabStyle);
+		b.toggleClass("mica-animate", s.animations);
+		const set = (k: string, v: string | null): void => {
+			if (v === null) b.style.removeProperty(k);
+			else b.style.setProperty(k, v);
+		};
+		set("--mica-accent", s.accentColor || null); // empty = theme/Obsidian accent
+		set("--mica-radius", `${s.cardRadiusPx}px`);
+		set("--mica-tab-gap", `${s.tabGapPx}px`);
+		set("--mica-content-max-height", s.limitContentHeight ? `${s.contentMaxHeightPx}px` : "none");
+		set("--mica-editor-max-height", `${s.editorMaxHeightPx}px`);
 	}
 
 	private async reconcileOnLoad(): Promise<void> {

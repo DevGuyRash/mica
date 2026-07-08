@@ -651,10 +651,14 @@ function renderVersionChip(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo): vo
 		}
 	};
 	void refresh();
-	// Refresh when this file is snapshotted so the dirty dot clears itself.
+	// Refresh when this file is snapshotted (so the dirty dot clears) and give the
+	// chip a brief pulse to confirm a version just landed.
 	ctx.component.register(
 		chip.plugin.engine.onSnapshot((f) => {
-			if (f.path === chip.file.path) void refresh();
+			if (f.path !== chip.file.path) return;
+			void refresh();
+			btn.addClass("mica-pulse");
+			window.setTimeout(() => btn.removeClass("mica-pulse"), 550);
 		}),
 	);
 }

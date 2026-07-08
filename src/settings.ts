@@ -2,6 +2,21 @@ import { PluginSettingTab, Setting } from "obsidian";
 import type MicaPlugin from "./main";
 import { OBSIDIAN_CALLOUT_TYPES, type DiffGranularity } from "./wasm/bridge";
 
+export type MicaTabStyle = "underline" | "connected" | "pill";
+export type MicaDensity = "comfortable" | "compact";
+
+/** Selectable themes. `default` inherits Obsidian's accent; the rest set a
+ * distinctive accent that retints Mica's chrome + borders cohesively. */
+export const MICA_THEMES: { id: string; name: string }[] = [
+	{ id: "default", name: "Match Obsidian" },
+	{ id: "slate", name: "Slate" },
+	{ id: "ocean", name: "Ocean" },
+	{ id: "forest", name: "Forest" },
+	{ id: "sunset", name: "Sunset" },
+	{ id: "grape", name: "Grape" },
+	{ id: "rose", name: "Rose" },
+];
+
 export interface MicaSettings {
 	/** Master switch for auto-snapshotting (toggled live from each block's footer). */
 	autoSnapshotEnabled: boolean;
@@ -21,6 +36,18 @@ export interface MicaSettings {
 	editorMaxHeightPx: number;
 	/** Gap (px) between tab chips in the tab bar. */
 	tabGapPx: number;
+	/** Named look; `default` inherits Obsidian's accent. */
+	theme: string;
+	/** Custom accent (CSS color); empty = the theme's accent. Drives chrome + borders. */
+	accentColor: string;
+	/** Overall control/padding density. */
+	density: MicaDensity;
+	/** Card corner radius (px). */
+	cardRadiusPx: number;
+	/** How the active tab is styled. */
+	tabStyle: MicaTabStyle;
+	/** Enable tab/version motion (respects prefers-reduced-motion regardless). */
+	animations: boolean;
 	/** Comma-separated callout types imported as versions on migration (empty = any). */
 	versionCalloutTypes: string;
 }
@@ -38,12 +65,34 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	editorAutosize: true,
 	editorMaxHeightPx: 400,
 	tabGapPx: 6,
+	theme: "default",
+	accentColor: "",
+	density: "comfortable",
+	cardRadiusPx: 10,
+	tabStyle: "connected",
+	animations: true,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 };
 
 export class MicaSettingTab extends PluginSettingTab {
 	constructor(private readonly micaPlugin: MicaPlugin) {
 		super(micaPlugin.app, micaPlugin);
+	}
+
+	/** The accent as a hex for the color picker: the user's override if set, else
+	 * the theme/Obsidian accent resolved to a concrete color via a probe element. */
+	private resolvedAccent(): string {
+		if (this.micaPlugin.settings.accentColor) return this.micaPlugin.settings.accentColor;
+		const probe = document.body.createSpan();
+		probe.style.color = "var(--mica-accent)";
+		const rgb = getComputedStyle(probe).color;
+		probe.remove();
+		const m = rgb.match(/\d+/g);
+		if (!m || m.length < 3) return "#8b5cf6";
+		return `#${m
+			.slice(0, 3)
+			.map((n) => Number(n).toString(16).padStart(2, "0"))
+			.join("")}`;
 	}
 
 	/** Grouped by intent: Versioning, Comparing, Appearance, Migration. Knobs that
@@ -146,6 +195,101 @@ export class MicaSettingTab extends PluginSettingTab {
 
 		// ---------- Appearance ----------
 		new Setting(containerEl).setHeading().setName("Appearance");
+
+		new Setting(containerEl)
+			.setName("Theme")
+			.setDesc(
+				"A named look. Each sets an accent that retints the whole block; “Match Obsidian” follows your theme's accent.",
+			)
+			.addDropdown((d) => {
+				for (const t of MICA_THEMES) d.addOption(t.id, t.name);
+				d.setValue(s.theme).onChange(async (v) => {
+					s.theme = v;
+					this.micaPlugin.applyStyleVars();
+					await save();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Accent color")
+			.setDesc("Override the theme's accent — it drives tabs, borders, and state. Reset to follow the theme.")
+			.addColorPicker((c) =>
+				c.setValue(this.resolvedAccent()).onChange(async (v) => {
+					s.accentColor = v;
+					this.micaPlugin.applyStyleVars();
+					await save();
+				}),
+			)
+			.addExtraButton((b) =>
+				b
+					.setIcon("rotate-ccw")
+					.setTooltip("Follow the theme's accent")
+					.onClick(async () => {
+						s.accentColor = "";
+						this.micaPlugin.applyStyleVars();
+						await save();
+						this.display();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Density")
+			.setDesc("Comfortable or compact padding and control sizes.")
+			.addDropdown((d) =>
+				d
+					.addOption("comfortable", "Comfortable")
+					.addOption("compact", "Compact")
+					.setValue(s.density)
+					.onChange(async (v) => {
+						s.density = v as MicaDensity;
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Corner radius")
+			.setDesc("Roundness of the block's corners (px).")
+			.addSlider((sl) =>
+				sl
+					.setLimits(0, 20, 1)
+					.setValue(s.cardRadiusPx)
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						s.cardRadiusPx = v;
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Tab style")
+			.setDesc("How the active tab is drawn: connected to its panel, a minimal underline, or a filled pill.")
+			.addDropdown((d) =>
+				d
+					.addOption("connected", "Connected")
+					.addOption("underline", "Underline")
+					.addOption("pill", "Pill")
+					.setValue(s.tabStyle)
+					.onChange(async (v) => {
+						s.tabStyle = v as MicaTabStyle;
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Animations")
+			.setDesc(
+				"Subtle motion on tab switches and version saves. Always off if your system prefers reduced motion.",
+			)
+			.addToggle((t) =>
+				t.setValue(s.animations).onChange(async (v) => {
+					s.animations = v;
+					this.micaPlugin.applyStyleVars();
+					await save();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName("Version chip on blocks")

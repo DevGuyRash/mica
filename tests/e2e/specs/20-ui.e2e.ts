@@ -410,4 +410,52 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(doc).not.toContain("abc:::"); // no glue onto the cell close
 		expect((doc.match(/:::cell/g) ?? []).length).toBe(2); // both columns survive
 	});
+
+	it("theme + tab style retint and restyle the block", async function () {
+		await seedAndOpen("Theme.md", "Intro line.\n\n```mica id=th-1\ntab: A\nx\n\ntab: B\ny\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-tab-btn.is-active"))),
+			{ timeout: 8000, timeoutMsg: "the widget never rendered" },
+		);
+		const setTheme = (theme: string, tabStyle: string): Promise<void> =>
+			browser.executeObsidian(
+				({ app }, t, ts) => {
+					const p = (
+						app as unknown as {
+							plugins: {
+								getPlugin(
+									id: string,
+								): { settings: Record<string, unknown>; applyStyleVars(): void } | null;
+							};
+						}
+					).plugins.getPlugin("mica");
+					if (!p) return;
+					p.settings.theme = t;
+					p.settings.tabStyle = ts;
+					p.settings.accentColor = "";
+					p.applyStyleVars();
+				},
+				theme,
+				tabStyle,
+			);
+		const probe = (): Promise<{ accent: string; chrome: string; radius: string }> =>
+			browser.executeObsidian(() => {
+				const nav = document.querySelector(".mica-lp .mica-tab-nav-outer") as HTMLElement | null;
+				const btn = document.querySelector(".mica-lp .mica-tab-btn.is-active") as HTMLElement | null;
+				return {
+					accent: getComputedStyle(document.body).getPropertyValue("--mica-accent").trim(),
+					chrome: nav ? getComputedStyle(nav).backgroundColor : "",
+					radius: btn ? getComputedStyle(btn).borderTopLeftRadius : "",
+				};
+			});
+		await setTheme("default", "connected");
+		const base = await probe();
+		await setTheme("ocean", "pill");
+		const ocean = await probe();
+		expect(ocean.accent).not.toBe(base.accent); // the theme changed the driving accent
+		expect(ocean.chrome).toMatch(/^(rgb|color)\(/); // accent-tinted chrome resolves to a real color
+		expect(ocean.chrome).not.toBe(base.chrome); // …and it differs from the default chrome
+		expect(ocean.radius).not.toBe(base.radius); // pill vs connected active-tab shape
+		await setTheme("default", "connected"); // reset so later specs aren't themed
+	});
 });
