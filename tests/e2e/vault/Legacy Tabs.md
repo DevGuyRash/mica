@@ -22,6 +22,12 @@ tab: Frame Gate
 >
 > Open-world review body.
 > ````
+
+tab: Notes
+> [!info]- Field Notes (V2.5)
+> ````md
+> A note kept in an [!info] callout — not success/bug/todo.
+> ````
 `````
 
 Prose after the block.

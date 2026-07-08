@@ -23,7 +23,7 @@ export interface MigrateFileReport {
 export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boolean): Promise<MigrateFileReport | null> {
 	const vault = plugin.app.vault;
 	const original = await vault.read(file);
-	const result = migrateTabs(original);
+	const result = migrateTabs(original, plugin.settings.versionCalloutTypes);
 	if (!result.changed) return null;
 
 	const versionsImported = result.blocks.reduce((n, b) => n + b.versions.length, 0);

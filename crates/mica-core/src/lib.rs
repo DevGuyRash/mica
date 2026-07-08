@@ -150,9 +150,11 @@ pub fn reconcile(content: JsValue, sidecar: JsValue) -> Result<JsValue, JsValue>
 }
 
 /// Convert every legacy ```tabs block in `doc` into a ```mica block.
+/// `callout_types` is a comma-separated allowlist of callout types imported as
+/// version history (empty = every type).
 #[wasm_bindgen]
-pub fn migrate_tabs(doc: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&migrate_tabs_impl(doc)).map_err(|e| JsValue::from_str(&e.to_string()))
+pub fn migrate_tabs(doc: &str, callout_types: &str) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&migrate_tabs_impl(doc, callout_types)).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]

@@ -251,7 +251,46 @@ export interface MigrationResult {
 	changed: boolean;
 }
 
-/** Convert every legacy ` ```tabs ` block in `doc` into a ` ```mica ` block. */
-export function migrateTabs(doc: string): MigrationResult {
-	return migrate_tabs(doc) as MigrationResult;
+/**
+ * Every built-in Obsidian callout type plus its aliases
+ * (https://help.obsidian.md/callouts), case-insensitive. Used as the default
+ * migration allowlist so version callouts of ANY built-in type are imported.
+ */
+export const OBSIDIAN_CALLOUT_TYPES = [
+	"note",
+	"abstract",
+	"summary",
+	"tldr",
+	"info",
+	"todo",
+	"tip",
+	"hint",
+	"important",
+	"success",
+	"check",
+	"done",
+	"question",
+	"help",
+	"faq",
+	"warning",
+	"caution",
+	"attention",
+	"failure",
+	"fail",
+	"missing",
+	"danger",
+	"error",
+	"bug",
+	"example",
+	"quote",
+	"cite",
+].join(", ");
+
+/**
+ * Convert every legacy ` ```tabs ` block in `doc` into a ` ```mica ` block.
+ * `calloutTypes` is a comma-separated allowlist of callout types imported as
+ * version history; an empty string imports every callout type.
+ */
+export function migrateTabs(doc: string, calloutTypes = OBSIDIAN_CALLOUT_TYPES): MigrationResult {
+	return migrate_tabs(doc, calloutTypes) as MigrationResult;
 }

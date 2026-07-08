@@ -1,6 +1,6 @@
 import { PluginSettingTab, Setting } from "obsidian";
 import type MicaPlugin from "./main";
-import type { DiffGranularity } from "./wasm/bridge";
+import { OBSIDIAN_CALLOUT_TYPES, type DiffGranularity } from "./wasm/bridge";
 
 export interface MicaSettings {
 	/** Idle time before an auto-snapshot fires after an edit. */
@@ -9,6 +9,8 @@ export interface MicaSettings {
 	defaultDiffMode: "inline" | "side-by-side" | "patch";
 	showVersionChip: boolean;
 	reconcileOnLoad: boolean;
+	/** Comma-separated callout types imported as versions on migration (empty = any). */
+	versionCalloutTypes: string;
 }
 
 export const DEFAULT_SETTINGS: MicaSettings = {
@@ -17,6 +19,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	defaultDiffMode: "inline",
 	showVersionChip: true,
 	reconcileOnLoad: true,
+	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 };
 
 export class MicaSettingTab extends PluginSettingTab {
@@ -85,6 +88,32 @@ export class MicaSettingTab extends PluginSettingTab {
 					this.micaPlugin.settings.reconcileOnLoad = v;
 					await this.micaPlugin.saveSettings();
 				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Version callout types (migration)")
+			.setDesc(
+				"Comma-separated callout types whose callouts are imported as version history when migrating from obsidian-tabs. Defaults to every built-in Obsidian type; leave empty to import ANY type (including custom ones), or narrow it (e.g. “success, bug, todo”).",
+			)
+			.addTextArea((t) => {
+				t.setPlaceholder(OBSIDIAN_CALLOUT_TYPES)
+					.setValue(this.micaPlugin.settings.versionCalloutTypes)
+					.onChange(async (v) => {
+						this.micaPlugin.settings.versionCalloutTypes = v;
+						await this.micaPlugin.saveSettings();
+					});
+				t.inputEl.rows = 3;
+				t.inputEl.addClass("mica-settings-wide");
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon("reset")
+					.setTooltip("Reset to all built-in Obsidian callout types")
+					.onClick(async () => {
+						this.micaPlugin.settings.versionCalloutTypes = OBSIDIAN_CALLOUT_TYPES;
+						await this.micaPlugin.saveSettings();
+						this.display();
+					}),
 			);
 	}
 }

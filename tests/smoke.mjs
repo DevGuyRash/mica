@@ -64,7 +64,7 @@ assert(state.b?.head === "h2" && state.b?.versions?.length === 2, `fold_ledger s
 // confirm a clean, non-appending replace using real JS (UTF-16) string offsets.
 const legacy =
 	"# Note\n\n`````tabs\ntab: Kernel\n> [!success]- Kernel (V1.0)\n> ````md\n> LOYALTY\n> ````\ntab: Frame\nframe body\n`````\n\ntail\n";
-const mig = migrate_tabs(legacy);
+const mig = migrate_tabs(legacy, "success, bug, todo");
 assert(mig.changed && mig.blocks.length === 1, "migrate produced one block");
 assert(mig.doc.includes(":::tab Kernel") && mig.doc.includes(":::tab Frame"), "tabs -> directives");
 const idAttr = scan(mig.doc)[0].attrs.find(([k]) => k === "id");

@@ -207,6 +207,13 @@
 	min-height: 40vh;
 }
 
+.mica-settings-wide {
+	width: 100%;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	resize: vertical;
+}
+
 /* Version chip */
 .mica-chipbar {
 	display: flex;

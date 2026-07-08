@@ -41,7 +41,16 @@ pub struct MigrationResult {
 /// Lossless by construction: content before the first `tab:` line is preserved
 /// as a leading leaf, tab bodies are copied verbatim (blank lines, dividers and
 /// all), and blocks containing Templater tokens (`<%`) are left untouched.
-pub fn migrate_tabs_impl(doc: &str) -> MigrationResult {
+///
+/// `callout_types` selects which callout types inside tab bodies are imported
+/// as version history — a comma-separated list (e.g. `"success, bug, todo"`);
+/// an EMPTY string imports every callout type.
+pub fn migrate_tabs_impl(doc: &str, callout_types: &str) -> MigrationResult {
+    let allowed: Vec<String> = callout_types
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
     let spans = scan_tag_impl(doc, "tabs");
     if spans.is_empty() {
         return MigrationResult { doc: doc.to_string(), blocks: Vec::new(), changed: false };
@@ -57,7 +66,7 @@ pub fn migrate_tabs_impl(doc: &str) -> MigrationResult {
             // real block. Leave the original bytes exactly as they were.
             out.push_str(&doc[span.start..span.end]);
         } else {
-            let (mica, block) = convert(content);
+            let (mica, block) = convert(content, &allowed);
             blocks.push(block);
             out.push_str(&mica);
         }
@@ -68,7 +77,7 @@ pub fn migrate_tabs_impl(doc: &str) -> MigrationResult {
     MigrationResult { doc: out, blocks, changed }
 }
 
-fn convert(content: &str) -> (String, MigratedBlock) {
+fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock) {
     let mut preamble = String::new();
     let mut tabs: Vec<(String, String)> = Vec::new();
     let mut name: Option<String> = None;
@@ -92,7 +101,7 @@ fn convert(content: &str) -> (String, MigratedBlock) {
 
     let id = new_id_impl();
     let block_name = tabs.first().map(|(n, _)| n.clone());
-    let versions = tabs.iter().flat_map(|(_, b)| extract_versions(b)).collect();
+    let versions = tabs.iter().flat_map(|(_, b)| extract_versions(b, allowed_callouts)).collect();
 
     let mut inner = preamble;
     if !inner.is_empty() && !inner.ends_with('\n') {
@@ -120,21 +129,26 @@ fn convert(content: &str) -> (String, MigratedBlock) {
 }
 
 /// Extract versioned callouts from a legacy tab body. Recognizes top-level
-/// `> [!success|bug|todo]±  Title (Vx.y)` callouts; the payload is the callout
-/// body dequoted, with a single wrapping code fence stripped when present.
-fn extract_versions(body: &str) -> Vec<MigratedVersion> {
+/// `> [!type]±  Title (Vx.y)` callouts whose type is in `allowed` (any type
+/// when `allowed` is empty); the payload is the callout body dequoted, with a
+/// single wrapping code fence stripped when present.
+fn extract_versions(body: &str, allowed: &[String]) -> Vec<MigratedVersion> {
     let mut out = Vec::new();
     let mut lines = body.lines().peekable();
     while let Some(line) = lines.next() {
         let Some((status, title)) = parse_callout_header(line) else {
             continue;
         };
-        if !matches!(status.as_str(), "success" | "bug" | "todo") {
+        if !allowed.is_empty() && !allowed.iter().any(|a| a == &status) {
             continue;
         }
-        // Collect the quoted body.
+        // Collect the quoted body, stopping at the NEXT callout header (which is
+        // itself a quoted line, so it must be detected before dequoting).
         let mut quoted: Vec<String> = Vec::new();
         while let Some(next) = lines.peek() {
+            if parse_callout_header(next).is_some() {
+                break;
+            }
             if let Some(dequoted) = dequote(next) {
                 quoted.push(dequoted);
                 lines.next();
@@ -228,7 +242,7 @@ mod tests {
     #[test]
     fn converts_tabs_to_mica() {
         let doc = "before\n```tabs\ntab: A\nhello\ntab: B\nworld\n```\nafter\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.changed);
         assert_eq!(r.blocks.len(), 1);
         assert_eq!(r.blocks[0].name.as_deref(), Some("A"));
@@ -245,14 +259,14 @@ mod tests {
     fn sizes_fence_above_inner_code() {
         // Realistic: a 5-backtick tabs block with an inner 3-backtick code sample.
         let doc = "`````tabs\ntab: A\n```js\nx\n```\n`````\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.doc.contains("````mica"), "mica fence must out-length inner code");
         assert_eq!(scan_impl(&r.doc).len(), 1);
     }
 
     #[test]
     fn no_tabs_is_noop() {
-        let r = migrate_tabs_impl("just text\n");
+        let r = migrate_tabs_impl("just text\n", "success, bug, todo");
         assert!(!r.changed);
         assert_eq!(r.doc, "just text\n");
     }
@@ -260,7 +274,7 @@ mod tests {
     #[test]
     fn preamble_before_first_tab_is_preserved() {
         let doc = "```tabs\nPREAMBLE KEEP ME\n\ntab: A\nbody\n```\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.changed);
         assert!(r.doc.contains("PREAMBLE KEEP ME"), "preamble must survive: {}", r.doc);
         // Preamble sits before the tabs container, inside the mica block.
@@ -272,14 +286,14 @@ mod tests {
     #[test]
     fn tab_bodies_are_copied_verbatim_including_blank_runs() {
         let doc = "```tabs\ntab: A\nline\n\n\n%% divider %%\n\ntab: B\nx\n```\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.doc.contains("line\n\n\n%% divider %%\n\n:::"), "blank runs preserved: {}", r.doc);
     }
 
     #[test]
     fn templater_blocks_are_left_untouched() {
         let doc = "```tabs\ntab: <% tp.file.cursor() %>\nbody\n```\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(!r.changed);
         assert_eq!(r.doc, doc);
     }
@@ -304,7 +318,7 @@ mod tests {
             "> ````\n",
             "`````\n",
         );
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert_eq!(r.blocks.len(), 1);
         let vs = &r.blocks[0].versions;
         assert_eq!(vs.len(), 2, "one version per callout: {vs:?}");
@@ -319,14 +333,45 @@ mod tests {
     #[test]
     fn non_version_callouts_are_not_extracted() {
         let doc = "```tabs\ntab: A\n> [!example]- Sample Data\n> stuff\nbody\n```\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.blocks[0].versions.is_empty());
+    }
+
+    #[test]
+    fn empty_allowlist_imports_any_callout_type() {
+        let doc = "```tabs\ntab: A\n> [!example]- Custom (V2.1)\n> data body\n```\n";
+        let r = migrate_tabs_impl(doc, "");
+        let vs = &r.blocks[0].versions;
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].status, "example");
+        assert_eq!(vs[0].label, "V2.1");
+        assert_eq!(vs[0].content, "data body");
+    }
+
+    #[test]
+    fn official_callout_list_covers_common_types() {
+        let list = "note, info, tip, success, question, warning, danger, bug, example, quote";
+        let doc = "```tabs\ntab: A\n> [!info]- Note (V1)\n> body one\n> [!quote]- Cite (V2)\n> body two\n```\n";
+        let r = migrate_tabs_impl(doc, list);
+        assert_eq!(r.blocks[0].versions.len(), 2);
+        assert_eq!(r.blocks[0].versions[0].status, "info");
+        assert_eq!(r.blocks[0].versions[1].status, "quote");
+    }
+
+    #[test]
+    fn custom_allowlist_selects_types() {
+        let doc = "```tabs\ntab: A\n> [!note]- One\n> a\n> [!bug]- Two\n> b\n```\n";
+        // Only [!note] requested → [!bug] is ignored.
+        let r = migrate_tabs_impl(doc, "note");
+        let vs = &r.blocks[0].versions;
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].status, "note");
     }
 
     #[test]
     fn unfenced_callout_body_is_taken_verbatim() {
         let doc = "```tabs\ntab: A\n> [!todo]- Draft idea\n> plain line\n> another\n```\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         let vs = &r.blocks[0].versions;
         assert_eq!(vs.len(), 1);
         assert_eq!(vs[0].label, "Draft idea");
@@ -337,7 +382,7 @@ mod tests {
     fn quoted_tabs_examples_are_not_migrated() {
         // A tabs example inside a longer documentation fence stays untouched.
         let doc = "``````md\n`````tabs\ntab: Doc\nquoted\n`````\n``````\n";
-        let r = migrate_tabs_impl(doc);
+        let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(!r.changed);
         assert_eq!(r.doc, doc);
     }

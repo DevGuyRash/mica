@@ -120,7 +120,8 @@ describe("runtime contracts (window.mica)", function () {
 		const labels = versions.map((v) => v.label);
 		expect(labels).toContain("V1.0"); // [!success]- Review Kernel (V1.0)
 		expect(labels).toContain("V0.3"); // [!bug]- Frame Gate (V0.3)
-		expect(versions.length).toBeGreaterThanOrEqual(3); // imported + migrated head
+		expect(labels).toContain("V2.5"); // [!info]- Field Notes — a non-default callout type
+		expect(versions.length).toBeGreaterThanOrEqual(4); // imported + migrated head
 	});
 
 	it("migrate.scan verb reports (and is empty once converted)", async function () {
