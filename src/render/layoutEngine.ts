@@ -297,7 +297,10 @@ function renderContainer(node: Container, el: HTMLElement, ctx: RenderCtx, path:
 
 function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-tabs" });
-	const nav = wrap.createDiv({ cls: "mica-tab-nav", attr: { role: "tablist" } });
+	// The nav-outer holds both the scrollable chips area and the sticky controls so
+	// that + / spacer / × never scroll off-screen when there are many tabs.
+	const navOuter = wrap.createDiv({ cls: "mica-tab-nav-outer" });
+	const nav = navOuter.createDiv({ cls: "mica-tab-nav", attr: { role: "tablist" } });
 	const panels = wrap.createDiv({ cls: "mica-tab-panels" });
 	const tabs = node.children
 		.map((c, idx) => ({ c, idx }))
@@ -361,13 +364,17 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 
 	if (ctx.editable) {
 		const at = tabs[active] ? tabs[active].idx + 1 : node.children.length;
-		nav.createEl("button", {
-			cls: "mica-add",
-			text: "+",
-			attr: { type: "button", "aria-label": "Add tab", title: "Add a tab after this one" },
-		}).addEventListener("click", () => ctx.editable?.apply({ op: "insertTab", path, at }));
-		nav.createDiv({ cls: "mica-nav-spacer" });
-		mkGroupDelete(nav, ctx, node, path, "tab group");
+		// Sticky controls live outside the scrollable nav so they never scroll away.
+		const sticky = navOuter.createDiv({ cls: "mica-tab-nav-sticky" });
+		sticky
+			.createEl("button", {
+				cls: "mica-add",
+				text: "+",
+				attr: { type: "button", "aria-label": "Add tab", title: "Add a tab after this one" },
+			})
+			.addEventListener("click", () => ctx.editable?.apply({ op: "insertTab", path, at }));
+		sticky.createDiv({ cls: "mica-nav-spacer" });
+		mkGroupDelete(sticky, ctx, node, path, "tab group");
 	}
 
 	nav.addEventListener("keydown", (ev: KeyboardEvent) => {

@@ -115,11 +115,13 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 		await browser.waitUntil(
 			() =>
-				browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add").length > 0),
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-tab-nav-sticky .mica-add").length > 0,
+				),
 			{ timeout: 8000, timeoutMsg: "the + button never appeared in the tab nav" },
 		);
 		await browser.executeObsidian(() => {
-			const add = Array.from(document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add")).find(
+			const add = Array.from(document.querySelectorAll(".mica-lp .mica-tab-nav-sticky .mica-add")).find(
 				(b) => b.textContent === "+",
 			);
 			(add as HTMLElement | undefined)?.click();
