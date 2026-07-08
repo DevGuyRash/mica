@@ -39,9 +39,9 @@ The second tab. Click the tab bar to switch (or arrow keys when focused).
 
 Switch to **Reading view** or **Live Preview** and you'll see a tabbed block.
 
-**2. Edit it.** In **Live Preview**, click into the block to edit the raw Markdown directly — or, when your cursor is elsewhere, click the small **✎ Edit** under a tab to edit just that tab. Either way it can't corrupt the note.
+**2. Edit it.** In **Live Preview**, click any text in the block to edit just that piece in place — the editor shows clean Markdown, never the tab/grid plumbing. Add a tab with the **`+`** in the tab bar, drop a whole group with the quiet **`+ Tabs` / `+ Grid`** buttons where you're working, hover a tab for **×** (delete) or double-click it to rename. Nothing you do can corrupt the note.
 
-**3. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history — no command needed. A **`v2 ●`** chip appears under the block; click it to compare and restore versions.
+**3. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history — no command needed. The block's footer shows an **Auto** pill and a **`v2 ●`** chip; click the chip to compare and restore versions.
 
 > **Already using `obsidian-tabs`?** Skip straight to [Migrating](#migrating-from-obsidian-tabs) — one command converts a note (or your whole vault) and turns your manual "archived" callouts into real version history.
 
@@ -66,7 +66,7 @@ That's the whole syntax for tabs. The extras:
 - **Block header** (optional): ` ```mica id=… name="…" `. The `id` (added automatically) lets versioning and the API follow a block across renames; `name` is a label.
 - **Callouts** — any Obsidian callout (`> [!note]`, `> [!tip]`, `> [!warning]`, …) works, rendered natively.
 - **Grids / menus** — a `:::grid {cols=3}` … `:::` block containing `:::cell` … `:::` cells.
-- **Nesting** (a tab group _inside_ a tab) — the `tab:` shorthand is flat, so for nesting use the explicit form there: `:::tabs` … `:::` with `:::tab Title` … `:::` inside (add colons to go deeper — `::::tabs` wraps `:::tab`). You'll rarely type this by hand: migration generates it, and the ✎ editor edits one tab at a time.
+- **Nesting** (a tab group _inside_ a tab) — the `tab:` shorthand is flat, so for nesting use the explicit form there: `:::tabs` … `:::` with `:::tab Title` … `:::` inside (add colons to go deeper — `::::tabs` wraps `:::tab`). You'll rarely type this by hand: migration generates it, and the **`+ Tabs` / `+ Grid`** affordances build nesting for you.
 
 Everything is ordinary Markdown, and Mica sizes the outer ` ```mica ` fence for you — so you never count backticks.
 
@@ -75,7 +75,7 @@ Everything is ordinary Markdown, and Mica sizes the outer ` ```mica ` fence for 
 Mica works in all of Obsidian's modes, and you choose per note:
 
 - **Reading view** — fully rendered, read-only tabs/grids; switch tabs, open history.
-- **Live Preview** — rendered, editable tabs. Click _into_ the block to edit its raw Markdown (friendly `tab:` and all), or click **✎ Edit** on a tab (cursor elsewhere) to edit just that tab.
+- **Live Preview** — rendered, editable tabs/grids. Click any text to edit just that region in place (clean Markdown, no `:::` plumbing); add, rename, and delete tabs and cells with the inline **+**, **×**, and rename affordances.
 - **Source mode** — plain Markdown. Everything round-trips byte-for-byte; nothing is hidden or rewritten behind your back.
 
 ---
@@ -84,9 +84,10 @@ Mica works in all of Obsidian's modes, and you choose per note:
 
 Mica keeps each block's history automatically — it stamps the block with an id the first time you edit it (or run **Prepare note for Mica** to do it now; turn this off in settings if you prefer manual ids).
 
-- **Auto-snapshots.** A short while after you stop typing, each changed block is snapshotted. Unchanged blocks are never re-stored, so history stays clean.
+- **Smart auto-snapshots.** A short while after you change a block's _content_, it's snapshotted. Pure structure changes — adding an empty tab or cell, reordering, renaming — never create a version, and unchanged content is never re-stored, so history stays clean.
+- **Auto ↔ Manual.** Each block's footer has a green/red pill (with an editable interval) to toggle auto-snapshotting per session; in **Manual** mode a **Save version** button snapshots on demand.
 - **Where it lives.** Next to `My Note.md`, Mica creates a visible `My Note.mica/` folder holding your version objects (plain Markdown files), an append-only `ledger.jsonl`, and a `manifest.json`. It's human-readable, and it rides Obsidian Sync / Git like any other file.
-- **The version chip.** Under each rendered block sits a `v<count>` chip. A dot (`v3 ●`) means the block has unsaved changes vs. its last snapshot. Click the chip to open **Compare**.
+- **The version chip.** In the footer sits a `v<count>` chip. A dot (`v3 ●`) means the block has unsaved _content_ changes vs. its last snapshot. Click the chip to open **Compare**.
 
 ### Compare & restore
 
@@ -134,13 +135,14 @@ Open the command palette (Ctrl/Cmd-P) and type "Mica":
 
 **Settings → Mica:**
 
-- **Snapshot debounce** — idle time before an auto-snapshot (500–10000 ms).
+- **Auto-snapshot versions** + **interval** — master switch and idle time (500–10000 ms) for smart auto-snapshotting; also toggled per session from each block's footer pill.
 - **Default diff granularity / mode** — what the compare window opens with.
 - **Show version chip on blocks** — toggle the per-block chip.
+- **Layout & editing** — cap tab/cell height with a scrollbar, and control whether the inline editor grows with content and its max height.
 - **Reconcile history on startup** — scan for orphaned/moved histories when the vault opens.
 - **Version callout types (migration)** — which callout types import as history (default: all built-in types; empty = any).
 
-Everything visual is themeable via CSS custom properties on `.mica` (see `styles.css`) — the [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) plugin or your theme can override them.
+Everything visual is themeable via CSS custom properties on `body` (see `styles.css`; e.g. `--mica-diff-add`, `--mica-editor-max-height`) — the [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) plugin or your theme can override them.
 
 ---
 
