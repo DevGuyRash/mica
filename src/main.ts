@@ -23,6 +23,7 @@ export default class MicaPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await initCore();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
+		this.applyStyleVars();
 		this.engine = new VersionEngine(this);
 		this.api = new MicaApi(this);
 		this.api.registerBridge();
@@ -98,11 +99,23 @@ export default class MicaPlugin extends Plugin {
 
 	onunload(): void {
 		delete (window as unknown as { mica?: MicaApi }).mica;
+		document.body.style.removeProperty("--mica-content-max-height");
+		document.body.style.removeProperty("--mica-editor-max-height");
 		console.info("Mica: unloaded");
 	}
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	/** Push size-related settings into CSS custom properties on `body`. */
+	applyStyleVars(): void {
+		const s = this.settings;
+		document.body.style.setProperty(
+			"--mica-content-max-height",
+			s.limitContentHeight ? `${s.contentMaxHeightPx}px` : "none",
+		);
+		document.body.style.setProperty("--mica-editor-max-height", `${s.editorMaxHeightPx}px`);
 	}
 
 	private async reconcileOnLoad(): Promise<void> {

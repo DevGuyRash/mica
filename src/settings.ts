@@ -11,6 +11,12 @@ export interface MicaSettings {
 	reconcileOnLoad: boolean;
 	/** Auto-stamp a stable id on `mica` blocks so versioning + inline editing just work. */
 	autoAddIds: boolean;
+	/** Cap tab/cell height and show a scrollbar past it. */
+	limitContentHeight: boolean;
+	contentMaxHeightPx: number;
+	/** Grow the inline editor with content (up to its max); otherwise fixed + scroll. */
+	editorAutosize: boolean;
+	editorMaxHeightPx: number;
 	/** Comma-separated callout types imported as versions on migration (empty = any). */
 	versionCalloutTypes: string;
 }
@@ -22,6 +28,10 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	showVersionChip: true,
 	reconcileOnLoad: true,
 	autoAddIds: true,
+	limitContentHeight: false,
+	contentMaxHeightPx: 400,
+	editorAutosize: true,
+	editorMaxHeightPx: 400,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 };
 
@@ -104,6 +114,63 @@ export class MicaSettingTab extends PluginSettingTab {
 					await this.micaPlugin.saveSettings();
 				}),
 			);
+
+		new Setting(containerEl).setHeading().setName("Layout & editing");
+
+		new Setting(containerEl)
+			.setName("Limit content height")
+			.setDesc("Cap the height of a tab or grid cell and show a scrollbar past it.")
+			.addToggle((t) =>
+				t.setValue(this.micaPlugin.settings.limitContentHeight).onChange(async (v) => {
+					this.micaPlugin.settings.limitContentHeight = v;
+					this.micaPlugin.applyStyleVars();
+					await this.micaPlugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Content max height")
+			.setDesc("Height (px) at which tab/cell content starts scrolling, when the cap above is on.")
+			.addSlider((s) =>
+				s
+					.setLimits(120, 1200, 20)
+					.setValue(this.micaPlugin.settings.contentMaxHeightPx)
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						this.micaPlugin.settings.contentMaxHeightPx = v;
+						this.micaPlugin.applyStyleVars();
+						await this.micaPlugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Editor grows with content")
+			.setDesc("The inline editor expands as you type (up to its max). Off = fixed height with a scrollbar.")
+			.addToggle((t) =>
+				t.setValue(this.micaPlugin.settings.editorAutosize).onChange(async (v) => {
+					this.micaPlugin.settings.editorAutosize = v;
+					await this.micaPlugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Editor max height")
+			.setDesc(
+				"Height (px) at which the inline editor stops growing and scrolls. Drag the corner to resize within this bound.",
+			)
+			.addSlider((s) =>
+				s
+					.setLimits(120, 1200, 20)
+					.setValue(this.micaPlugin.settings.editorMaxHeightPx)
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						this.micaPlugin.settings.editorMaxHeightPx = v;
+						this.micaPlugin.applyStyleVars();
+						await this.micaPlugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl).setHeading().setName("Migration");
 
 		new Setting(containerEl)
 			.setName("Version callout types (migration)")

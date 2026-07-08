@@ -4,7 +4,15 @@ import type { EditorState, Extension } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { nodeAtPath, parseBlock, scanBlocksView, serializeCst, type BlockView } from "../wasm/bridge";
+import {
+	nodeAtPath,
+	parseBlock,
+	scanBlocksView,
+	serializeCst,
+	type BlockView,
+	type Cst,
+	type MicaNode,
+} from "../wasm/bridge";
 import { renderCst } from "../render/layoutEngine";
 
 /**
@@ -45,10 +53,26 @@ class MicaWidget extends WidgetType {
 			app: this.plugin.app,
 			sourcePath: info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "",
 			component: child,
-			editable: { save: (path, title, text) => this.save(view, path, title, text) },
+			editable: {
+				save: (path, title, text) => this.save(view, path, title, text),
+				addTab: (tabsPath) => this.structuralEdit(view, (cst) => addTabTo(cst, tabsPath)),
+				addCell: (gridPath) => this.structuralEdit(view, (cst) => addCellTo(cst, gridPath)),
+				addGroup: (kind) => this.structuralEdit(view, (cst) => addGroupTo(cst, kind)),
+			},
+			editorAutosize: this.plugin.settings.editorAutosize,
 			chip,
 		});
 		return el;
+	}
+
+	/** Apply a structural change to the block's CST and dispatch it live. */
+	private structuralEdit(view: EditorView, mutate: (cst: Cst) => void): void {
+		const doc = view.state.doc.toString();
+		const live = scanBlocksView(doc).find((b) => (this.id ? b.id === this.id : b.start === this.start));
+		if (!live) return;
+		const cst = parseBlock(doc.slice(live.content_start, live.content_end));
+		mutate(cst);
+		view.dispatch({ changes: { from: live.content_start, to: live.content_end, insert: serializeCst(cst) } });
 	}
 
 	private save(view: EditorView, path: number[], expectedTitle: string, newText: string): void {
@@ -78,6 +102,125 @@ class MicaWidget extends WidgetType {
 	ignoreEvent(): boolean {
 		return true;
 	}
+}
+
+// --- Structural node builders (used by the + affordances) ----------------
+
+function mkLeaf(text: string): MicaNode {
+	return { kind: "leaf", text, is_code: false };
+}
+
+/** A new tab that matches the group's style (friendly `tab:` unless it uses `:::`). */
+function newTab(group: MicaNode): MicaNode {
+	const first =
+		group.kind === "container" ? group.children.find((c) => c.kind === "container" && c.name === "tab") : undefined;
+	if (first?.kind === "container" && first.open_line.startsWith(":::")) {
+		const c = ":".repeat(first.colons || 3);
+		return {
+			kind: "container",
+			name: "tab",
+			title: "New tab",
+			colons: first.colons || 3,
+			open_line: `${c}tab New tab\n`,
+			children: [mkLeaf("New tab content.\n")],
+			close_line: `${c}\n`,
+		};
+	}
+	return {
+		kind: "container",
+		name: "tab",
+		title: "New tab",
+		colons: 0,
+		open_line: "tab: New tab\n",
+		children: [mkLeaf("New tab content.\n")],
+		close_line: "",
+	};
+}
+
+function newCell(): MicaNode {
+	return {
+		kind: "container",
+		name: "cell",
+		title: "",
+		colons: 3,
+		open_line: ":::cell\n",
+		children: [mkLeaf("New cell.\n")],
+		close_line: ":::\n",
+	};
+}
+
+function newGrid(): MicaNode {
+	return {
+		kind: "container",
+		name: "grid",
+		title: "{cols=2}",
+		colons: 3,
+		open_line: ":::grid {cols=2}\n",
+		children: [newCell(), newCell()],
+		close_line: ":::\n",
+	};
+}
+
+/** A friendly delimiter group for an empty block, or a distinct `:::tabs` group to append. */
+function newTabsGroup(directive: boolean): MicaNode {
+	if (!directive) {
+		const empty: MicaNode = {
+			kind: "container",
+			name: "tabs",
+			title: "",
+			colons: 0,
+			open_line: "",
+			children: [],
+			close_line: "",
+		};
+		return {
+			kind: "container",
+			name: "tabs",
+			title: "",
+			colons: 0,
+			open_line: "",
+			children: [newTab(empty)],
+			close_line: "",
+		};
+	}
+	return {
+		kind: "container",
+		name: "tabs",
+		title: "",
+		colons: 3,
+		open_line: ":::tabs\n",
+		children: [
+			{
+				kind: "container",
+				name: "tab",
+				title: "New tab",
+				colons: 3,
+				open_line: ":::tab New tab\n",
+				children: [mkLeaf("New tab content.\n")],
+				close_line: ":::\n",
+			},
+		],
+		close_line: ":::\n",
+	};
+}
+
+function addTabTo(cst: Cst, tabsPath: number[]): void {
+	const node = nodeAtPath(cst, tabsPath);
+	if (node?.kind === "container" && node.name === "tabs") node.children.push(newTab(node));
+}
+
+function addCellTo(cst: Cst, gridPath: number[]): void {
+	const node = nodeAtPath(cst, gridPath);
+	if (node?.kind === "container" && node.name === "grid") node.children.push(newCell());
+}
+
+function addGroupTo(cst: Cst, kind: "tabs" | "grid"): void {
+	if (kind === "grid") {
+		cst.children.push(newGrid());
+		return;
+	}
+	const empty = cst.children.every((c) => c.kind === "leaf" && !c.text.trim());
+	cst.children.push(newTabsGroup(!empty));
 }
 
 // Cache the last scan so pure cursor moves (selection-only transactions) skip

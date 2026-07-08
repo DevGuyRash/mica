@@ -11,6 +11,12 @@ export interface EditHooks {
 	 * underneath the editor before replacing anything.
 	 */
 	save: (path: number[], expectedTitle: string, newText: string) => void;
+	/** Append a new tab to the tab group at `tabsPath`. */
+	addTab?: (tabsPath: number[]) => void;
+	/** Append a new cell to the grid at `gridPath`. */
+	addCell?: (gridPath: number[]) => void;
+	/** Append a new top-level group to the block. */
+	addGroup?: (kind: "tabs" | "grid") => void;
 }
 
 /** Everything the version chip needs to show state and open history. */
@@ -18,7 +24,6 @@ export interface ChipInfo {
 	plugin: MicaPlugin;
 	file: TFile;
 	blockId: string;
-	/** Current inline content, for the dirty-vs-head indicator. */
 	content: string;
 }
 
@@ -28,6 +33,8 @@ export interface RenderCtx {
 	component: Component;
 	editable?: EditHooks;
 	chip?: ChipInfo;
+	/** Live Preview only: grow the inline editor with content (default true). */
+	editorAutosize?: boolean;
 }
 
 type Container = Extract<MicaNode, { kind: "container" }>;
@@ -36,13 +43,26 @@ type Container = Extract<MicaNode, { kind: "container" }>;
 export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	el.addClass("mica");
 	renderNodes(cst.children, el, ctx, []);
+	if (ctx.editable?.addGroup) renderBlockToolbar(el, ctx);
 	if (ctx.chip) renderChip(el, ctx.chip);
 }
 
-/**
- * The per-block version chip: `v<count>` with a dirty dot when the inline
- * content differs from the stored head; clicking opens the history/diff modal.
- */
+function mkAddButton(parent: HTMLElement, label: string, tooltip: string, onClick: () => void): HTMLElement {
+	const b = parent.createEl("button", {
+		cls: "mica-add-btn",
+		text: label,
+		attr: { type: "button", "aria-label": tooltip, title: tooltip },
+	});
+	b.addEventListener("click", onClick);
+	return b;
+}
+
+function renderBlockToolbar(el: HTMLElement, ctx: RenderCtx): void {
+	const bar = el.createDiv({ cls: "mica-block-toolbar" });
+	mkAddButton(bar, "+ Tab group", "Add a tab group to this block", () => ctx.editable?.addGroup?.("tabs"));
+	mkAddButton(bar, "+ Grid", "Add a grid to this block", () => ctx.editable?.addGroup?.("grid"));
+}
+
 function renderChip(root: HTMLElement, chip: ChipInfo): void {
 	const bar = root.createDiv({ cls: "mica-chipbar" });
 	const btn = bar.createEl("button", {
@@ -55,7 +75,6 @@ function renderChip(root: HTMLElement, chip: ChipInfo): void {
 		try {
 			const state = (await chip.plugin.engine.state(chip.file))[chip.blockId];
 			const count = state?.versions.length ?? 0;
-			// The renderer may or may not include the trailing newline; accept both.
 			const dirty = state?.head
 				? hashContent(chip.content) !== state.head && hashContent(`${chip.content}\n`) !== state.head
 				: true;
@@ -107,7 +126,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		btns.forEach((b, m) => {
 			b.toggleClass("is-active", m === k);
 			b.setAttribute("aria-selected", String(m === k));
-			b.tabIndex = m === k ? 0 : -1; // roving tabindex
+			b.tabIndex = m === k ? 0 : -1;
 		});
 		panelEls.forEach((p, m) => p.toggleClass("is-active", m === k));
 		if (focus) btns[k]?.focus();
@@ -128,7 +147,10 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		panelEls.push(panel);
 	});
 
-	// Keyboard navigation per the ARIA tabs pattern.
+	if (ctx.editable?.addTab) {
+		mkAddButton(nav, "+", "Add a tab", () => ctx.editable?.addTab?.(path));
+	}
+
 	nav.addEventListener("keydown", (ev: KeyboardEvent) => {
 		const current = btns.findIndex((b) => b.tabIndex === 0);
 		if (current < 0) return;
@@ -169,12 +191,13 @@ function openInlineEditor(tab: Container, panel: HTMLElement, ctx: RenderCtx, ta
 	ta.value = serializeCst({ children: tab.children });
 	const save = (): void => ctx.editable?.save(tabPath, tab.title, ta.value);
 	const cancel = (): void => renderTabBody(tab, panel, ctx, tabPath);
-	// Autosize to content, save on Ctrl/Cmd+Enter, cancel on Escape.
+	// Grow with content; CSS `max-height` caps it and then it scrolls, and the
+	// resize handle lets you drag it larger/smaller within those bounds.
 	const fit = (): void => {
 		ta.style.height = "auto";
-		ta.style.height = `${Math.min(ta.scrollHeight + 2, 600)}px`;
+		ta.style.height = `${ta.scrollHeight + 2}px`;
 	};
-	ta.addEventListener("input", fit);
+	if (ctx.editorAutosize ?? true) ta.addEventListener("input", fit);
 	ta.addEventListener("keydown", (ev) => {
 		if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
 			ev.preventDefault();
@@ -199,6 +222,10 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			renderNodes(c.children, grid.createDiv({ cls: "mica-cell" }), ctx, [...path, idx]);
 		}
 	});
+	if (ctx.editable?.addCell) {
+		const bar = el.createDiv({ cls: "mica-grid-actions" });
+		mkAddButton(bar, "+ Cell", "Add a grid cell", () => ctx.editable?.addCell?.(path));
+	}
 }
 
 function renderMarkdown(md: string, el: HTMLElement, ctx: RenderCtx): void {

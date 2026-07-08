@@ -1,13 +1,13 @@
 /*
  * Mica styles.
  *
- * Customization is first-class: everything visual is driven by CSS custom
- * properties under `.mica`, so themes and the Style Settings plugin can
- * override them without touching plugin internals. These are seed defaults;
- * M2+ add the component styles that consume them.
+ * Custom properties are defined on `body` (NOT `.mica`) so they also resolve
+ * inside modals and the settings tab, which render outside any `.mica` block.
+ * Themes and the Style Settings plugin can override any --mica-* variable.
+ * Heights marked "(set by settings)" are driven by the plugin at runtime.
  */
 
-.mica {
+body {
 	--mica-radius: 8px;
 	--mica-gap: 8px;
 	--mica-pad: 0.75em 1em;
@@ -18,21 +18,23 @@
 	--mica-tab-fg-active: var(--text-normal);
 	--mica-accent: var(--interactive-accent);
 
-	/* diff surfaces */
-	--mica-diff-add: var(--color-green);
-	--mica-diff-del: var(--color-red);
-	--mica-diff-add-bg: rgba(var(--color-green-rgb), 0.12);
-	--mica-diff-del-bg: rgba(var(--color-red-rgb), 0.12);
+	--mica-content-max-height: none; /* tab/cell scroll cap (set by settings) */
+	--mica-editor-min-height: 3.5em;
+	--mica-editor-max-height: 24em; /* inline editor cap (set by settings) */
+	--mica-diff-max-height: 60vh;
+}
 
+.mica {
 	border: 1px solid var(--mica-border);
 	border-radius: var(--mica-radius);
 	overflow: hidden;
 }
 
-/* Tabs */
+/* ---------- Tabs ---------- */
 .mica-tab-nav {
 	display: flex;
 	flex-wrap: wrap;
+	align-items: center;
 	gap: 2px;
 	padding: 4px 4px 0;
 	background: var(--mica-tab-bg);
@@ -70,7 +72,13 @@
 	display: block;
 }
 
-/* Grid / menu */
+/* Scrollable content region (cap via --mica-content-max-height). */
+.mica-tab-body {
+	max-height: var(--mica-content-max-height);
+	overflow: auto;
+}
+
+/* ---------- Grid / menu ---------- */
 .mica-grid {
 	display: grid;
 	grid-template-columns: repeat(var(--mica-cols, 2), minmax(0, 1fr));
@@ -82,99 +90,47 @@
 	border: 1px solid var(--mica-border);
 	border-radius: var(--mica-radius);
 	padding: var(--mica-pad);
+	max-height: var(--mica-content-max-height);
+	overflow: auto;
 }
 
-/* Live Preview wrapper */
+/* ---------- Structural add ("+") affordances ---------- */
+.mica-add-btn {
+	appearance: none;
+	border: 1px dashed var(--mica-border);
+	background: transparent;
+	color: var(--text-muted);
+	border-radius: 4px;
+	padding: 2px 8px;
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+}
+
+.mica-add-btn:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+	border-style: solid;
+}
+
+.mica-grid-actions {
+	padding: 4px 12px 8px;
+}
+
+.mica-block-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 4px var(--size-4-3, 12px);
+	border-top: 1px solid var(--mica-border);
+}
+
+/* ---------- Live Preview wrapper ---------- */
 .mica-lp {
 	margin: 0.5em 0;
 }
 
-/* Diff */
-.mica-diff {
-	font-family: var(--font-monospace);
-	font-size: var(--font-ui-small);
-}
-
-.mica-diff-row {
-	display: flex;
-}
-
-.mica-diff-gutter {
-	flex: 0 0 1.5em;
-	text-align: center;
-	color: var(--text-faint);
-	user-select: none;
-}
-
-.mica-diff-text {
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.mica-diff-row.is-delete {
-	background: var(--mica-diff-del-bg);
-}
-
-.mica-diff-row.is-insert {
-	background: var(--mica-diff-add-bg);
-}
-
-.mica-diff-emph {
-	border-radius: 3px;
-	padding: 0 1px;
-	font-weight: 600;
-}
-
-.is-delete .mica-diff-emph {
-	background: var(--mica-diff-del);
-	color: var(--text-on-accent);
-}
-
-.is-insert .mica-diff-emph {
-	background: var(--mica-diff-add);
-	color: var(--text-on-accent);
-}
-
-.mica-diff-sbs {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
-}
-
-.mica-diff-srow {
-	display: contents;
-}
-
-.mica-diff-cell {
-	padding: 0 6px;
-	border-left: 1px solid var(--mica-border);
-	white-space: pre-wrap;
-	word-break: break-word;
-}
-
-.mica-diff-cell.is-delete {
-	background: var(--mica-diff-del-bg);
-}
-
-.mica-diff-cell.is-insert {
-	background: var(--mica-diff-add-bg);
-}
-
-.mica-diff-cell.is-empty {
-	background: var(--background-secondary);
-}
-
-.mica-diff-controls {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px;
-	margin-bottom: 8px;
-}
-
-.mica-diff-modal {
-	width: min(90vw, 900px);
-}
-
-/* Inline tab editing */
+/* ---------- Inline tab editing ---------- */
 .mica-tab-actions {
 	display: flex;
 	gap: 6px;
@@ -198,13 +154,20 @@
 
 .mica-edit-area {
 	width: 100%;
+	box-sizing: border-box;
+	text-align: left; /* never inherit theme centering */
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-small);
+	line-height: 1.5;
+	min-height: var(--mica-editor-min-height);
+	max-height: var(--mica-editor-max-height);
 	resize: vertical;
+	overflow: auto;
 }
 
 .mica-edit-area-modal {
 	min-height: 40vh;
+	max-height: 70vh;
 }
 
 .mica-settings-wide {
@@ -214,7 +177,7 @@
 	resize: vertical;
 }
 
-/* Version chip */
+/* ---------- Version chip ---------- */
 .mica-chipbar {
 	display: flex;
 	justify-content: flex-end;
@@ -243,7 +206,100 @@
 	border-color: var(--mica-accent);
 }
 
-/* Patch + N-up diff surfaces */
+/* ---------- Diff ---------- */
+.mica-diff {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	line-height: 1.5;
+	max-height: var(--mica-diff-max-height);
+	overflow: auto;
+	border: 1px solid var(--mica-border);
+	border-radius: var(--mica-radius);
+}
+
+.mica-diff-row {
+	display: flex;
+	align-items: baseline;
+}
+
+.mica-diff-gutter {
+	flex: 0 0 2ch;
+	text-align: center;
+	color: var(--text-faint);
+	background: var(--background-secondary);
+	user-select: none;
+}
+
+.mica-diff-text {
+	flex: 1;
+	padding-left: 6px;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.mica-diff-row.is-delete {
+	background: color-mix(in srgb, var(--color-red) 12%, transparent);
+}
+
+.mica-diff-row.is-insert {
+	background: color-mix(in srgb, var(--color-green) 12%, transparent);
+}
+
+.mica-diff-row.is-delete .mica-diff-gutter {
+	color: var(--color-red);
+	background: color-mix(in srgb, var(--color-red) 20%, transparent);
+}
+
+.mica-diff-row.is-insert .mica-diff-gutter {
+	color: var(--color-green);
+	background: color-mix(in srgb, var(--color-green) 20%, transparent);
+}
+
+/* Intra-line (char / word) emphasis. */
+.mica-diff-emph {
+	border-radius: 3px;
+	padding: 0 1px;
+	font-weight: 700;
+}
+
+.is-delete .mica-diff-emph {
+	background: color-mix(in srgb, var(--color-red) 42%, transparent);
+}
+
+.is-insert .mica-diff-emph {
+	background: color-mix(in srgb, var(--color-green) 42%, transparent);
+}
+
+/* Side by side */
+.mica-diff-sbs {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+}
+
+.mica-diff-srow {
+	display: contents;
+}
+
+.mica-diff-cell {
+	padding: 0 6px;
+	border-left: 1px solid var(--mica-border);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.mica-diff-cell.is-delete {
+	background: color-mix(in srgb, var(--color-red) 12%, transparent);
+}
+
+.mica-diff-cell.is-insert {
+	background: color-mix(in srgb, var(--color-green) 12%, transparent);
+}
+
+.mica-diff-cell.is-empty {
+	background: var(--background-secondary);
+}
+
+/* Patch + N-up */
 .mica-diff-patchtext,
 .mica-diff-basetext {
 	white-space: pre-wrap;
@@ -257,10 +313,11 @@
 .mica-diff-nup {
 	display: grid;
 	grid-template-columns: repeat(var(--mica-nup-cols, 3), minmax(0, 1fr));
-	gap: 0;
 }
 
 .mica-diff-nup-head {
+	position: sticky;
+	top: 0;
 	font-weight: 600;
 	padding: 4px 6px;
 	border-bottom: 1px solid var(--mica-border);
@@ -274,4 +331,34 @@
 
 .mica-diff-nup-col:first-of-type {
 	border-left: none;
+}
+
+/* ---------- Compare toolbar (aligned custom controls) ---------- */
+.mica-diff-modal {
+	width: min(92vw, 960px);
+}
+
+.mica-diff-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 14px;
+	margin-bottom: 10px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--mica-border);
+}
+
+.mica-diff-field {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.mica-diff-field > label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.mica-diff-spacer {
+	flex: 1 1 auto;
 }

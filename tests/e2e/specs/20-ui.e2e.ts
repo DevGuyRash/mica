@@ -73,4 +73,28 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		// can't be supplied this way, the widget never appears.
 		await expect($(".mica-lp .mica-tabs")).toExist();
 	});
+
+	it("the + affordance adds a tab", async function () {
+		await openNote("UI.md", "live");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add-btn").length > 0),
+			{ timeout: 8000, timeoutMsg: "the + button never appeared in the tab nav" },
+		);
+		await browser.executeObsidian(() => {
+			const add = Array.from(document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add-btn")).find(
+				(b) => b.textContent === "+",
+			);
+			(add as HTMLElement | undefined)?.click();
+		});
+		// The change lands in the live editor (friendly `tab:` style, matched).
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+					return (view?.editor.getValue() ?? "").includes("tab: New tab");
+				}),
+			{ timeout: 8000, timeoutMsg: "the new tab was not added to the document" },
+		);
+	});
 });

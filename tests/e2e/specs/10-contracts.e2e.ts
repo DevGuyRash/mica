@@ -130,6 +130,44 @@ describe("runtime contracts (window.mica)", function () {
 		expect(Array.isArray(scan)).toBe(true);
 	});
 
+	it("compare modal renders colored +/- diff rows", async function () {
+		await browser.executeObsidian(async ({ app, obsidian }) => {
+			const p = "Diffcolor.md";
+			if (!app.vault.getAbstractFileByPath(p)) {
+				await app.vault.create(p, "```mica id=dc-1\ntab: A\nversion one\n```\n");
+			}
+			await window.mica.versionsSnapshot(p);
+			await window.mica.blockUpdate(p, "dc-1", "tab: A\nversion two changed\n");
+			await window.mica.versionsSnapshot(p);
+			const f = app.vault.getAbstractFileByPath(p);
+			if (f instanceof obsidian.TFile) await app.workspace.getLeaf(false).openFile(f, { state: { mode: "source" } });
+		});
+		await browser.executeObsidianCommand("mica:diff-versions");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-diff-row").length > 0),
+			{ timeout: 10_000, timeoutMsg: "compare modal never rendered diff rows" },
+		);
+		const c = await browser.executeObsidian(() => {
+			const bg = (sel: string): string => {
+				const el = document.querySelector(sel);
+				return el ? getComputedStyle(el).backgroundColor : "";
+			};
+			return {
+				hasDel: Boolean(document.querySelector(".mica-diff-row.is-delete")),
+				hasIns: Boolean(document.querySelector(".mica-diff-row.is-insert")),
+				delBg: bg(".mica-diff-row.is-delete"),
+				insBg: bg(".mica-diff-row.is-insert"),
+			};
+		});
+		expect(c.hasDel).toBe(true);
+		expect(c.hasIns).toBe(true);
+		// The var-scope + color-mix fix: rows are tinted, not transparent.
+		expect(c.delBg).not.toBe("rgba(0, 0, 0, 0)");
+		expect(c.insBg).not.toBe("rgba(0, 0, 0, 0)");
+		expect(c.delBg).not.toBe(c.insBg); // red vs green
+		await browser.executeObsidian(() => (document.querySelector(".modal-close-button") as HTMLElement | null)?.click());
+	});
+
 	it("file-bridge: inbox instruction produces an outbox result", async function () {
 		const req = `req-${Date.now()}`;
 		await browser.executeObsidian(async ({ app }, name) => {

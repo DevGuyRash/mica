@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting, TFile } from "obsidian";
+import { Modal, Notice, TFile } from "obsidian";
 import type MicaPlugin from "../main";
 import { diffText, makePatch, type DiffGranularity } from "../wasm/bridge";
 import { readObject } from "../storage/sidecar";
@@ -41,10 +41,9 @@ export class DiffModal extends Modal {
 		const state = await this.plugin.engine.state(this.file);
 		const bs = state[this.blockId];
 		if (!bs || bs.versions.length === 0) {
-			this.contentEl.setText("No stored versions for this block yet. Snapshot it first.");
+			this.contentEl.setText("No stored versions for this block yet. Edit it, or run “Snapshot versions now”.");
 			return;
 		}
-		// Newest first.
 		const total = bs.versions.length;
 		this.choices = [...bs.versions].reverse().map((v, i) => ({ hash: v.hash, label: v.label ?? `v${total - i}` }));
 		for (const c of this.choices) {
@@ -56,93 +55,126 @@ export class DiffModal extends Modal {
 		this.render();
 	}
 
-	private versionDropdown(
-		host: HTMLElement,
-		name: string,
+	private select(bar: HTMLElement, label: string): HTMLSelectElement {
+		const field = bar.createDiv({ cls: "mica-diff-field" });
+		field.createEl("label", { text: label });
+		return field.createEl("select", { cls: "dropdown" });
+	}
+
+	private versionSelect(
+		bar: HTMLElement,
+		label: string,
 		value: number,
 		allowNone: boolean,
 		onPick: (v: number) => void,
 	): void {
-		new Setting(host).setName(name).addDropdown((d) => {
-			if (allowNone) d.addOption(String(NONE), "—");
-			this.choices.forEach((c, i) => d.addOption(String(i), c.label));
-			d.setValue(String(value)).onChange((v) => onPick(Number(v)));
+		const sel = this.select(bar, label);
+		if (allowNone) sel.createEl("option", { text: "—", value: String(NONE) });
+		this.choices.forEach((c, i) => sel.createEl("option", { text: c.label, value: String(i) }));
+		sel.value = String(value);
+		sel.addEventListener("change", () => onPick(Number(sel.value)));
+	}
+
+	private optionSelect<T extends string>(
+		bar: HTMLElement,
+		label: string,
+		opts: [T, string][],
+		value: T,
+		onPick: (v: T) => void,
+	): void {
+		const sel = this.select(bar, label);
+		for (const [v, t] of opts) sel.createEl("option", { text: t, value: v });
+		sel.value = value;
+		sel.addEventListener("change", () => onPick(sel.value as T));
+	}
+
+	private button(bar: HTMLElement, label: string, tooltip: string, onClick: () => void): void {
+		const b = bar.createEl("button", {
+			cls: "mica-add-btn",
+			text: label,
+			attr: { type: "button", title: tooltip },
 		});
+		b.addEventListener("click", onClick);
 	}
 
 	private render(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		const controls = contentEl.createDiv({ cls: "mica-diff-controls" });
+		const bar = contentEl.createDiv({ cls: "mica-diff-toolbar" });
 
-		this.versionDropdown(controls, "Base", this.baseIdx, false, (v) => {
+		this.versionSelect(bar, "Base", this.baseIdx, false, (v) => {
 			this.baseIdx = v;
 			this.render();
 		});
-		this.versionDropdown(controls, "Compare", this.otherIdx, false, (v) => {
+		this.versionSelect(bar, "Compare", this.otherIdx, false, (v) => {
 			this.otherIdx = v;
 			this.render();
 		});
-		this.versionDropdown(controls, "Compare B", this.otherIdx2, true, (v) => {
+		this.versionSelect(bar, "+ 3rd", this.otherIdx2, true, (v) => {
 			this.otherIdx2 = v;
 			this.render();
 		});
-		new Setting(controls).setName("Granularity").addDropdown((d) => {
-			d.addOption("line", "Line").addOption("word", "Word").addOption("char", "Char");
-			d.setValue(this.granularity).onChange((v) => {
-				this.granularity = v as DiffGranularity;
+		this.optionSelect<DiffGranularity>(
+			bar,
+			"Granularity",
+			[
+				["line", "Line"],
+				["word", "Word"],
+				["char", "Char"],
+			],
+			this.granularity,
+			(v) => {
+				this.granularity = v;
 				this.render();
-			});
-		});
-		new Setting(controls).setName("Mode").addDropdown((d) => {
-			d.addOption("inline", "Inline").addOption("side-by-side", "Side by side").addOption("patch", "Patch");
-			d.setValue(this.mode).onChange((v) => {
-				this.mode = v as DiffMode | "patch";
+			},
+		);
+		this.optionSelect<DiffMode | "patch">(
+			bar,
+			"Mode",
+			[
+				["inline", "Inline"],
+				["side-by-side", "Side by side"],
+				["patch", "Patch"],
+			],
+			this.mode,
+			(v) => {
+				this.mode = v;
 				this.render();
-			});
+			},
+		);
+
+		bar.createDiv({ cls: "mica-diff-spacer" });
+		this.button(bar, "⇄ Swap", "Swap base ↔ compare", () => {
+			[this.baseIdx, this.otherIdx] = [this.otherIdx, this.baseIdx];
+			this.render();
 		});
-		new Setting(controls)
-			.addExtraButton((b) =>
-				b
-					.setIcon("arrow-left-right")
-					.setTooltip("Swap base ↔ compare")
-					.onClick(() => {
-						[this.baseIdx, this.otherIdx] = [this.otherIdx, this.baseIdx];
-						this.render();
-					}),
-			)
-			.addButton((b) =>
-				b.setButtonText("Copy patch").onClick(() => {
-					void navigator.clipboard.writeText(makePatch(this.text(this.baseIdx), this.text(this.otherIdx), 3));
-					new Notice("Patch copied.");
-				}),
-			)
-			.addButton((b) =>
-				b
-					.setButtonText("Edit compare as new version")
-					.setTooltip(
-						"Branch: opens the Compare version for editing; saving creates a NEW version with this one as its parent",
-					)
-					.onClick(() => {
-						const pick = this.choices[this.otherIdx];
-						if (!pick) return;
-						new EditVersionModal(
-							this.plugin,
-							this.file,
-							this.blockId,
-							pick,
-							this.text(this.otherIdx),
-							() => void this.onOpen(),
-						).open();
-					}),
-			);
+		this.button(bar, "Copy patch", "Copy a unified diff to the clipboard", () => {
+			void navigator.clipboard.writeText(makePatch(this.text(this.baseIdx), this.text(this.otherIdx), 3));
+			new Notice("Patch copied.");
+		});
+		this.button(
+			bar,
+			"Edit as new version",
+			"Branch: edit the Compare version; saving creates a new version",
+			() => {
+				const pick = this.choices[this.otherIdx];
+				if (!pick) return;
+				new EditVersionModal(
+					this.plugin,
+					this.file,
+					this.blockId,
+					pick,
+					this.text(this.otherIdx),
+					() => void this.onOpen(),
+				).open();
+			},
+		);
 
 		const surface = contentEl.createDiv();
 		if (this.mode === "patch") {
 			let patch = makePatch(this.text(this.baseIdx), this.text(this.otherIdx), 3);
-			if (this.otherIdx2 !== NONE) {
+			if (this.otherIdx2 !== NONE)
 				patch += `\n${makePatch(this.text(this.baseIdx), this.text(this.otherIdx2), 3)}`;
-			}
 			renderPatch(surface, patch);
 			return;
 		}
