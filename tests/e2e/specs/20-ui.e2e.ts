@@ -220,4 +220,83 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			(document.querySelector(".mica-lp .mica-auto") as HTMLElement | null)?.click(),
 		);
 	});
+
+	it("a block with a group shows no stray root write region (no duplicate section)", async function () {
+		await seedAndOpen("Sections.md", "Intro line.\n\n```mica id=se-1\ntab: One\nfirst\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length > 0),
+			{ timeout: 8000, timeoutMsg: "the widget never rendered" },
+		);
+		// A tab with content shows no ghost anywhere, and NO region at the block root.
+		const rootRegions = await browser.executeObsidian(
+			() =>
+				Array.from(document.querySelectorAll(".mica-lp .mica-region")).filter(
+					(r) => !r.closest(".mica-tab-body") && !r.closest(".mica-cell"),
+				).length,
+		);
+		expect(rootRegions).toBe(0);
+	});
+
+	it("deleting the last tab removes the whole group", async function () {
+		await seedAndOpen("DelTab.md", "Intro line.\n\n```mica id=dt-1\ntab: Only\nbody\n```\n", "live");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-tab-chip .mica-chip-x").length > 0,
+				),
+			{ timeout: 8000, timeoutMsg: "the tab delete × never appeared" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-tab-chip .mica-chip-x") as HTMLElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						!(app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "").includes(
+							"tab: Only",
+						),
+				),
+			{ timeout: 8000, timeoutMsg: "the emptied group was not removed" },
+		);
+		expect(await browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length)).toBe(0);
+	});
+
+	it("the interval input opens in place, not at the far end", async function () {
+		await seedAndOpen("Interval.md", "Intro line.\n\n```mica id=in-2\ntab: A\nx\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-auto-secs"))),
+			{ timeout: 8000, timeoutMsg: "the interval chip never appeared" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-auto-secs") as HTMLElement | null)?.click(),
+		);
+		const ok = await browser.executeObsidian(() => {
+			const footer = document.querySelector(".mica-lp .mica-footer");
+			if (!footer) return false;
+			const kids = Array.from(footer.children);
+			const inputIdx = kids.findIndex((k) => k.classList.contains("mica-auto-input"));
+			const spacerIdx = kids.findIndex((k) => k.classList.contains("mica-footer-spacer"));
+			return inputIdx >= 0 && spacerIdx >= 0 && inputIdx < spacerIdx; // before the spacer, not at the end
+		});
+		expect(ok).toBe(true);
+	});
+
+	it("the grid column number is click-editable", async function () {
+		await seedAndOpen(
+			"Cols.md",
+			"Intro line.\n\n```mica id=co-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n```\n",
+			"live",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-stepper-val"))),
+			{ timeout: 8000, timeoutMsg: "the column stepper never appeared" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-stepper-val") as HTMLElement | null)?.click(),
+		);
+		expect(
+			await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-stepper-input"))),
+		).toBe(true);
+	});
 });

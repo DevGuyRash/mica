@@ -77,7 +77,6 @@ interface NodesOpts {
 function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: number[], opts: NodesOpts = {}): void {
 	let i = 0;
 	let opened = false;
-	let anyRegion = false;
 	while (i < nodes.length) {
 		if (nodes[i].kind === "leaf") {
 			let j = i;
@@ -89,20 +88,22 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 			const auto: boolean = Boolean(opts.autoOpen) && !opened;
 			renderRegion(el, ctx, path, i, j, md, auto);
 			opened = opened || auto;
-			anyRegion = true;
 			i = j;
 		} else {
 			renderContainer(nodes[i] as Container, el, ctx, [...path, i]);
 			i++;
 		}
 	}
-	// A ghost region so an empty or all-structure container still has somewhere
-	// to write prose.
-	if (ctx.editable && !anyRegion) {
-		renderRegion(el, ctx, path, nodes.length, nodes.length, "", Boolean(opts.autoOpen) && !opened);
+	// Only a TRULY empty container gets a "click to write" ghost. A container
+	// whose children are all nested groups (e.g. the block root holding one tabs
+	// group) is NOT empty and must not sprout a stray write box below the group.
+	if (ctx.editable && nodes.length === 0) {
+		renderRegion(el, ctx, path, 0, 0, "", Boolean(opts.autoOpen) && !opened);
 	}
 	if (ctx.editable && opts.insert) renderInsert(el, ctx, path, nodes.length);
 }
+
+const INTERACTIVE = "a, button, input, textarea, .internal-link";
 
 function renderRegion(
 	el: HTMLElement,
@@ -115,6 +116,21 @@ function renderRegion(
 ): void {
 	const region = el.createDiv({ cls: "mica-region" });
 	paintRegionView(region, ctx, path, start, end, md);
+	// Attach the open-on-click handlers ONCE (not in paintRegionView, which reruns
+	// on cancel) and keep the events off CodeMirror — a click reaching CM would
+	// move the caret into the block and flip Live Preview to raw source.
+	if (ctx.editable) {
+		const guard = (e: Event): boolean => !(e.target as HTMLElement).closest(INTERACTIVE);
+		region.addEventListener("mousedown", (e) => {
+			if (guard(e)) e.stopPropagation();
+		});
+		region.addEventListener("click", (e) => {
+			if (!guard(e)) return;
+			e.preventDefault();
+			e.stopPropagation();
+			openRegionEditor(region, ctx, path, start, end, md);
+		});
+	}
 	if (autoOpen) queueMicrotask(() => openRegionEditor(region, ctx, path, start, end, md));
 }
 
@@ -142,11 +158,6 @@ function paintRegionView(
 			e.stopPropagation();
 			openRegionEditor(region, ctx, path, start, end, md);
 		});
-	region.addEventListener("click", (e) => {
-		const t = e.target as HTMLElement;
-		if (t.closest("a, button, input, textarea, .internal-link")) return;
-		openRegionEditor(region, ctx, path, start, end, md);
-	});
 }
 
 function openRegionEditor(
@@ -163,6 +174,7 @@ function openRegionEditor(
 	region.addClass("is-editing");
 	const ta = region.createEl("textarea", { cls: "mica-edit-area" });
 	ta.value = original;
+	ta.addEventListener("mousedown", (e) => e.stopPropagation()); // keep clicks off CM
 	const fit = (): void => {
 		ta.style.height = "auto";
 		ta.style.height = `${ta.scrollHeight + 2}px`;
@@ -287,6 +299,8 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			text: "+",
 			attr: { type: "button", "aria-label": "Add tab", title: "Add a tab after this one" },
 		}).addEventListener("click", () => ctx.editable?.apply({ op: "insertTab", path, at }));
+		nav.createDiv({ cls: "mica-nav-spacer" });
+		mkGroupDelete(nav, ctx, node, path, "tab group");
 	}
 
 	nav.addEventListener("keydown", (ev: KeyboardEvent) => {
@@ -378,6 +392,8 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			text: "+ Cell",
 			attr: { type: "button", title: "Add a cell" },
 		}).addEventListener("click", () => ctx.editable?.apply({ op: "insertCell", path, at: node.children.length }));
+		bar.createDiv({ cls: "mica-nav-spacer" });
+		mkGroupDelete(bar, ctx, node, path, "grid");
 	}
 }
 
@@ -389,7 +405,37 @@ function stepper(bar: HTMLElement, label: string, value: number, onChange: (n: n
 		text: "−",
 		attr: { type: "button", "aria-label": "Fewer columns" },
 	}).addEventListener("click", () => onChange(Math.max(1, value - 1)));
-	s.createEl("span", { cls: "mica-stepper-val", text: String(value) });
+	// The number is clickable — type a value directly instead of only ± .
+	const val = s.createEl("button", {
+		cls: "mica-stepper-val",
+		text: String(value),
+		attr: { type: "button", title: "Click to type a value" },
+	});
+	val.addEventListener("click", () => {
+		const input = s.createEl("input", { cls: "mica-stepper-input", attr: { type: "number", min: "1", max: "24" } });
+		s.insertBefore(input, val);
+		val.style.display = "none";
+		input.value = String(value);
+		input.focus();
+		input.select();
+		let done = false;
+		const commit = (): void => {
+			if (done) return;
+			done = true;
+			onChange(Math.max(1, Number(input.value) || value));
+		};
+		input.addEventListener("keydown", (e) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				commit();
+			} else if (e.key === "Escape") {
+				done = true;
+				input.remove();
+				val.style.display = "";
+			}
+		});
+		input.addEventListener("blur", commit);
+	});
 	s.createEl("button", {
 		cls: "mica-step",
 		text: "+",
@@ -397,19 +443,45 @@ function stepper(bar: HTMLElement, label: string, value: number, onChange: (n: n
 	}).addEventListener("click", () => onChange(value + 1));
 }
 
-/** A quiet, contextual "insert a group here" affordance at the end of a region. */
+/** True if any descendant leaf carries non-empty prose. */
+function nodeHasContent(node: MicaNode): boolean {
+	if (node.kind === "leaf") return node.text.trim().length > 0;
+	return node.children.some(nodeHasContent);
+}
+
+/** A hover-revealed "×" that deletes a whole group; confirms first if non-empty. */
+function mkGroupDelete(host: HTMLElement, ctx: RenderCtx, node: Container, path: number[], label: string): void {
+	host.createEl("button", {
+		cls: "mica-group-x",
+		text: "×",
+		attr: { type: "button", "aria-label": `Delete ${label}`, title: `Delete ${label}` },
+	}).addEventListener("click", (e) => {
+		e.stopPropagation();
+		if (nodeHasContent(node) && !window.confirm(`Delete this ${label} and everything in it?`)) return;
+		ctx.editable?.apply({ op: "deleteNode", path });
+	});
+}
+
+/** A quiet, contextual "+" that reveals "Tabs / Grid" — inserts a group here. */
 function renderInsert(el: HTMLElement, ctx: RenderCtx, path: number[], at: number): void {
 	const bar = el.createDiv({ cls: "mica-insert" });
-	bar.createEl("button", {
+	const toggle = bar.createEl("button", {
+		cls: "mica-insert-toggle",
+		text: "+",
+		attr: { type: "button", "aria-label": "Insert a group", title: "Insert a tab group or grid here" },
+	});
+	const menu = bar.createDiv({ cls: "mica-insert-menu" });
+	menu.createEl("button", {
 		cls: "mica-insert-btn",
-		text: "+ Tabs",
+		text: "Tabs",
 		attr: { type: "button", title: "Insert a tab group here" },
 	}).addEventListener("click", () => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "tabs" }));
-	bar.createEl("button", {
+	menu.createEl("button", {
 		cls: "mica-insert-btn",
-		text: "+ Grid",
+		text: "Grid",
 		attr: { type: "button", title: "Insert a grid here" },
 	}).addEventListener("click", () => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "grid" }));
+	toggle.addEventListener("click", () => bar.toggleClass("is-open", !bar.hasClass("is-open")));
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +505,7 @@ function buildFooter(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo, repaint: 
 
 	const pill = bar.createEl("button", {
 		cls: `mica-auto ${on ? "is-on" : "is-off"}`,
-		text: on ? `⏺ Auto · ${secs(p)}s` : "⏸ Manual",
+		text: on ? "⏺ Auto" : "⏸ Manual",
 		attr: { type: "button", title: on ? "Auto-save is on. Click for manual." : "Manual. Click to auto-save." },
 	});
 	pill.addEventListener("click", async () => {
@@ -466,8 +538,10 @@ function buildFooter(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo, repaint: 
 }
 
 function editInterval(bar: HTMLElement, iv: HTMLElement, plugin: MicaPlugin, repaint: () => void): void {
-	iv.style.display = "none";
 	const input = bar.createEl("input", { cls: "mica-auto-input", attr: { type: "number", min: "1", max: "60" } });
+	// Show the input WHERE the interval chip is, not at the far end of the bar.
+	iv.insertAdjacentElement("afterend", input);
+	iv.style.display = "none";
 	input.value = String(secs(plugin));
 	input.focus();
 	input.select();

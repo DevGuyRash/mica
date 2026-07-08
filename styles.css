@@ -209,14 +209,45 @@ body {
 
 .mica-insert {
 	display: flex;
+	align-items: center;
 	gap: 6px;
-	padding: 4px 0 2px;
-	opacity: 0.3;
+	padding: 3px 0 1px;
+	opacity: 0.25;
 	transition: opacity 0.15s;
 }
 
-.mica-insert:hover {
+.mica-insert:hover,
+.mica-insert.is-open {
 	opacity: 1;
+}
+
+.mica-insert-toggle {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: 1px dashed var(--mica-border);
+	border-radius: 6px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	line-height: 1;
+}
+
+.mica-insert-toggle:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+	border-style: solid;
+}
+
+.mica-insert-menu {
+	display: none;
+	gap: 6px;
+}
+
+.mica-insert.is-open .mica-insert-menu {
+	display: inline-flex;
 }
 
 .mica-insert-btn {
@@ -234,6 +265,36 @@ body {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
 	border-style: solid;
+}
+
+/* Push the group-delete "×" to the far end of a nav / actions row. */
+.mica-nav-spacer {
+	flex: 1 1 auto;
+}
+
+.mica-group-x {
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: var(--text-faint);
+	font-size: 15px;
+	line-height: 1;
+	padding: 2px 6px;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+
+.mica-tab-nav:hover .mica-group-x,
+.mica-grid-actions:hover .mica-group-x {
+	opacity: 0.7;
+}
+
+.mica-group-x:hover {
+	opacity: 1;
+	color: var(--text-error, var(--mica-diff-del));
+	background: var(--background-modifier-hover);
+	border-radius: 4px;
 }
 
 /* ---------- Grid ---------- */
@@ -321,7 +382,24 @@ body {
 }
 
 .mica-stepper-val {
-	min-width: 1.2em;
+	min-width: 1.6em;
+	padding: 1px 4px;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--text-normal);
+	cursor: text;
+}
+
+.mica-stepper-val:hover {
+	border-color: var(--mica-border);
+	background: var(--background-modifier-hover);
+}
+
+.mica-stepper-input {
+	width: 3.2em;
 	text-align: center;
 	font-variant-numeric: tabular-nums;
 }

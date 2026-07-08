@@ -18,7 +18,8 @@ export type StructOp =
 	| { op: "deleteCell"; path: number[]; index: number }
 	| { op: "setCols"; path: number[]; cols: number }
 	| { op: "insertGroup"; path: number[]; at: number; kind: "tabs" | "grid" }
-	| { op: "deleteGroup"; path: number[]; index: number };
+	| { op: "deleteGroup"; path: number[]; index: number }
+	| { op: "deleteNode"; path: number[] };
 
 /** Where the renderer should place focus after an op re-renders the block. */
 export interface Reveal {
@@ -132,6 +133,16 @@ function namedAt(cst: Cst, path: number[], name: string): Container | null {
 	return n && n.kind === "container" && n.name === name ? n : null;
 }
 
+/** Remove the node at an absolute child-path (parent = path minus its last index). */
+function removeNodeAt(cst: Cst, path: number[]): boolean {
+	if (path.length === 0) return false;
+	const parent = containerAt(cst, path.slice(0, -1));
+	const index = path[path.length - 1];
+	if (!parent || !parent.children[index]) return false;
+	parent.children.splice(index, 1);
+	return true;
+}
+
 /**
  * Apply a structural op to `cst` in place. Returns false (a no-op) when the
  * target can't be found or a `saveRegion`'s expected text no longer matches —
@@ -157,6 +168,9 @@ export function applyOp(cst: Cst, op: StructOp): boolean {
 			const g = namedAt(cst, op.path, "tabs");
 			if (!g || !g.children[op.index]) return false;
 			g.children.splice(op.index, 1);
+			// An empty tabs group serializes away (friendly form) and dead-ends its
+			// path — remove the whole group once its last tab is gone.
+			if (!g.children.some((c) => c.kind === "container" && c.name === "tab")) removeNodeAt(cst, op.path);
 			return true;
 		}
 		case "renameTab": {
@@ -176,6 +190,8 @@ export function applyOp(cst: Cst, op: StructOp): boolean {
 			const g = namedAt(cst, op.path, "grid");
 			if (!g || !g.children[op.index]) return false;
 			g.children.splice(op.index, 1);
+			// A grid with no cells left is just scaffolding — remove it.
+			if (!g.children.some((c) => c.kind === "container" && c.name === "cell")) removeNodeAt(cst, op.path);
 			return true;
 		}
 		case "setCols": {
@@ -200,6 +216,8 @@ export function applyOp(cst: Cst, op: StructOp): boolean {
 			t.children.splice(op.index, 1);
 			return true;
 		}
+		case "deleteNode":
+			return removeNodeAt(cst, op.path);
 	}
 }
 
