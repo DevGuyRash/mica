@@ -27,11 +27,20 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 			}
 		}
 
-		renderCst(parseBlock(source), el, {
-			app: plugin.app,
-			sourcePath: ctx.sourcePath,
-			component: child,
-			chip,
-		});
+		try {
+			renderCst(parseBlock(source), el, {
+				app: plugin.app,
+				sourcePath: ctx.sourcePath,
+				component: child,
+				chip,
+			});
+		} catch (e) {
+			// A render error must never blank the block — show it and keep the source.
+			console.error("Mica: reading render failed", e);
+			el.createEl("pre", {
+				cls: "mica-render-error",
+				text: `Mica render error: ${e instanceof Error ? `${e.message}\n${e.stack ?? ""}` : String(e)}`,
+			});
+		}
 	});
 }

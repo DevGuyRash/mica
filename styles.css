@@ -1,10 +1,10 @@
 /*
  * Mica styles.
  *
- * Custom properties are defined on `body` (NOT `.mica`) so they also resolve
+ * Editing chrome is quiet by default and revealed on hover, so content is the
+ * hero. Custom properties live on `body` (NOT `.mica`) so they also resolve
  * inside modals and the settings tab, which render outside any `.mica` block.
  * Themes and the Style Settings plugin can override any --mica-* variable.
- * Heights marked "(set by settings)" are driven by the plugin at runtime.
  */
 
 body {
@@ -17,6 +17,10 @@ body {
 	--mica-tab-fg: var(--text-muted);
 	--mica-tab-fg-active: var(--text-normal);
 	--mica-accent: var(--interactive-accent);
+
+	/* Diff/state colors — fall back to safe hex if a theme omits --color-*. */
+	--mica-diff-add: var(--color-green, #3fb950);
+	--mica-diff-del: var(--color-red, #f85149);
 
 	--mica-content-max-height: none; /* tab/cell scroll cap (set by settings) */
 	--mica-editor-min-height: 3.5em;
@@ -41,6 +45,12 @@ body {
 	border-bottom: 1px solid var(--mica-border);
 }
 
+.mica-tab-chip {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+}
+
 .mica-tab-btn {
 	appearance: none;
 	border: none;
@@ -63,6 +73,41 @@ body {
 	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
 }
 
+.mica-chip-x {
+	position: absolute;
+	top: -3px;
+	right: -3px;
+	display: grid;
+	place-items: center;
+	width: 15px;
+	height: 15px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: var(--background-secondary-alt, var(--background-secondary));
+	color: var(--text-muted);
+	font-size: 11px;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+
+.mica-tab-chip:hover .mica-chip-x {
+	opacity: 1;
+}
+
+.mica-chip-x:hover {
+	color: var(--text-on-accent, #fff);
+	background: var(--text-error, var(--mica-diff-del));
+}
+
+.mica-rename {
+	font-size: var(--font-ui-small);
+	padding: 4px 8px;
+	max-width: 12em;
+}
+
 .mica-tab-panel {
 	display: none;
 	padding: var(--mica-pad);
@@ -78,78 +123,50 @@ body {
 	overflow: auto;
 }
 
-/* ---------- Grid / menu ---------- */
-.mica-grid {
-	display: grid;
-	grid-template-columns: repeat(var(--mica-cols, 2), minmax(0, 1fr));
-	gap: var(--mica-gap);
-	padding: var(--mica-pad);
+/* ---------- Content regions (inline click-to-edit) ---------- */
+.mica-region {
+	position: relative;
+	border-radius: 6px;
+	margin: 1px 0;
+	padding: 2px 4px;
 }
 
-.mica-cell {
-	border: 1px solid var(--mica-border);
-	border-radius: var(--mica-radius);
-	padding: var(--mica-pad);
-	max-height: var(--mica-content-max-height);
-	overflow: auto;
+.mica-region.is-editable {
+	cursor: text;
 }
 
-/* ---------- Structural add ("+") affordances ---------- */
-.mica-add-btn {
-	appearance: none;
-	border: 1px dashed var(--mica-border);
+.mica-region.is-editable:hover {
+	background: var(--background-modifier-hover);
+}
+
+.mica-region-edit {
+	position: absolute;
+	top: 3px;
+	right: 3px;
+	padding: 0 5px;
+	border: none;
+	border-radius: 4px;
 	background: transparent;
 	color: var(--text-muted);
-	border-radius: 4px;
-	padding: 2px 8px;
-	cursor: pointer;
 	font-size: var(--font-ui-smaller);
-	line-height: 1.5;
-}
-
-.mica-add-btn:hover {
-	color: var(--text-normal);
-	background: var(--background-modifier-hover);
-	border-style: solid;
-}
-
-.mica-grid-actions {
-	padding: 4px 12px 8px;
-}
-
-.mica-block-toolbar {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px;
-	padding: 4px var(--size-4-3, 12px);
-	border-top: 1px solid var(--mica-border);
-}
-
-/* ---------- Live Preview wrapper ---------- */
-.mica-lp {
-	margin: 0.5em 0;
-}
-
-/* ---------- Inline tab editing ---------- */
-.mica-tab-actions {
-	display: flex;
-	gap: 6px;
-	margin-top: 6px;
-}
-
-.mica-edit-btn {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	background: transparent;
-	border: 1px solid var(--mica-border);
-	border-radius: 4px;
-	padding: 2px 8px;
+	line-height: 1.4;
 	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s;
 }
 
-.mica-edit-btn:hover {
-	color: var(--text-normal);
+.mica-region.is-editable:hover .mica-region-edit {
+	opacity: 0.7;
+}
+
+.mica-region-edit:hover {
+	opacity: 1;
 	background: var(--background-modifier-hover);
+}
+
+.mica-ghost {
+	color: var(--text-faint);
+	font-style: italic;
 }
 
 .mica-edit-area {
@@ -165,25 +182,214 @@ body {
 	overflow: auto;
 }
 
-.mica-edit-area-modal {
-	min-height: 40vh;
-	max-height: 70vh;
-}
-
-.mica-settings-wide {
-	width: 100%;
-	font-family: var(--font-monospace);
-	font-size: var(--font-ui-smaller);
-	resize: vertical;
-}
-
-/* ---------- Version chip ---------- */
-.mica-chipbar {
+.mica-region-actions {
 	display: flex;
-	justify-content: flex-end;
-	padding: 2px 6px;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+/* ---------- Add / insert affordances ---------- */
+.mica-add {
+	appearance: none;
+	border: 1px dashed var(--mica-border);
+	background: transparent;
+	color: var(--text-muted);
+	border-radius: 6px;
+	padding: 2px 8px;
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+}
+
+.mica-add:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+	border-style: solid;
+}
+
+.mica-insert {
+	display: flex;
+	gap: 6px;
+	padding: 4px 0 2px;
+	opacity: 0.3;
+	transition: opacity 0.15s;
+}
+
+.mica-insert:hover {
+	opacity: 1;
+}
+
+.mica-insert-btn {
+	appearance: none;
+	border: 1px dashed var(--mica-border);
+	background: transparent;
+	color: var(--text-muted);
+	border-radius: 6px;
+	padding: 1px 8px;
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
+
+.mica-insert-btn:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+	border-style: solid;
+}
+
+/* ---------- Grid ---------- */
+.mica-grid {
+	display: grid;
+	grid-template-columns: repeat(var(--mica-cols, 2), minmax(0, 1fr));
+	gap: var(--mica-gap);
+	padding: var(--mica-pad);
+}
+
+.mica-cell {
+	position: relative;
+	border: 1px solid var(--mica-border);
+	border-radius: var(--mica-radius);
+	padding: var(--mica-pad);
+	max-height: var(--mica-content-max-height);
+	overflow: auto;
+}
+
+.mica-cell-x {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: grid;
+	place-items: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 13px;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+
+.mica-cell:hover .mica-cell-x {
+	opacity: 0.8;
+}
+
+.mica-cell-x:hover {
+	opacity: 1;
+	color: var(--text-error, var(--mica-diff-del));
+	background: var(--background-modifier-hover);
+}
+
+.mica-grid-actions {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 4px 12px 8px;
+}
+
+.mica-stepper {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.mica-stepper-label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.mica-step {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: 1px solid var(--mica-border);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	line-height: 1;
+}
+
+.mica-step:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.mica-stepper-val {
+	min-width: 1.2em;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Live Preview wrapper ---------- */
+.mica-lp {
+	margin: 0.5em 0;
+}
+
+/* ---------- Footer: auto-save toggle + version chip ---------- */
+.mica-footer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 8px;
 	border-top: 1px solid var(--mica-border);
 	background: var(--mica-tab-bg);
+}
+
+.mica-footer-spacer {
+	flex: 1 1 auto;
+}
+
+.mica-auto {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	border: 1px solid var(--mica-border);
+	border-radius: 12px;
+	padding: 1px 10px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
+
+.mica-auto.is-on {
+	color: var(--mica-diff-add);
+	border-color: color-mix(in srgb, var(--mica-diff-add) 45%, var(--mica-border));
+	background: color-mix(in srgb, var(--mica-diff-add) 12%, transparent);
+}
+
+.mica-auto.is-off {
+	color: var(--mica-diff-del);
+	border-color: color-mix(in srgb, var(--mica-diff-del) 45%, var(--mica-border));
+	background: color-mix(in srgb, var(--mica-diff-del) 12%, transparent);
+}
+
+.mica-auto-secs,
+.mica-save-now {
+	border: 1px solid var(--mica-border);
+	border-radius: 10px;
+	padding: 1px 8px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
+
+.mica-auto-secs:hover,
+.mica-save-now:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.mica-auto-input {
+	width: 3.5em;
+	font-size: var(--font-ui-smaller);
 }
 
 .mica-chip {
@@ -217,6 +423,11 @@ body {
 	border-radius: var(--mica-radius);
 }
 
+.mica-diff-empty {
+	color: var(--text-muted);
+	padding: 12px 4px;
+}
+
 .mica-diff-row {
 	display: flex;
 	align-items: baseline;
@@ -238,21 +449,21 @@ body {
 }
 
 .mica-diff-row.is-delete {
-	background: color-mix(in srgb, var(--color-red) 12%, transparent);
+	background: color-mix(in srgb, var(--mica-diff-del) 12%, transparent);
 }
 
 .mica-diff-row.is-insert {
-	background: color-mix(in srgb, var(--color-green) 12%, transparent);
+	background: color-mix(in srgb, var(--mica-diff-add) 12%, transparent);
 }
 
 .mica-diff-row.is-delete .mica-diff-gutter {
-	color: var(--color-red);
-	background: color-mix(in srgb, var(--color-red) 20%, transparent);
+	color: var(--mica-diff-del);
+	background: color-mix(in srgb, var(--mica-diff-del) 20%, transparent);
 }
 
 .mica-diff-row.is-insert .mica-diff-gutter {
-	color: var(--color-green);
-	background: color-mix(in srgb, var(--color-green) 20%, transparent);
+	color: var(--mica-diff-add);
+	background: color-mix(in srgb, var(--mica-diff-add) 20%, transparent);
 }
 
 /* Intra-line (char / word) emphasis. */
@@ -263,11 +474,11 @@ body {
 }
 
 .is-delete .mica-diff-emph {
-	background: color-mix(in srgb, var(--color-red) 42%, transparent);
+	background: color-mix(in srgb, var(--mica-diff-del) 42%, transparent);
 }
 
 .is-insert .mica-diff-emph {
-	background: color-mix(in srgb, var(--color-green) 42%, transparent);
+	background: color-mix(in srgb, var(--mica-diff-add) 42%, transparent);
 }
 
 /* Side by side */
@@ -288,11 +499,11 @@ body {
 }
 
 .mica-diff-cell.is-delete {
-	background: color-mix(in srgb, var(--color-red) 12%, transparent);
+	background: color-mix(in srgb, var(--mica-diff-del) 12%, transparent);
 }
 
 .mica-diff-cell.is-insert {
-	background: color-mix(in srgb, var(--color-green) 12%, transparent);
+	background: color-mix(in srgb, var(--mica-diff-add) 12%, transparent);
 }
 
 .mica-diff-cell.is-empty {
@@ -361,4 +572,34 @@ body {
 
 .mica-diff-spacer {
 	flex: 1 1 auto;
+}
+
+/* Buttons in the compare toolbar. */
+.mica-add-btn {
+	appearance: none;
+	border: 1px solid var(--mica-border);
+	background: transparent;
+	color: var(--text-muted);
+	border-radius: 6px;
+	padding: 2px 10px;
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+}
+
+.mica-add-btn:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+/* ---------- Modal edit area + wide settings field ---------- */
+.mica-edit-area-modal {
+	min-height: 40vh;
+	max-height: 70vh;
+}
+
+.mica-settings-wide {
+	width: 100%;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	resize: vertical;
 }

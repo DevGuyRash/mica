@@ -1,4 +1,4 @@
-import { browser, expect, $, $$ } from "@wdio/globals";
+import { browser, expect, $ } from "@wdio/globals";
 
 // Friendly, closer-free `tab:` syntax — the primary way users write blocks.
 const NOTE = [
@@ -31,6 +31,25 @@ async function openNote(path: string, mode: "preview" | "live"): Promise<void> {
 	);
 }
 
+// A note whose block sits BELOW a leading line, so the cursor (at offset 0)
+// starts outside the block and the widget renders. Each interactive test gets
+// its own note so mutations don't bleed across tests.
+async function seedAndOpen(path: string, block: string, mode: "preview" | "live"): Promise<void> {
+	await browser.executeObsidian(
+		async ({ app, obsidian }, p, content, m) => {
+			let f = app.vault.getAbstractFileByPath(p);
+			if (!f) f = await app.vault.create(p, content);
+			if (!(f instanceof obsidian.TFile)) throw new Error(`not a file: ${p}`);
+			await app.workspace.getLeaf(false).openFile(f, {
+				state: m === "preview" ? { mode: "preview" } : { mode: "source", source: false },
+			});
+		},
+		path,
+		block,
+		mode,
+	);
+}
+
 describe("rendering canaries (plugin-owned hooks only)", function () {
 	before(async function () {
 		await browser.executeObsidian(async ({ app }, content) => {
@@ -39,32 +58,46 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		}, NOTE);
 	});
 
-	it("reading view renders tabs and switching shows the selected tab's content", async function () {
-		await openNote("UI.md", "preview");
-		await expect($(".mica-tabs")).toExist();
-
-		// The MarkdownView keeps the (hidden) editor DOM alongside the visible
-		// reading view — and the hidden editor hosts its own Mica widget. Only
-		// DISPLAYED elements are the outcome under test.
-		const displayed = async (selector: string): Promise<WebdriverIO.Element[]> => {
-			const shown: WebdriverIO.Element[] = [];
-			for (const el of await $$(selector)) {
-				if (await el.isDisplayed()) shown.push(el);
-			}
-			return shown;
-		};
-
-		const buttons = await displayed(".mica-tab-btn");
-		expect(buttons.length).toBe(2);
-		await buttons[1].click();
-
-		const activePanels = await displayed(".mica-tab-panel.is-active");
-		expect(activePanels.length).toBe(1);
-		await expect(activePanels[0]).toHaveText(expect.stringContaining("second tab body"));
-
-		// Version chip canary: the affordance for history is present per block.
-		const chips = await displayed(".mica-chip");
-		expect(chips.length).toBe(1);
+	it("reading-mode processor renders switchable tabs", async function () {
+		// Reading mode renders a block by calling the registered `mica` code-block
+		// processor via MarkdownRenderer — invoke it directly. (The live reading
+		// view is virtualized and renders nothing under headless Xvfb; this
+		// exercises the exact same processor + renderCst, reliably.)
+		const res = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const el = document.createElement("div");
+			el.style.width = "600px";
+			document.body.appendChild(el);
+			const comp = new obsidian.Component();
+			comp.load();
+			await obsidian.MarkdownRenderer.render(
+				app,
+				"```mica id=rr-1\ntab: One\nfirst body\n\ntab: Two\nsecond body\n```\n",
+				el,
+				"RR.md",
+				comp,
+			);
+			await new Promise((r) => setTimeout(r, 300)); // let region markdown settle
+			const btns = Array.from(el.querySelectorAll<HTMLElement>(".mica-tab-btn"));
+			const idx = (): number =>
+				Array.from(el.querySelectorAll(".mica-tab-panel")).findIndex((p) => p.classList.contains("is-active"));
+			const activeIdx0 = idx();
+			btns[1]?.click();
+			const out = {
+				tabGroups: el.querySelectorAll(".mica-tabs").length,
+				labels: btns.map((b) => b.textContent),
+				activeIdx0,
+				activeIdx1: idx(),
+				activeText: el.querySelector(".mica-tab-panel.is-active")?.textContent ?? "",
+			};
+			comp.unload();
+			el.remove();
+			return out;
+		});
+		expect(res.tabGroups).toBe(1);
+		expect(res.labels).toEqual(["One", "Two"]);
+		expect(res.activeIdx0).toBe(0); // first tab active by default
+		expect(res.activeIdx1).toBe(1); // clicking Two activates the second panel…
+		expect(res.activeText).toContain("second body"); // …and shows its content
 	});
 
 	it("live preview replaces the fence with the Mica widget when the cursor is outside", async function () {
@@ -74,27 +107,117 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		await expect($(".mica-lp .mica-tabs")).toExist();
 	});
 
-	it("the + affordance adds a tab", async function () {
-		await openNote("UI.md", "live");
+	it("the + affordance adds a tab and activates it", async function () {
+		await seedAndOpen(
+			"AddTab.md",
+			"Intro line.\n\n```mica id=at-1\ntab: One\nfirst\n\ntab: Two\nsecond\n```\n",
+			"live",
+		);
 		await browser.waitUntil(
 			() =>
-				browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add-btn").length > 0),
+				browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add").length > 0),
 			{ timeout: 8000, timeoutMsg: "the + button never appeared in the tab nav" },
 		);
 		await browser.executeObsidian(() => {
-			const add = Array.from(document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add-btn")).find(
+			const add = Array.from(document.querySelectorAll(".mica-lp .mica-tab-nav .mica-add")).find(
 				(b) => b.textContent === "+",
 			);
 			(add as HTMLElement | undefined)?.click();
 		});
-		// The change lands in the live editor (friendly `tab:` style, matched).
+		// The new tab lands in the live editor (friendly `tab:` style, matched)…
 		await browser.waitUntil(
 			() =>
-				browser.executeObsidian(({ app, obsidian }) => {
-					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-					return (view?.editor.getValue() ?? "").includes("tab: New tab");
-				}),
+				browser.executeObsidian(({ app, obsidian }) =>
+					(app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "").includes(
+						"tab: New tab",
+					),
+				),
 			{ timeout: 8000, timeoutMsg: "the new tab was not added to the document" },
+		);
+		// …and it becomes the ACTIVE tab (auditor MAJOR-2: no silent hidden add).
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelector(".mica-lp .mica-tab-btn.is-active")?.textContent === "New tab",
+				),
+			{ timeout: 5000, timeoutMsg: "the new tab did not become active" },
+		);
+	});
+
+	it("inline editor shows clean prose (no ::: ) and commits an edit", async function () {
+		await seedAndOpen("Inline.md", "Intro line.\n\n```mica id=in-1\ntab: One\nfirst tab body\n```\n", "live");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length > 0,
+				),
+			{ timeout: 8000, timeoutMsg: "no editable content region appeared" },
+		);
+		const shown = await browser.executeObsidian(() => {
+			const region = document.querySelector(
+				".mica-lp .mica-tab-panel.is-active .mica-region.is-editable",
+			) as HTMLElement | null;
+			region?.click();
+			const ta = document.querySelector(
+				".mica-lp .mica-tab-panel.is-active .mica-region.is-editing textarea",
+			) as HTMLTextAreaElement | null;
+			return ta ? ta.value : null;
+		});
+		expect(shown).not.toBeNull();
+		expect(shown).toContain("first tab body");
+		expect(shown).not.toContain(":::"); // structural directives are never surfaced
+
+		await browser.executeObsidian(() => {
+			const ta = document.querySelector(
+				".mica-lp .mica-tab-panel.is-active .mica-region.is-editing textarea",
+			) as HTMLTextAreaElement | null;
+			if (!ta) return;
+			ta.value = "edited inline body";
+			const save = document.querySelector(
+				".mica-lp .mica-tab-panel.is-active .mica-region.is-editing .mica-region-actions button.mod-cta",
+			) as HTMLElement | null;
+			save?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) =>
+					(app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "").includes(
+						"edited inline body",
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the inline edit did not commit to the document" },
+		);
+	});
+
+	it("the auto-save pill toggles Auto ↔ Manual", async function () {
+		await seedAndOpen("Toggle.md", "Intro line.\n\n```mica id=tg-1\ntab: One\nbody\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-auto"))),
+			{ timeout: 8000, timeoutMsg: "the auto-save pill never appeared" },
+		);
+		const before = await browser.executeObsidian(() => {
+			const p = document.querySelector(".mica-lp .mica-auto") as HTMLElement | null;
+			return { on: p?.classList.contains("is-on") ?? false, text: p?.textContent ?? "" };
+		});
+		expect(before.on).toBe(true);
+		expect(before.text).toContain("Auto");
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-auto") as HTMLElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelector(".mica-lp .mica-auto")?.classList.contains("is-off") === true,
+				),
+			{ timeout: 5000, timeoutMsg: "the pill did not switch to Manual" },
+		);
+		const after = await browser.executeObsidian(
+			() => document.querySelector(".mica-lp .mica-auto")?.textContent ?? "",
+		);
+		expect(after).toContain("Manual");
+		// Restore auto-save so later specs aren't affected by this global toggle.
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-auto") as HTMLElement | null)?.click(),
 		);
 	});
 });

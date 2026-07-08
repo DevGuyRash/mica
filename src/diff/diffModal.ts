@@ -52,6 +52,14 @@ export class DiffModal extends Modal {
 		this.baseIdx = Math.min(1, this.choices.length - 1);
 		this.otherIdx = 0;
 		this.otherIdx2 = NONE;
+		if (this.choices.length < 2) {
+			this.contentEl.empty();
+			this.contentEl.createEl("p", {
+				cls: "mica-diff-empty",
+				text: `Only one version stored (${this.choices[0]?.label ?? "v1"}). Edit the block — or use “Save version” — to create another, then compare.`,
+			});
+			return;
+		}
 		this.render();
 	}
 
@@ -67,10 +75,13 @@ export class DiffModal extends Modal {
 		value: number,
 		allowNone: boolean,
 		onPick: (v: number) => void,
+		exclude: number[] = [],
 	): void {
 		const sel = this.select(bar, label);
 		if (allowNone) sel.createEl("option", { text: "—", value: String(NONE) });
-		this.choices.forEach((c, i) => sel.createEl("option", { text: c.label, value: String(i) }));
+		this.choices.forEach((c, i) => {
+			if (!exclude.includes(i)) sel.createEl("option", { text: c.label, value: String(i) });
+		});
 		sel.value = String(value);
 		sel.addEventListener("change", () => onPick(Number(sel.value)));
 	}
@@ -100,6 +111,8 @@ export class DiffModal extends Modal {
 	private render(): void {
 		const { contentEl } = this;
 		contentEl.empty();
+		// The 3rd column can't duplicate Base/Compare (empty or repeated column).
+		if (this.otherIdx2 === this.baseIdx || this.otherIdx2 === this.otherIdx) this.otherIdx2 = NONE;
 		const bar = contentEl.createDiv({ cls: "mica-diff-toolbar" });
 
 		this.versionSelect(bar, "Base", this.baseIdx, false, (v) => {
@@ -110,10 +123,17 @@ export class DiffModal extends Modal {
 			this.otherIdx = v;
 			this.render();
 		});
-		this.versionSelect(bar, "+ 3rd", this.otherIdx2, true, (v) => {
-			this.otherIdx2 = v;
-			this.render();
-		});
+		this.versionSelect(
+			bar,
+			"+ 3rd",
+			this.otherIdx2,
+			true,
+			(v) => {
+				this.otherIdx2 = v;
+				this.render();
+			},
+			[this.baseIdx, this.otherIdx],
+		);
 		this.optionSelect<DiffGranularity>(
 			bar,
 			"Granularity",
@@ -148,10 +168,7 @@ export class DiffModal extends Modal {
 			[this.baseIdx, this.otherIdx] = [this.otherIdx, this.baseIdx];
 			this.render();
 		});
-		this.button(bar, "Copy patch", "Copy a unified diff to the clipboard", () => {
-			void navigator.clipboard.writeText(makePatch(this.text(this.baseIdx), this.text(this.otherIdx), 3));
-			new Notice("Patch copied.");
-		});
+		this.button(bar, "Copy patch", "Copy a unified diff to the clipboard", () => void this.copyPatch());
 		this.button(
 			bar,
 			"Edit as new version",
@@ -198,6 +215,21 @@ export class DiffModal extends Modal {
 
 	private text(idx: number): string {
 		return this.contents.get(this.choices[idx]?.hash ?? "") ?? "";
+	}
+
+	/** Copy a unified patch, reporting the real clipboard outcome (auditor MINOR-1). */
+	private async copyPatch(): Promise<void> {
+		const patch = makePatch(this.text(this.baseIdx), this.text(this.otherIdx), 3);
+		if (!patch.trim()) {
+			new Notice("No differences to copy.");
+			return;
+		}
+		try {
+			await navigator.clipboard.writeText(patch);
+			new Notice("Patch copied.");
+		} catch {
+			new Notice("Couldn’t access the clipboard.");
+		}
 	}
 
 	onClose(): void {

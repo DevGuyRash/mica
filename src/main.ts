@@ -10,6 +10,7 @@ import { DiffModal } from "./diff/diffModal";
 import { MicaApi } from "./api/mica";
 import { migrateFile, migrateVault, type MigrateFileReport } from "./migrate/migrate";
 import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings";
+import type { BlockUi } from "./render/layoutEngine";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, the
@@ -19,6 +20,9 @@ export default class MicaPlugin extends Plugin {
 	engine!: VersionEngine;
 	api!: MicaApi;
 	settings!: MicaSettings;
+	/** Per-block UI state (active tab per group + a pending focus target), keyed
+	 * by block id/position so it survives the widget rebuild after each edit. */
+	readonly micaUi = new Map<string, BlockUi>();
 
 	async onload(): Promise<void> {
 		await initCore();

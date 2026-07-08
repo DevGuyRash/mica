@@ -140,7 +140,8 @@ describe("runtime contracts (window.mica)", function () {
 			await window.mica.blockUpdate(p, "dc-1", "tab: A\nversion two changed\n");
 			await window.mica.versionsSnapshot(p);
 			const f = app.vault.getAbstractFileByPath(p);
-			if (f instanceof obsidian.TFile) await app.workspace.getLeaf(false).openFile(f, { state: { mode: "source" } });
+			if (f instanceof obsidian.TFile)
+				await app.workspace.getLeaf(false).openFile(f, { state: { mode: "source" } });
 		});
 		await browser.executeObsidianCommand("mica:diff-versions");
 		await browser.waitUntil(
@@ -165,7 +166,36 @@ describe("runtime contracts (window.mica)", function () {
 		expect(c.delBg).not.toBe("rgba(0, 0, 0, 0)");
 		expect(c.insBg).not.toBe("rgba(0, 0, 0, 0)");
 		expect(c.delBg).not.toBe(c.insBg); // red vs green
-		await browser.executeObsidian(() => (document.querySelector(".modal-close-button") as HTMLElement | null)?.click());
+		await browser.executeObsidian(() =>
+			(document.querySelector(".modal-close-button") as HTMLElement | null)?.click(),
+		);
+	});
+
+	it("smart auto-save ignores structural churn, versions only real content", async function () {
+		await createNote("SmartAuto.md", "Intro.\n\n```mica id=sa-1\ntab: A\nreal content\n```\n");
+		await browser.executeObsidian(() => window.mica.versionsSnapshot("SmartAuto.md"));
+		let versions = await browser.executeObsidian(() => window.mica.versionsList("SmartAuto.md", "sa-1"));
+		expect(versions.length).toBe(1);
+
+		// Add an EMPTY tab (structure only) and snapshot → NO new version.
+		await browser.executeObsidian(async () => {
+			await window.mica.blockUpdate("SmartAuto.md", "sa-1", "tab: A\nreal content\n\ntab: B\n");
+			await window.mica.versionsSnapshot("SmartAuto.md");
+		});
+		versions = await browser.executeObsidian(() => window.mica.versionsList("SmartAuto.md", "sa-1"));
+		expect(versions.length).toBe(1);
+
+		// Put real prose in the new tab and snapshot → a version IS created.
+		await browser.executeObsidian(async () => {
+			await window.mica.blockUpdate(
+				"SmartAuto.md",
+				"sa-1",
+				"tab: A\nreal content\n\ntab: B\nB has real content\n",
+			);
+			await window.mica.versionsSnapshot("SmartAuto.md");
+		});
+		versions = await browser.executeObsidian(() => window.mica.versionsList("SmartAuto.md", "sa-1"));
+		expect(versions.length).toBe(2);
 	});
 
 	it("file-bridge: inbox instruction produces an outbox result", async function () {

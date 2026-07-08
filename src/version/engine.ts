@@ -1,8 +1,10 @@
-import { debounce, TFile } from "obsidian";
+import { debounce, TFile, type Vault } from "obsidian";
 import type MicaPlugin from "../main";
 import {
+	contentSignature,
 	ensureIds,
 	foldLedger,
+	hasContent,
 	hashContent,
 	newId,
 	replaceBlockContent,
@@ -22,6 +24,7 @@ import { appendEvents, ensureSidecar, readLedger, readObject, writeManifest, wri
 export class VersionEngine {
 	private readonly debouncers = new Map<string, (file: TFile) => void>();
 	private readonly inflight = new Map<string, Promise<void>>();
+	private readonly listeners = new Set<(file: TFile) => void>();
 
 	constructor(private readonly plugin: MicaPlugin) {}
 
@@ -29,6 +32,7 @@ export class VersionEngine {
 	handleModify(file: TFile): void {
 		if (file.extension !== "md") return;
 		if (file.path.includes(".mica/")) return;
+		if (!this.plugin.settings.autoSnapshotEnabled) return; // manual mode: only explicit snapshots
 		let bounce = this.debouncers.get(file.path);
 		if (!bounce) {
 			bounce = debounce((f: TFile) => void this.snapshot(f), this.plugin.settings.snapshotDebounceMs, true);
@@ -42,15 +46,35 @@ export class VersionEngine {
 		this.debouncers.clear();
 	}
 
+	/** Subscribe to "a file was just snapshotted" (chips refresh on this). */
+	onSnapshot(cb: (file: TFile) => void): () => void {
+		this.listeners.add(cb);
+		return () => this.listeners.delete(cb);
+	}
+
+	private emitSnapshot(file: TFile): void {
+		for (const cb of this.listeners) {
+			try {
+				cb(file);
+			} catch (e) {
+				console.error("Mica: snapshot listener failed", e);
+			}
+		}
+	}
+
 	async state(file: TFile): Promise<Record<string, BlockState>> {
 		return foldLedger(await readLedger(this.plugin.app.vault, file));
 	}
 
-	/** Serialized per file: a second call queues behind the first. */
-	snapshot(file: TFile): Promise<void> {
+	/**
+	 * Serialized per file: a second call queues behind the first. `force` snapshots
+	 * even a content-unchanged (structural-only) edit — used by the manual "Save
+	 * version" button.
+	 */
+	snapshot(file: TFile, force = false): Promise<void> {
 		const prev = this.inflight.get(file.path) ?? Promise.resolve();
 		const next = prev
-			.then(() => this.doSnapshot(file))
+			.then(() => this.doSnapshot(file, force))
 			.catch((e) => console.error("Mica: snapshot failed", file.path, e))
 			.finally(() => {
 				if (this.inflight.get(file.path) === next) this.inflight.delete(file.path);
@@ -59,7 +83,7 @@ export class VersionEngine {
 		return next;
 	}
 
-	private async doSnapshot(file: TFile): Promise<void> {
+	private async doSnapshot(file: TFile, force: boolean): Promise<void> {
 		const vault = this.plugin.app.vault;
 		let doc = await vault.read(file);
 		let blocks = scanBlocksView(doc);
@@ -83,7 +107,9 @@ export class VersionEngine {
 			if (!id || !b.closed) continue;
 			const content = doc.slice(b.content_start, b.content_end);
 			const hash = hashContent(content);
-			if (state[id]?.head === hash) continue; // unchanged
+			const head = state[id]?.head ?? null;
+			if (head === hash) continue; // byte-identical to head
+			if (!force && !(await this.contentChanged(vault, file, content, head))) continue; // structural-only churn
 			await ensureSidecar(vault, file);
 			await writeObject(vault, file, hash, content);
 			const ts = Date.now();
@@ -91,6 +117,7 @@ export class VersionEngine {
 			events.push({ type: "set-head", eid: newId(), ts, block: id, hash });
 		}
 		await appendEvents(vault, file, events);
+		if (events.length) this.emitSnapshot(file);
 		if (events.length) {
 			const names: Record<string, string> = {};
 			for (const b of blocks) if (b.id) names[b.id] = b.name ?? "";
@@ -103,6 +130,20 @@ export class VersionEngine {
 				updated: Date.now(),
 			});
 		}
+	}
+
+	/**
+	 * Whether a block's *prose* differs from its stored head — the gate that keeps
+	 * empty tabs/cells, reordering, and renames from minting versions. The first
+	 * real version requires actual content; later ones require the content
+	 * signature to differ from the head object's.
+	 */
+	private async contentChanged(vault: Vault, file: TFile, content: string, head: string | null): Promise<boolean> {
+		const sig = contentSignature(content);
+		if (!head) return hasContent(content);
+		const headContent = await readObject(vault, file, head);
+		if (headContent === null) return true; // head object missing — snapshot to be safe
+		return contentSignature(headContent) !== sig;
 	}
 
 	/**

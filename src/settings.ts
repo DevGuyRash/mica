@@ -3,6 +3,8 @@ import type MicaPlugin from "./main";
 import { OBSIDIAN_CALLOUT_TYPES, type DiffGranularity } from "./wasm/bridge";
 
 export interface MicaSettings {
+	/** Master switch for auto-snapshotting (toggled live from each block's footer). */
+	autoSnapshotEnabled: boolean;
 	/** Idle time before an auto-snapshot fires after an edit. */
 	snapshotDebounceMs: number;
 	defaultGranularity: DiffGranularity;
@@ -22,7 +24,8 @@ export interface MicaSettings {
 }
 
 export const DEFAULT_SETTINGS: MicaSettings = {
-	snapshotDebounceMs: 1500,
+	autoSnapshotEnabled: true,
+	snapshotDebounceMs: 5000,
 	defaultGranularity: "line",
 	defaultDiffMode: "inline",
 	showVersionChip: true,
@@ -44,9 +47,24 @@ export class MicaSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
+		new Setting(containerEl).setHeading().setName("Versioning");
+
 		new Setting(containerEl)
-			.setName("Snapshot debounce")
-			.setDesc("Idle milliseconds after an edit before versions auto-snapshot (500–10000).")
+			.setName("Auto-snapshot versions")
+			.setDesc(
+				"Automatically save a version as you edit content. You can also flip this per session from the green/red pill in each block's footer. Structural changes (adding empty tabs/cells, reordering, renaming) never create a version — only real content edits do.",
+			)
+			.addToggle((t) =>
+				t.setValue(this.micaPlugin.settings.autoSnapshotEnabled).onChange(async (v) => {
+					this.micaPlugin.settings.autoSnapshotEnabled = v;
+					this.micaPlugin.engine.resetDebouncers();
+					await this.micaPlugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-snapshot interval")
+			.setDesc("Idle milliseconds after a content edit before a version auto-snapshots (500–10000).")
 			.addSlider((s) =>
 				s
 					.setLimits(500, 10000, 250)
