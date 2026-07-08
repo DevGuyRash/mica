@@ -176,7 +176,11 @@ export function applyOp(cst: Cst, op: StructOp): boolean {
 			if (!t || op.end > t.children.length || op.start > op.end) return false;
 			const run = serializeCst({ children: t.children.slice(op.start, op.end) });
 			if (run !== op.expected) return false; // structure changed underneath — abort
-			t.children.splice(op.start, op.end - op.start, ...parseBlock(op.text).children);
+			// Terminate the replacement's last line so serializing INSIDE a directive
+			// container (`:::cell` / `:::tab` with a `:::` close) never glues the typed
+			// text onto the `:::` — which would collapse the container and leak `:::`.
+			const text = op.text.length && !op.text.endsWith("\n") ? `${op.text}\n` : op.text;
+			t.children.splice(op.start, op.end - op.start, ...parseBlock(text).children);
 			return true;
 		}
 		case "insertTab": {

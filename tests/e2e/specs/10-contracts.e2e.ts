@@ -42,6 +42,16 @@ describe("runtime contracts (window.mica)", function () {
 		expect(after).not.toContain("original body"); // old content must not survive
 		expect(after.match(/```mica/g)?.length).toBe(1); // no duplicated fence
 		expect(after.trimEnd().endsWith("tail marker line")).toBe(true); // trailing prose intact
+
+		// Newline-free content must NOT glue onto the closing fence.
+		await browser.executeObsidian(() =>
+			window.mica.blockUpdate("Corruption.md", "blk-e2e-1", "no trailing newline"),
+		);
+		const after2 = await readNote("Corruption.md");
+		expect(after2).toContain("no trailing newline");
+		expect(after2).not.toContain("newline```"); // fence not glued
+		const readable = await browser.executeObsidian(() => window.mica.blockRead("Corruption.md", "blk-e2e-1"));
+		expect(readable).toContain("no trailing newline"); // block still closes + reads
 	});
 
 	it("snapshot → edit → snapshot → revert round-trips losslessly", async function () {

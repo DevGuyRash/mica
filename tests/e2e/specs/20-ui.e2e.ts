@@ -341,4 +341,47 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			{ timeout: 8000, timeoutMsg: "the tab order did not change after drag" },
 		);
 	});
+
+	it("editing a grid cell with newline-free text keeps the grid intact", async function () {
+		await seedAndOpen(
+			"CellEdit.md",
+			"Intro line.\n\n```mica id=ce-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n```\n",
+			"live",
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-cell .mica-region").length >= 2,
+				),
+			{ timeout: 8000, timeoutMsg: "the grid cells never rendered" },
+		);
+		// Type text WITHOUT a trailing newline into the first cell — the exact
+		// trigger that used to glue "abc:::" and collapse the column.
+		await browser.executeObsidian(() => {
+			const region = document.querySelector(".mica-lp .mica-cell .mica-region") as HTMLElement | null;
+			region?.click();
+			const ta = document.querySelector(
+				".mica-lp .mica-cell .mica-region.is-editing textarea",
+			) as HTMLTextAreaElement | null;
+			if (!ta) return;
+			ta.value = "abc";
+			const save = document.querySelector(
+				".mica-lp .mica-cell .mica-region.is-editing .mica-region-actions button.mod-cta",
+			) as HTMLElement | null;
+			save?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) =>
+					(app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "").includes("abc"),
+				),
+			{ timeout: 8000, timeoutMsg: "the cell edit did not commit" },
+		);
+		const doc = await browser.executeObsidian(
+			({ app, obsidian }) => app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "",
+		);
+		expect(doc).toContain("abc");
+		expect(doc).not.toContain("abc:::"); // no glue onto the cell close
+		expect((doc.match(/:::cell/g) ?? []).length).toBe(2); // both columns survive
+	});
 });
