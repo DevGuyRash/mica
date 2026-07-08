@@ -297,6 +297,78 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_grid_of_tabs_within_tabs() {
+        // grid > cell > tabs > [tab A, tab B]; tab B > tabs > [tab B1, tab B2].
+        let src = concat!(
+            ":::grid\n",
+            ":::cell\n",
+            ":::tabs\n",
+            ":::tab A\n",
+            "outer A\n",
+            ":::\n",
+            ":::tab B\n",
+            ":::tabs\n",
+            ":::tab B1\n",
+            "deep b1\n",
+            ":::\n",
+            ":::tab B2\n",
+            "deep b2\n",
+            ":::\n",
+            ":::\n", // close inner tabs
+            ":::\n", // close tab B
+            ":::\n", // close outer tabs
+            ":::\n", // close cell
+            ":::\n", // close grid
+        );
+        // 1. Byte-exact round-trip regardless of depth.
+        roundtrips(src);
+
+        // 2. The structure parses to the expected tree.
+        let cst = parse_block_impl(src);
+        let grid = as_container(&cst.children[0], "grid");
+        let cell = find(grid, "cell");
+        let tabs = find(cell, "tabs");
+        assert_eq!(tab_titles(tabs), vec!["A", "B"]);
+
+        // 3. Tab B contains a nested tabs group with B1/B2.
+        let tab_b = tabs
+            .iter()
+            .find_map(|n| match n {
+                Node::Container { name, title, children, .. } if name == "tab" && title == "B" => Some(children.as_slice()),
+                _ => None,
+            })
+            .expect("tab B");
+        let inner = find(tab_b, "tabs");
+        assert_eq!(tab_titles(inner), vec!["B1", "B2"]);
+    }
+
+    // Helpers for the nesting test.
+    fn as_container<'a>(node: &'a Node, name: &str) -> &'a [Node] {
+        match node {
+            Node::Container { name: n, children, .. } if n == name => children,
+            other => panic!("expected {name} container, got {other:?}"),
+        }
+    }
+    fn find<'a>(children: &'a [Node], name: &str) -> &'a [Node] {
+        children
+            .iter()
+            .find_map(|n| match n {
+                Node::Container { name: cn, children, .. } if cn == name => Some(children.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {name} child"))
+    }
+    fn tab_titles(children: &[Node]) -> Vec<&str> {
+        children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Container { name, title, .. } if name == "tab" => Some(title.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
     fn code_fence_hides_colon_directives() {
         // A `:::tab` inside a code block must NOT become a container.
         let cst = parse_block_impl("```md\n:::tab Nope\n```\n");
