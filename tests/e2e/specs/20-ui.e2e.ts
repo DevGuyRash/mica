@@ -387,6 +387,46 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 	});
 
+	it("dragging a grid cell up drops it above the target (vertical axis)", async function () {
+		// 2-col grid → [alpha beta / gamma delta]. Drag delta (bottom-right) up and
+		// aim at the TOP of alpha: the drop must use the vertical axis and land delta
+		// BEFORE alpha (proving up/down works, not just left/right).
+		await seedAndOpen(
+			"CellDrag.md",
+			"Intro line.\n\n```mica id=cd-1\n:::grid {cols=2}\n:::cell\nalpha\n:::\n:::cell\nbeta\n:::\n:::cell\ngamma\n:::\n:::cell\ndelta\n:::\n:::\n```\n",
+			"live",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-cell").length >= 4),
+			{ timeout: 8000, timeoutMsg: "the grid cells never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const cells = Array.from(document.querySelectorAll(".mica-lp .mica-cell")) as HTMLElement[];
+			const handle = cells[3].querySelector(".mica-cell-drag") as HTMLElement | null; // delta's grip
+			const dst = cells[0]; // alpha
+			if (!handle) return;
+			const fire = (el: HTMLElement, type: string, x: number, y: number): void =>
+				el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+			const rs = handle.getBoundingClientRect();
+			const rd = dst.getBoundingClientRect();
+			fire(handle, "dragstart", rs.left + rs.width / 2, rs.top + rs.height / 2);
+			// Top-centre of alpha → dominant vertical, above → insert before it.
+			fire(dst, "dragover", rd.left + rd.width / 2, rd.top + rd.height * 0.15);
+			fire(dst, "drop", rd.left + rd.width / 2, rd.top + rd.height * 0.15);
+			fire(handle, "dragend", rs.left + rs.width / 2, rs.top + rs.height / 2);
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					const d = v.indexOf("delta");
+					const a = v.indexOf("alpha");
+					return d >= 0 && a >= 0 && d < a; // delta moved above alpha
+				}),
+			{ timeout: 8000, timeoutMsg: "the cell did not move above the target on a vertical drag" },
+		);
+	});
+
 	it("editing a grid cell with newline-free text keeps the grid intact", async function () {
 		await seedAndOpen(
 			"CellEdit.md",

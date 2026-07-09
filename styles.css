@@ -633,6 +633,15 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	box-shadow: inset -3px 0 0 0 var(--mica-accent);
 }
 
+/* Vertical drop-lines: cells wrap into rows, so up/down is a real drop axis. */
+.mica-cell.mica-drop-above {
+	box-shadow: inset 0 3px 0 0 var(--mica-accent);
+}
+
+.mica-cell.mica-drop-below {
+	box-shadow: inset 0 -3px 0 0 var(--mica-accent);
+}
+
 .mica-cell-drag {
 	position: absolute;
 	top: 4px;

@@ -44,7 +44,10 @@ type Leaf = Extract<MicaNode, { kind: "leaf" }>;
 
 /** A square icon button (Lucide via setIcon) with an accessible label. */
 function iconButton(parent: HTMLElement, cls: string, icon: string, label: string): HTMLButtonElement {
-	const b = parent.createEl("button", { cls, attr: { type: "button", "aria-label": label, title: label } });
+	// aria-label alone drives Obsidian's own tooltip (portal-mounted, escapes the
+	// nav's overflow clip). Adding `title` would stack a second, janky native
+	// tooltip on top — so we deliberately don't set it.
+	const b = parent.createEl("button", { cls, attr: { type: "button", "aria-label": label } });
 	setIcon(b, icon);
 	return b;
 }
@@ -144,10 +147,20 @@ function makeDraggable(el: HTMLElement, fromPath: number[], kind: "tab" | "cell"
 	});
 }
 
+const DROP_SIDES = ["mica-drop-before", "mica-drop-after", "mica-drop-above", "mica-drop-below"] as const;
+
 /**
  * Make `el` accept a dragged node of `kind`, dropping it into `parentPath` at
- * `selfIndex` (before/after decided by the pointer). Works within a group
- * (reorder) and across groups of the same kind (move).
+ * `selfIndex`. Cells and tabs are both a single ordered list under the hood, so
+ * a drop is always an *insert-between* (reorder), never a swap — the grid just
+ * reflows the list into its columns afterward.
+ *
+ * Tabs are a 1-D horizontal strip, so only left/right (before/after) is
+ * meaningful. Cells wrap into rows, so we pick whichever axis the pointer is
+ * most decisively on and show the drop-line on that edge: aim at a cell's left
+ * or top to land *before* it, its right or bottom to land *after* it. That's
+ * what makes "drag a cell up" work — you aim at the destination cell in the row
+ * above, and the line snaps to the edge you're pointing at.
  */
 function makeDropTarget(
 	el: HTMLElement,
@@ -156,25 +169,32 @@ function makeDropTarget(
 	parentPath: number[],
 	selfIndex: number,
 ): void {
-	const clear = (): void => {
-		el.removeClass("mica-drop-before");
-		el.removeClass("mica-drop-after");
-	};
+	const clear = (): void => DROP_SIDES.forEach((c) => el.removeClass(c));
 	el.addEventListener("dragover", (e) => {
 		if (!micaDrag || micaDrag.kind !== kind) return;
 		e.preventDefault();
 		if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
 		const r = el.getBoundingClientRect();
-		const after = e.clientX > r.left + r.width / 2;
-		el.toggleClass("mica-drop-after", after);
-		el.toggleClass("mica-drop-before", !after);
+		clear();
+		if (kind === "tab") {
+			el.addClass(e.clientX > r.left + r.width / 2 ? "mica-drop-after" : "mica-drop-before");
+			return;
+		}
+		// Cell: dominant-axis. Normalize the pointer offset from the cell centre so
+		// a wide-but-short cell doesn't bias everything horizontal.
+		const dx = (e.clientX - (r.left + r.width / 2)) / (r.width || 1);
+		const dy = (e.clientY - (r.top + r.height / 2)) / (r.height || 1);
+		if (Math.abs(dx) >= Math.abs(dy)) el.addClass(dx > 0 ? "mica-drop-after" : "mica-drop-before");
+		else el.addClass(dy > 0 ? "mica-drop-below" : "mica-drop-above");
 	});
 	el.addEventListener("dragleave", clear);
 	el.addEventListener("drop", (e) => {
 		if (!micaDrag || micaDrag.kind !== kind) return;
 		e.preventDefault();
 		e.stopPropagation();
-		const toIndex = el.hasClass("mica-drop-after") ? selfIndex + 1 : selfIndex;
+		// "after"/"below" in reading order → insert one slot later.
+		const after = el.hasClass("mica-drop-after") || el.hasClass("mica-drop-below");
+		const toIndex = after ? selfIndex + 1 : selfIndex;
 		const from = micaDrag.from;
 		clear();
 		micaDrag = null;
@@ -460,7 +480,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		bar.createEl("button", {
 			cls: "mica-add",
 			text: "+ Cell",
-			attr: { type: "button", title: "Add a cell" },
+			attr: { type: "button", "aria-label": "Add a cell" },
 		}).addEventListener("click", () => ctx.editable?.apply({ op: "insertCell", path, at: node.children.length }));
 		bar.createDiv({ cls: "mica-nav-spacer" });
 		mkGroupDelete(bar, ctx, node, path, "grid");
@@ -477,7 +497,7 @@ function stepper(bar: HTMLElement, label: string, value: number, onChange: (n: n
 	const val = s.createEl("button", {
 		cls: "mica-stepper-val",
 		text: String(value),
-		attr: { type: "button", title: "Click to type a value" },
+		attr: { type: "button", "aria-label": "Click to type a value" },
 	});
 	val.addEventListener("click", () => {
 		const input = s.createEl("input", { cls: "mica-stepper-input", attr: { type: "number", min: "1", max: "24" } });
@@ -530,12 +550,12 @@ function renderInsert(el: HTMLElement, ctx: RenderCtx, path: number[], at: numbe
 	menu.createEl("button", {
 		cls: "mica-insert-btn",
 		text: "Tabs",
-		attr: { type: "button", title: "Insert a tab group here" },
+		attr: { type: "button", "aria-label": "Insert a tab group here" },
 	}).addEventListener("click", () => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "tabs" }));
 	menu.createEl("button", {
 		cls: "mica-insert-btn",
 		text: "Grid",
-		attr: { type: "button", title: "Insert a grid here" },
+		attr: { type: "button", "aria-label": "Insert a grid here" },
 	}).addEventListener("click", () => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "grid" }));
 	toggle.addEventListener("click", () => bar.toggleClass("is-open", !bar.hasClass("is-open")));
 }
@@ -562,7 +582,10 @@ function buildFooter(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo, repaint: 
 	const pill = bar.createEl("button", {
 		cls: `mica-auto ${on ? "is-on" : "is-off"}`,
 		text: on ? "Auto" : "Manual", // the state color is a CSS dot (::before), not an emoji
-		attr: { type: "button", title: on ? "Auto-save is on. Click for manual." : "Manual. Click to auto-save." },
+		attr: {
+			type: "button",
+			"aria-label": on ? "Auto-save is on. Click for manual." : "Manual. Click to auto-save.",
+		},
 	});
 	pill.addEventListener("click", async () => {
 		p.settings.autoSnapshotEnabled = !on;
@@ -575,14 +598,14 @@ function buildFooter(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo, repaint: 
 		const iv = bar.createEl("button", {
 			cls: "mica-auto-secs",
 			text: `${secs(p)}s`,
-			attr: { type: "button", title: "Change interval" },
+			attr: { type: "button", "aria-label": "Change interval" },
 		});
 		iv.addEventListener("click", () => editInterval(bar, iv, p, repaint));
 	} else {
 		bar.createEl("button", {
 			cls: "mica-save-now",
 			text: "Save version",
-			attr: { type: "button", title: "Snapshot the current content now" },
+			attr: { type: "button", "aria-label": "Snapshot the current content now" },
 		}).addEventListener("click", () => {
 			void p.engine.snapshot(chip.file, true);
 			new Notice("Mica: version saved.");
