@@ -163,7 +163,7 @@ export class VersionsModal extends Modal {
 				this.versionMenu(e, r);
 			});
 			const more = row.createEl("button", {
-				cls: "mica-vrow-more",
+				cls: "clickable-icon mica-vrow-more",
 				attr: { type: "button", "aria-label": "Version actions" },
 			});
 			setIcon(more, "ellipsis");
@@ -257,7 +257,7 @@ export class VersionsModal extends Modal {
 			const wrap = bar.createDiv({ cls: "mica-seg" });
 			for (const [v, label] of opts) {
 				const b = wrap.createEl("button", {
-					cls: `mica-pop-seg ${v === value ? "is-on" : ""}`,
+					cls: `clickable-icon mica-pop-seg ${v === value ? "is-on" : ""}`,
 					text: label,
 					attr: { type: "button" },
 				});

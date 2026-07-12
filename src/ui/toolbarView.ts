@@ -1,6 +1,7 @@
 import { setIcon, type App } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import { calloutCatalog, type CalloutFold } from "./calloutCatalog";
+import { groupDefault, rememberDefault, resolveTool, toolbarConfig, type ToolItem } from "./toolSpec";
 import * as verbs from "./toolbar";
 
 /** Common fence languages offered first in the codeblock picker. */
@@ -24,110 +25,127 @@ const COMMON_LANGS = [
 	"text",
 ];
 
-interface Item {
-	icon: string;
-	label: string;
-	run: (view: EditorView) => void;
-	/** Only shown in the full (lightbox) toolbar when true. */
-	fullOnly?: boolean;
-}
-
 /**
- * Build the markdown toolbar into `host`. One implementation serves both the
- * quick editor (compact) and the lightbox (full). Buttons act on the CM6 view
- * returned by `getView`, so the toolbar never holds a stale editor reference.
+ * Build the markdown toolbar into `host` from the user's configured layout.
+ * One implementation serves the quick editor (compact) and the lightbox
+ * (full). Variant groups run their current default on click and reveal all
+ * variants on hover (or via the caret); the picked variant becomes the new
+ * default. Buttons act on the CM6 view from `getView`, so the toolbar never
+ * holds a stale editor reference.
  */
 export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorView, compact: boolean): void {
 	const bar = host.createDiv({ cls: `mica-toolbar ${compact ? "is-compact" : ""}` });
+	const layout = toolbarConfig().layout;
 
-	const btn = (parent: HTMLElement, icon: string, label: string, onClick: () => void): HTMLButtonElement => {
-		const b = parent.createEl("button", {
-			cls: "mica-tool",
-			attr: { type: "button", "aria-label": label, tabindex: "-1" },
-		});
-		setIcon(b, icon);
-		// mousedown+preventDefault keeps focus in the editor while clicking tools.
-		b.addEventListener("mousedown", (e) => e.preventDefault());
-		b.addEventListener("click", onClick);
-		return b;
-	};
-
-	const sep = (): void => {
-		bar.createSpan({ cls: "mica-tool-sep" });
-	};
-
-	const inline: Item[] = [
-		{ icon: "bold", label: "Bold (**)", run: (v) => verbs.toggleInline(v, "**") },
-		{ icon: "italic", label: "Italic (*)", run: (v) => verbs.toggleInline(v, "*") },
-		{ icon: "strikethrough", label: "Strikethrough (~~)", run: (v) => verbs.toggleInline(v, "~~"), fullOnly: true },
-		{ icon: "highlighter", label: "Highlight (==)", run: (v) => verbs.toggleInline(v, "=="), fullOnly: true },
-		{ icon: "code", label: "Inline code (`)", run: (v) => verbs.toggleInline(v, "`") },
-	];
-	for (const it of inline) {
-		if (it.fullOnly && compact) continue;
-		btn(bar, it.icon, it.label, () => it.run(getView()));
-	}
-	sep();
-
-	// Headings: three buttons in full, one popover in compact.
-	if (compact) {
-		btn(bar, "heading", "Heading…", (): void => {
-			openPopover(bar, (panel, close) => {
-				for (const level of [1, 2, 3, 4, 5, 6]) {
-					const b = panel.createEl("button", {
-						cls: "mica-pop-item",
-						text: `H${level}`,
-						attr: { type: "button" },
-					});
-					b.addEventListener("click", () => {
-						verbs.setHeading(getView(), level);
-						close();
-					});
-				}
-			});
-		});
-	} else {
-		for (const level of [1, 2, 3]) {
-			btn(bar, `heading-${level}`, `Heading ${level}`, () => verbs.setHeading(getView(), level));
+	for (const id of layout) {
+		if (id === "|") {
+			bar.createSpan({ cls: "mica-tool-sep" });
+			continue;
 		}
-	}
-	sep();
-
-	const lists: Item[] = [
-		{ icon: "list", label: "Bullet list", run: (v) => verbs.toggleList(v, "bullet") },
-		{ icon: "list-ordered", label: "Numbered list", run: (v) => verbs.toggleList(v, "ordered"), fullOnly: true },
-		{ icon: "list-checks", label: "Task list", run: (v) => verbs.toggleList(v, "task") },
-		{ icon: "text-quote", label: "Blockquote (nests)", run: (v) => verbs.toggleQuote(v) },
-	];
-	for (const it of lists) {
-		if (it.fullOnly && compact) continue;
-		btn(bar, it.icon, it.label, () => it.run(getView()));
-	}
-	sep();
-
-	// Callout picker: every Obsidian type + Admonition custom types, searchable.
-	btn(bar, "megaphone", "Callout…", () => {
-		openPopover(bar, (panel, close) => buildCalloutPicker(panel, app, getView, close));
-	});
-
-	// Codeblock with language picker.
-	btn(bar, "square-code", "Code block…", () => {
-		openPopover(bar, (panel, close) => buildLangPicker(panel, getView, close));
-	});
-
-	const rest: Item[] = [
-		{ icon: "link", label: "Link", run: (v) => verbs.insertLink(v) },
-		{ icon: "brackets", label: "Wikilink", run: (v) => verbs.insertWikilink(v), fullOnly: true },
-		{ icon: "table", label: "Table", run: (v) => verbs.insertTable(v), fullOnly: true },
-		{ icon: "minus", label: "Horizontal rule", run: (v) => verbs.insertHr(v), fullOnly: true },
-	];
-	for (const it of rest) {
-		if (it.fullOnly && compact) continue;
-		btn(bar, it.icon, it.label, () => it.run(getView()));
+		const item = resolveTool(id);
+		if (!item) continue; // a removed custom tool leaves no corpse
+		renderItem(bar, app, getView, item);
 	}
 }
 
-/** A dismissable popover anchored under the toolbar. */
+function toolButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {
+	const b = parent.createEl("button", {
+		cls: "clickable-icon mica-tool",
+		attr: { type: "button", "aria-label": label, tabindex: "-1" },
+	});
+	setIcon(b, icon);
+	// mousedown+preventDefault keeps focus in the editor while clicking tools.
+	b.addEventListener("mousedown", (e) => e.preventDefault());
+	return b;
+}
+
+function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item: ToolItem): void {
+	// Popover specials -----------------------------------------------------
+	if (item.special === "callout") {
+		toolButton(bar, item.icon, item.label).addEventListener("click", () => {
+			openPopover(bar, (panel, close) => buildCalloutPicker(panel, app, getView, close));
+		});
+		return;
+	}
+	if (item.special === "codeblock") {
+		toolButton(bar, item.icon, item.label).addEventListener("click", () => {
+			openPopover(bar, (panel, close) => buildLangPicker(panel, getView, close));
+		});
+		return;
+	}
+	if (item.special === "table") {
+		toolButton(bar, item.icon, item.label).addEventListener("click", () => {
+			openPopover(bar, (panel, close) => buildTablePicker(panel, getView, close));
+		});
+		return;
+	}
+
+	// Simple tools ----------------------------------------------------------
+	if (!item.variants?.length) {
+		toolButton(bar, item.icon, item.label).addEventListener("click", () => item.run?.(getView()));
+		return;
+	}
+
+	// Variant groups: primary (current default) + caret; hover reveals variants.
+	const group = bar.createDiv({ cls: "mica-tool-group" });
+	const current = groupDefault(item);
+	const primary = toolButton(
+		group,
+		current?.icon ?? item.icon,
+		`${current?.label ?? item.label} (click) — hover for more`,
+	);
+	primary.addEventListener("click", () => {
+		const v = groupDefault(item);
+		v?.run(getView());
+	});
+	const caret = group.createEl("button", {
+		cls: "clickable-icon mica-tool-caret",
+		attr: { type: "button", "aria-label": `${item.label} options`, tabindex: "-1" },
+	});
+	setIcon(caret, "chevron-down");
+	caret.addEventListener("mousedown", (e) => e.preventDefault());
+
+	let hoverTimer: number | null = null;
+	const openVariants = (): void => {
+		openPopover(bar, (panel, close) => {
+			panel.addClass("mica-variant-menu");
+			for (const v of item.variants ?? []) {
+				const row = panel.createEl("button", {
+					cls: "clickable-icon mica-pop-item mica-variant",
+					attr: { type: "button" },
+				});
+				setIcon(row.createSpan({ cls: "mica-variant-ico" }), v.icon);
+				row.createSpan({ text: v.label });
+				if (groupDefault(item)?.id === v.id) setIcon(row.createSpan({ cls: "mica-variant-check" }), "check");
+				row.addEventListener("mousedown", (e) => e.preventDefault());
+				row.addEventListener("click", () => {
+					v.run(getView());
+					rememberDefault(item.id, v.id);
+					// The primary button now reflects the new default.
+					primary.empty();
+					setIcon(primary, v.icon);
+					primary.setAttribute("aria-label", `${v.label} (click) — hover for more`);
+					close();
+				});
+			}
+		});
+		positionPopoverUnder(bar, group);
+	};
+	caret.addEventListener("click", openVariants);
+	group.addEventListener("pointerenter", () => {
+		hoverTimer = window.setTimeout(openVariants, 350);
+	});
+	group.addEventListener("pointerleave", () => {
+		if (hoverTimer !== null) window.clearTimeout(hoverTimer);
+		hoverTimer = null;
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Popover plumbing
+// ---------------------------------------------------------------------------
+
+/** A dismissable popover anchored inside the toolbar. */
 function openPopover(bar: HTMLElement, build: (panel: HTMLElement, close: () => void) => void): void {
 	bar.querySelector(".mica-popover")?.remove();
 	const panel = bar.createDiv({ cls: "mica-popover" });
@@ -148,6 +166,18 @@ function openPopover(bar: HTMLElement, build: (panel: HTMLElement, close: () => 
 	build(panel, close);
 }
 
+/** Nudge the open popover to sit under `anchor` (variant groups). */
+function positionPopoverUnder(bar: HTMLElement, anchor: HTMLElement): void {
+	const panel = bar.querySelector<HTMLElement>(".mica-popover");
+	if (!panel) return;
+	const left = anchor.getBoundingClientRect().left - bar.getBoundingClientRect().left;
+	panel.style.left = `${Math.max(0, left)}px`;
+}
+
+// ---------------------------------------------------------------------------
+// Pickers
+// ---------------------------------------------------------------------------
+
 /** The callout picker: search, fold mode, optional title, full type catalog. */
 function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorView, close: () => void): void {
 	panel.addClass("mica-callout-picker");
@@ -161,7 +191,7 @@ function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorV
 	const foldBtns: HTMLButtonElement[] = [];
 	const foldOpt = (label: string, value: CalloutFold, tip: string): void => {
 		const b = foldRow.createEl("button", {
-			cls: `mica-pop-seg ${value === fold ? "is-on" : ""}`,
+			cls: `clickable-icon mica-pop-seg ${value === fold ? "is-on" : ""}`,
 			text: label,
 			attr: { type: "button", "aria-label": tip },
 		});
@@ -189,7 +219,7 @@ function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorV
 		for (const t of types) {
 			if (f && !t.id.includes(f) && !t.aliases.some((a) => a.includes(f))) continue;
 			const b = grid.createEl("button", {
-				cls: "mica-callout-type",
+				cls: "clickable-icon mica-callout-type",
 				attr: {
 					type: "button",
 					"aria-label": t.aliases.length ? `${t.id} (also: ${t.aliases.join(", ")})` : t.id,
@@ -222,7 +252,11 @@ function buildLangPicker(panel: HTMLElement, getView: () => EditorView, close: (
 	const paint = (filter: string): void => {
 		list.empty();
 		for (const lang of COMMON_LANGS.filter((l) => l.includes(filter.trim().toLowerCase()))) {
-			const b = list.createEl("button", { cls: "mica-pop-item", text: lang, attr: { type: "button" } });
+			const b = list.createEl("button", {
+				cls: "clickable-icon mica-pop-item",
+				text: lang,
+				attr: { type: "button" },
+			});
 			b.addEventListener("click", () => {
 				verbs.insertCodeblock(getView(), lang);
 				close();
@@ -239,4 +273,58 @@ function buildLangPicker(panel: HTMLElement, getView: () => EditorView, close: (
 	input.addEventListener("input", () => paint(input.value));
 	paint("");
 	queueMicrotask(() => input.focus());
+}
+
+/** The table picker: hover a grid to size it, or type custom dimensions. */
+function buildTablePicker(panel: HTMLElement, getView: () => EditorView, close: () => void): void {
+	panel.addClass("mica-table-picker");
+	const label = panel.createDiv({ cls: "mica-table-label", text: "Insert table" });
+	const MAX = 8;
+	const grid = panel.createDiv({ cls: "mica-table-grid" });
+	grid.style.setProperty("--mica-tp-cols", String(MAX));
+	const cells: HTMLElement[] = [];
+	const highlight = (r: number, c: number): void => {
+		cells.forEach((cell, i) => {
+			const cr = Math.floor(i / MAX) + 1;
+			const cc = (i % MAX) + 1;
+			cell.toggleClass("is-on", cr <= r && cc <= c);
+		});
+		label.setText(r > 0 ? `Insert ${r} × ${c} table` : "Insert table");
+	};
+	for (let r = 1; r <= MAX; r++) {
+		for (let c = 1; c <= MAX; c++) {
+			const cell = grid.createEl("button", {
+				cls: "clickable-icon mica-table-cell",
+				attr: { type: "button", "aria-label": `${r} rows × ${c} columns` },
+			});
+			cell.addEventListener("pointerenter", () => highlight(r, c));
+			cell.addEventListener("mousedown", (e) => e.preventDefault());
+			cell.addEventListener("click", () => {
+				verbs.insertTable(getView(), r, c);
+				close();
+			});
+			cells.push(cell);
+		}
+	}
+	grid.addEventListener("pointerleave", () => highlight(0, 0));
+
+	// Custom dimensions for anything past the hover grid.
+	const custom = panel.createDiv({ cls: "mica-pop-row mica-table-custom" });
+	const rows = custom.createEl("input", { attr: { type: "number", min: "1", max: "50", placeholder: "rows" } });
+	custom.createSpan({ text: "×" });
+	const cols = custom.createEl("input", { attr: { type: "number", min: "1", max: "20", placeholder: "cols" } });
+	const go = custom.createEl("button", { cls: "mod-cta", text: "Insert", attr: { type: "button" } });
+	const insertCustom = (): void => {
+		verbs.insertTable(getView(), Number(rows.value) || 2, Number(cols.value) || 2);
+		close();
+	};
+	go.addEventListener("click", insertCustom);
+	for (const inp of [rows, cols]) {
+		inp.addEventListener("keydown", (e) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				insertCustom();
+			}
+		});
+	}
 }

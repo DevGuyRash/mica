@@ -185,15 +185,59 @@ export function insertWikilink(view: EditorView): void {
 	view.focus();
 }
 
-/** Insert a starter table on its own paragraph. */
-export function insertTable(view: EditorView): void {
+/** Wrap the selection as an embed (`![[…]]`). */
+export function insertEmbed(view: EditorView): void {
+	const sel = view.state.selection.main;
+	const text = view.state.sliceDoc(sel.from, sel.to);
+	view.dispatch({
+		changes: { from: sel.from, to: sel.to, insert: `![[${text}]]` },
+		selection: text ? { anchor: sel.from, head: sel.to + 5 } : { anchor: sel.from + 3 },
+	});
+	view.focus();
+}
+
+/** Insert an empty rows×cols table on its own paragraph. */
+export function insertTable(view: EditorView, rows = 2, cols = 2): void {
+	const r = Math.max(1, Math.min(50, rows));
+	const c = Math.max(1, Math.min(20, cols));
+	const header = `| ${Array.from({ length: c }, (_, i) => `Column ${i + 1}`).join(" | ")} |`;
+	const rule = `|${Array.from({ length: c }, () => " ------ ").join("|")}|`;
+	const body = Array.from({ length: r }, () => `|${Array.from({ length: c }, () => "        ").join("|")}|`);
+	const table = [header, rule, ...body].join("\n");
 	const sel = view.state.selection.main;
 	const line = view.state.doc.lineAt(sel.from);
-	const table = "| Column | Column |\n| ------ | ------ |\n| Cell   | Cell   |";
 	const insert = (line.text.trim() ? "\n\n" : "") + table + "\n";
 	view.dispatch({
 		changes: { from: line.to, to: line.to, insert },
 		selection: { anchor: line.to + insert.indexOf("Column") },
+	});
+	view.focus();
+}
+
+/**
+ * Expand a user template and insert it over the selection. Placeholders:
+ * `{selection}` (current selection), `{all}` (whole document), `{date}`,
+ * `{time}`, `{datetime}`, and `{cursor}` (where the caret lands; first
+ * occurrence only, removed from the output).
+ */
+export function insertTemplate(view: EditorView, template: string): void {
+	const sel = view.state.selection.main;
+	const selection = view.state.sliceDoc(sel.from, sel.to);
+	const now = new Date();
+	const pad = (n: number): string => String(n).padStart(2, "0");
+	const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+	const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+	let text = template
+		.replace(/\{selection\}/g, selection)
+		.replace(/\{all\}/g, view.state.doc.toString())
+		.replace(/\{datetime\}/g, `${date} ${time}`)
+		.replace(/\{date\}/g, date)
+		.replace(/\{time\}/g, time);
+	const cursorAt = text.indexOf("{cursor}");
+	if (cursorAt >= 0) text = text.replace("{cursor}", "");
+	view.dispatch({
+		changes: { from: sel.from, to: sel.to, insert: text },
+		selection: { anchor: sel.from + (cursorAt >= 0 ? cursorAt : text.length) },
 	});
 	view.focus();
 }

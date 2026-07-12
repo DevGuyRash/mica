@@ -65,7 +65,7 @@ export class EditorLightbox extends Modal {
 		const spacer = toolbarRow.createDiv({ cls: "mica-toolbar-spacer" });
 		void spacer;
 		const previewBtn = toolbarRow.createEl("button", {
-			cls: "mica-tool mica-tool-preview",
+			cls: "clickable-icon mica-tool mica-tool-preview",
 			attr: { type: "button", "aria-label": "Toggle live preview pane" },
 		});
 		setIcon(previewBtn, "eye");

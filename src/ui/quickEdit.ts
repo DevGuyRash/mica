@@ -41,7 +41,7 @@ export function openQuickEdit(region: HTMLElement, ctx: RenderCtx, target: Regio
 	const tools = bar.createDiv({ cls: "mica-qe-tools" });
 	bar.createDiv({ cls: "mica-footer-spacer" });
 	const expand = bar.createEl("button", {
-		cls: "mica-qe-expand",
+		cls: "clickable-icon mica-qe-expand",
 		attr: { type: "button", "aria-label": "Open in the full editor (Ctrl+click a region does this directly)" },
 	});
 	setIcon(expand, "maximize-2");

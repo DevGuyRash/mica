@@ -10,6 +10,7 @@ import { VersionsModal } from "./ui/versionsModal";
 import { MicaApi } from "./api/mica";
 import { migrateFile, migrateVault, type MigrateFileReport } from "./migrate/migrate";
 import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings";
+import { setToolbarConfig } from "./ui/toolSpec";
 import type { BlockUi } from "./ui/blockShell";
 
 /**
@@ -28,6 +29,7 @@ export default class MicaPlugin extends Plugin {
 		await initCore();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
 		this.applyStyleVars();
+		this.applyToolbarConfig();
 		this.engine = new VersionEngine(this);
 		this.api = new MicaApi(this);
 		this.api.registerBridge();
@@ -167,6 +169,19 @@ export default class MicaPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	/** Push the editor-toolbar configuration (layout, defaults, custom buttons). */
+	applyToolbarConfig(): void {
+		setToolbarConfig({
+			layout: this.settings.toolbarLayout,
+			defaults: this.settings.toolbarDefaults,
+			customs: this.settings.customTools,
+			onDefaultChange: (groupId, variantId) => {
+				this.settings.toolbarDefaults[groupId] = variantId;
+				void this.saveSettings();
+			},
+		});
 	}
 
 	/**

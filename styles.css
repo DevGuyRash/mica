@@ -1352,15 +1352,15 @@ body.mica-theme-solar {
 	display: flex;
 	align-items: center;
 	flex-wrap: wrap;
-	gap: 2px;
+	gap: 5px;
 	position: relative;
 }
 .mica-tool {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 26px;
-	height: 26px;
+	width: 30px;
+	height: 28px;
 	padding: 0;
 	border: none;
 	border-radius: 6px;
@@ -1390,8 +1390,8 @@ body.mica-theme-solar {
 }
 .mica-tool-sep {
 	width: 1px;
-	height: 16px;
-	margin: 0 4px;
+	height: 18px;
+	margin: 0 7px;
 	background: var(--background-modifier-border);
 }
 .mica-toolbar-spacer {
@@ -1979,4 +1979,236 @@ body.mica-dnd-active * {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 	text-align: center;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Embedded-editor armor
+   The quick editor lives INSIDE the note's .markdown-source-view, so theme
+   rules written for the note's own lines (hanging-indent negative margins,
+   hover/active line bars, readable-line-length centering) leak into it.
+   These rules out-rank any theme (repeated-class specificity + !important)
+   while staying scoped to Mica's own editor.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-line.cm-line.cm-line.cm-line.cm-line {
+	margin: 0 !important;
+	padding: 1px 4px !important;
+	border: none !important;
+	text-indent: 0 !important;
+	background: transparent !important;
+	border-radius: 0 !important;
+	max-width: none !important;
+}
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-line.cm-line.cm-line.cm-line.cm-line:hover {
+	background: transparent !important;
+}
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor
+	.cm-line.cm-line.cm-line.cm-line.cm-line.cm-active {
+	background: color-mix(in srgb, var(--mica-accent) 7%, transparent) !important;
+	border-image: none !important;
+}
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor
+	.cm-line.cm-line.cm-line.cm-line.cm-line.cm-active::before,
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor
+	.cm-line.cm-line.cm-line.cm-line.cm-line.cm-active::after {
+	display: none !important;
+}
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-content {
+	margin: 0 !important;
+	max-width: none !important;
+	min-height: 2.2em;
+	padding: 8px 10px !important;
+	caret-color: var(--mica-accent);
+}
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-scroller {
+	margin: 0 !important;
+	padding: 0 !important;
+}
+.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-gutters {
+	display: none !important;
+}
+
+/* ---------- Toolbar v2: variant groups, table picker, ribbon editor ---------- */
+.mica-tool-group {
+	display: inline-flex;
+	align-items: stretch;
+	border-radius: 7px;
+}
+.mica-tool-group:hover {
+	background: color-mix(in srgb, var(--mica-accent) 8%, transparent);
+}
+.mica-tool-group .mica-tool {
+	border-top-right-radius: 0;
+	border-bottom-right-radius: 0;
+}
+.mica-tool-caret {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 13px;
+	padding: 0;
+	border-top-left-radius: 0;
+	border-bottom-left-radius: 0;
+	color: var(--text-faint);
+}
+.mica-tool-caret .svg-icon {
+	width: 10px;
+	height: 10px;
+}
+.mica-tool-caret:hover {
+	color: var(--text-normal);
+}
+.mica-variant-menu {
+	min-width: 200px;
+}
+.mica-variant {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.mica-variant-ico {
+	display: inline-flex;
+	color: var(--text-muted);
+}
+.mica-variant-ico .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+.mica-variant-check {
+	margin-left: auto;
+	display: inline-flex;
+	color: var(--mica-accent);
+}
+.mica-variant-check .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+
+/* Table size picker */
+.mica-table-picker {
+	min-width: 0;
+	width: max-content;
+}
+.mica-table-label {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	margin-bottom: 6px;
+}
+.mica-table-grid {
+	display: grid;
+	grid-template-columns: repeat(var(--mica-tp-cols, 8), 18px);
+	gap: 3px;
+	margin-bottom: 8px;
+}
+.mica-table-cell {
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: transparent;
+	box-shadow: none;
+	cursor: pointer;
+}
+.mica-table-cell.is-on,
+.mica-table-cell.clickable-icon.is-on {
+	background: color-mix(in srgb, var(--mica-accent) 55%, transparent) !important;
+	border-color: var(--mica-accent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--mica-accent) 40%, transparent);
+}
+.mica-table-custom {
+	align-items: center;
+}
+.mica-table-custom input {
+	width: 64px;
+}
+
+/* Ribbon (toolbar layout) editor in settings */
+.mica-ribbon-editor {
+	display: flex;
+	gap: 10px;
+	margin: 10px 0 16px;
+	align-items: stretch;
+}
+.mica-ribbon-pane {
+	flex: 1;
+	min-width: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 8px;
+	display: flex;
+	flex-direction: column;
+}
+.mica-ribbon-title {
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	color: var(--text-muted);
+	margin-bottom: 6px;
+}
+.mica-ribbon-list {
+	flex: 1;
+	overflow-y: auto;
+	max-height: 260px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.mica-ribbon-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	text-align: left;
+	padding: 4px 8px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	background: transparent;
+	box-shadow: none;
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+}
+.mica-ribbon-item:hover {
+	background: color-mix(in srgb, var(--mica-accent) 8%, transparent);
+}
+.mica-ribbon-item.is-selected {
+	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
+	border-color: var(--mica-accent);
+}
+.mica-ribbon-ico {
+	display: inline-flex;
+	color: var(--text-muted);
+}
+.mica-ribbon-ico .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+.mica-ribbon-mid {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	gap: 4px;
+}
+.mica-ribbon-btn {
+	width: 28px;
+	height: 28px;
+}
+.mica-ribbon-order {
+	display: flex;
+	gap: 4px;
+	justify-content: flex-end;
+	margin-top: 6px;
+}
+.mica-icon-preview {
+	display: inline-flex;
+	margin-left: 8px;
+	color: var(--mica-accent);
+}
+.mica-icon-preview .svg-icon {
+	width: 18px;
+	height: 18px;
+}
+
+/* clickable-icon carriers keep OUR sizing; themes own the rest. */
+.mica-tool.clickable-icon,
+.mica-head-btn.clickable-icon {
+	padding: 0;
 }

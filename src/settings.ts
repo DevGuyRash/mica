@@ -1,4 +1,5 @@
-import { PluginSettingTab, Setting } from "obsidian";
+import { Modal, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { builtinTools, DEFAULT_TOOLBAR_LAYOUT, type CustomTool } from "./ui/toolSpec";
 import type MicaPlugin from "./main";
 import { OBSIDIAN_CALLOUT_TYPES, type DiffGranularity } from "./wasm/bridge";
 
@@ -55,6 +56,12 @@ export interface MicaSettings {
 	versionCalloutTypes: string;
 	/** Block header bar: revealed on hover, always shown, or never. */
 	blockHeaderMode: "hover" | "always" | "never";
+	/** Ordered editor-toolbar item ids ("|" = separator). */
+	toolbarLayout: string[];
+	/** Variant-group defaults (group id → variant id), following last use. */
+	toolbarDefaults: Record<string, string>;
+	/** User-defined template buttons (espanso-style placeholders). */
+	customTools: CustomTool[];
 }
 
 export const DEFAULT_SETTINGS: MicaSettings = {
@@ -78,6 +85,9 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	animations: true,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 	blockHeaderMode: "hover",
+	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
+	toolbarDefaults: {},
+	customTools: [],
 };
 
 export class MicaSettingTab extends PluginSettingTab {
@@ -413,6 +423,13 @@ export class MicaSettingTab extends PluginSettingTab {
 			"Finer visual tuning — colors, radii, control sizes — is exposed as CSS custom properties on `body` (see the plugin's styles.css). Override them with the Style Settings plugin or your theme.",
 		);
 
+		// ---------- Editor toolbar ----------
+		new Setting(containerEl).setHeading().setName("Editor toolbar");
+		new Setting(containerEl).setDesc(
+			"Compose the ribbon shown in the quick editor and the lightbox: move items between the lists, reorder, add separators, and define your own template buttons.",
+		);
+		this.renderToolbarEditor(containerEl);
+
 		// ---------- Migration ----------
 		new Setting(containerEl).setHeading().setName("Migration");
 
@@ -441,5 +458,271 @@ export class MicaSettingTab extends PluginSettingTab {
 						this.display();
 					}),
 			);
+	}
+
+	/**
+	 * The ribbon composer: available items on the left, the current toolbar on
+	 * the right, arrows in the middle (add / remove / add-all / remove-all),
+	 * reorder buttons, a separator well, and user-defined template buttons.
+	 */
+	private renderToolbarEditor(containerEl: HTMLElement): void {
+		const s = this.micaPlugin.settings;
+		const save = async (): Promise<void> => {
+			await this.micaPlugin.saveSettings();
+			this.micaPlugin.applyToolbarConfig();
+		};
+
+		const root = containerEl.createDiv({ cls: "mica-ribbon-editor" });
+		let selectedAvail: string | null = null;
+		let selectedCurrent = -1;
+
+		const catalog = (): { id: string; icon: string; label: string }[] => [
+			...builtinTools().map((t) => ({ id: t.id, icon: t.icon, label: t.label })),
+			...s.customTools.map((c) => ({ id: `custom:${c.id}`, icon: c.icon || "sparkles", label: c.name })),
+		];
+		const labelOf = (id: string): { icon: string; label: string } => {
+			if (id === "|") return { icon: "separator-vertical", label: "Separator" };
+			return catalog().find((t) => t.id === id) ?? { icon: "help-circle", label: id };
+		};
+
+		const paint = (): void => {
+			root.empty();
+			const avail = root.createDiv({ cls: "mica-ribbon-pane" });
+			avail.createDiv({ cls: "mica-ribbon-title", text: "Available" });
+			const availList = avail.createDiv({ cls: "mica-ribbon-list" });
+			const inLayout = new Set(s.toolbarLayout.filter((x) => x !== "|"));
+			const availIds = [
+				"|",
+				...catalog()
+					.map((t) => t.id)
+					.filter((id) => !inLayout.has(id)),
+			];
+			for (const id of availIds) {
+				const { icon, label } = labelOf(id);
+				const row = availList.createEl("button", {
+					cls: `clickable-icon mica-ribbon-item ${selectedAvail === id ? "is-selected" : ""}`,
+					attr: { type: "button" },
+				});
+				setIcon(row.createSpan({ cls: "mica-ribbon-ico" }), icon);
+				row.createSpan({ text: id === "|" ? "Separator (repeatable)" : label });
+				row.addEventListener("click", () => {
+					selectedAvail = id;
+					selectedCurrent = -1;
+					paint();
+				});
+				row.addEventListener("dblclick", () => {
+					s.toolbarLayout.push(id);
+					void save().then(paint);
+				});
+			}
+
+			const mid = root.createDiv({ cls: "mica-ribbon-mid" });
+			const midBtn = (icon: string, label: string, fn: () => void): void => {
+				const b = mid.createEl("button", {
+					cls: "clickable-icon mica-ribbon-btn",
+					attr: { type: "button", "aria-label": label },
+				});
+				setIcon(b, icon);
+				b.addEventListener("click", () => {
+					fn();
+					void save().then(paint);
+				});
+			};
+			midBtn("chevron-right", "Add selected", () => {
+				if (selectedAvail) s.toolbarLayout.push(selectedAvail);
+			});
+			midBtn("chevron-left", "Remove selected", () => {
+				if (selectedCurrent >= 0) {
+					s.toolbarLayout.splice(selectedCurrent, 1);
+					selectedCurrent = -1;
+				}
+			});
+			midBtn("chevrons-right", "Add everything", () => {
+				for (const t of catalog()) if (!s.toolbarLayout.includes(t.id)) s.toolbarLayout.push(t.id);
+			});
+			midBtn("chevrons-left", "Empty the toolbar", () => {
+				s.toolbarLayout = [];
+				selectedCurrent = -1;
+			});
+			midBtn("rotate-ccw", "Reset to the default layout", () => {
+				s.toolbarLayout = [...DEFAULT_TOOLBAR_LAYOUT];
+				selectedCurrent = -1;
+			});
+
+			const cur = root.createDiv({ cls: "mica-ribbon-pane" });
+			cur.createDiv({ cls: "mica-ribbon-title", text: "Your toolbar (in order)" });
+			const curList = cur.createDiv({ cls: "mica-ribbon-list" });
+			s.toolbarLayout.forEach((id, i) => {
+				const { icon, label } = labelOf(id);
+				const row = curList.createEl("button", {
+					cls: `clickable-icon mica-ribbon-item ${selectedCurrent === i ? "is-selected" : ""}`,
+					attr: { type: "button" },
+				});
+				setIcon(row.createSpan({ cls: "mica-ribbon-ico" }), icon);
+				row.createSpan({ text: label });
+				row.addEventListener("click", () => {
+					selectedCurrent = i;
+					selectedAvail = null;
+					paint();
+				});
+			});
+			const curBtns = cur.createDiv({ cls: "mica-ribbon-order" });
+			const orderBtn = (icon: string, label: string, fn: () => void): void => {
+				const b = curBtns.createEl("button", {
+					cls: "clickable-icon mica-ribbon-btn",
+					attr: { type: "button", "aria-label": label },
+				});
+				setIcon(b, icon);
+				b.addEventListener("click", () => {
+					fn();
+					void save().then(paint);
+				});
+			};
+			orderBtn("arrow-up", "Move up", () => {
+				const i = selectedCurrent;
+				if (i > 0) {
+					[s.toolbarLayout[i - 1], s.toolbarLayout[i]] = [s.toolbarLayout[i], s.toolbarLayout[i - 1]];
+					selectedCurrent = i - 1;
+				}
+			});
+			orderBtn("arrow-down", "Move down", () => {
+				const i = selectedCurrent;
+				if (i >= 0 && i < s.toolbarLayout.length - 1) {
+					[s.toolbarLayout[i + 1], s.toolbarLayout[i]] = [s.toolbarLayout[i], s.toolbarLayout[i + 1]];
+					selectedCurrent = i + 1;
+				}
+			});
+		};
+		paint();
+
+		new Setting(containerEl)
+			.setName("Custom buttons")
+			.setDesc(
+				"Your own insert buttons. Templates support {selection}, {all}, {date}, {time}, {datetime}, and {cursor} (where the caret lands).",
+			)
+			.addButton((b) =>
+				b.setButtonText("New custom button…").onClick(() => {
+					new CustomToolModal(this.micaPlugin, null, () => this.display()).open();
+				}),
+			);
+		for (const tool of s.customTools) {
+			new Setting(containerEl)
+				.setName(tool.name)
+				.setDesc(tool.template.length > 80 ? tool.template.slice(0, 80) + "…" : tool.template)
+				.addExtraButton((b) =>
+					b
+						.setIcon("pencil")
+						.setTooltip("Edit")
+						.onClick(() => {
+							new CustomToolModal(this.micaPlugin, tool, () => this.display()).open();
+						}),
+				)
+				.addExtraButton((b) =>
+					b
+						.setIcon("trash-2")
+						.setTooltip("Delete")
+						.onClick(async () => {
+							s.customTools = s.customTools.filter((t) => t.id !== tool.id);
+							s.toolbarLayout = s.toolbarLayout.filter((id) => id !== `custom:${tool.id}`);
+							await this.micaPlugin.saveSettings();
+							this.micaPlugin.applyToolbarConfig();
+							this.display();
+						}),
+				);
+		}
+	}
+}
+
+/** Create/edit one custom template button: name, Lucide icon (live preview), template. */
+class CustomToolModal extends Modal {
+	private name: string;
+	private icon: string;
+	private template: string;
+
+	constructor(
+		private readonly plugin: MicaPlugin,
+		private readonly existing: CustomTool | null,
+		private readonly onDone: () => void,
+	) {
+		super(plugin.app);
+		this.name = existing?.name ?? "";
+		this.icon = existing?.icon ?? "sparkles";
+		this.template = existing?.template ?? "";
+	}
+
+	onOpen(): void {
+		this.titleEl.setText(this.existing ? "Edit custom button" : "New custom button");
+		const { contentEl } = this;
+
+		let preview: HTMLElement;
+		new Setting(contentEl).setName("Name").addText((t) =>
+			t.setValue(this.name).onChange((v) => {
+				this.name = v;
+			}),
+		);
+		new Setting(contentEl)
+			.setName("Icon")
+			.setDesc("A Lucide icon name (lucide.dev), e.g. rocket, stamp, wand-2.")
+			.addText((t) =>
+				t.setValue(this.icon).onChange((v) => {
+					this.icon = v.trim();
+					preview.empty();
+					setIcon(preview, this.icon || "sparkles");
+				}),
+			)
+			.then((st) => {
+				preview = st.controlEl.createSpan({ cls: "mica-icon-preview" });
+				setIcon(preview, this.icon || "sparkles");
+			});
+		new Setting(contentEl)
+			.setName("Template")
+			.setDesc("Placeholders: {selection} {all} {date} {time} {datetime} {cursor}")
+			.addTextArea((t) => {
+				t.setValue(this.template)
+					.setPlaceholder("> [!quote] {date}\n> {selection}{cursor}")
+					.onChange((v) => {
+						this.template = v;
+					});
+				t.inputEl.rows = 5;
+				t.inputEl.addClass("mica-settings-wide");
+			});
+
+		new Setting(contentEl)
+			.addButton((b) =>
+				b.setButtonText("Cancel").onClick(() => {
+					this.close();
+				}),
+			)
+			.addButton((b) =>
+				b
+					.setCta()
+					.setButtonText(this.existing ? "Save" : "Create")
+					.onClick(async () => {
+						const name = this.name.trim();
+						if (!name || !this.template) return;
+						const s = this.plugin.settings;
+						if (this.existing) {
+							this.existing.name = name;
+							this.existing.icon = this.icon;
+							this.existing.template = this.template;
+						} else {
+							const id =
+								name
+									.toLowerCase()
+									.replace(/[^a-z0-9]+/g, "-")
+									.replace(/(^-|-$)/g, "") || String(Date.now());
+							s.customTools.push({ id, name, icon: this.icon, template: this.template });
+							s.toolbarLayout.push(`custom:${id}`);
+						}
+						await this.plugin.saveSettings();
+						this.plugin.applyToolbarConfig();
+						this.close();
+						this.onDone();
+					}),
+			);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }

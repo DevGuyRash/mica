@@ -60,9 +60,16 @@ export interface RenderCtx {
 type Container = Extract<MicaNode, { kind: "container" }>;
 type Leaf = Extract<MicaNode, { kind: "leaf" }>;
 
-/** A square icon button (Lucide via setIcon) with an accessible label. */
+/**
+ * A square icon button (Lucide via setIcon) with an accessible label.
+ * Carries Obsidian's `clickable-icon` class so themes apply their icon-button
+ * treatment (and skip their heavy text-button skin) — never fight the theme.
+ */
 function iconButton(parent: HTMLElement, cls: string, icon: string, label: string): HTMLButtonElement {
-	const b = parent.createEl("button", { cls, attr: { type: "button", "aria-label": label } });
+	const b = parent.createEl("button", {
+		cls: `clickable-icon ${cls}`,
+		attr: { type: "button", "aria-label": label },
+	});
 	setIcon(b, icon);
 	return b;
 }
@@ -395,7 +402,7 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 		const cur = ctx.blockAttrs?.[key] ?? "";
 		for (const [value, text] of opts) {
 			const b = row.createEl("button", {
-				cls: `mica-pop-seg ${cur === value ? "is-on" : ""}`,
+				cls: `clickable-icon mica-pop-seg ${cur === value ? "is-on" : ""}`,
 				text,
 				attr: { type: "button" },
 			});
@@ -841,7 +848,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	if (ctx.editable) {
 		// Ghost tile: add a cell where the next one would land.
 		const ghost = grid.createEl("button", {
-			cls: "mica-cell-ghost",
+			cls: "clickable-icon mica-cell-ghost",
 			attr: { type: "button", "aria-label": "Add a cell" },
 		});
 		setIcon(ghost.createSpan(), "plus");
