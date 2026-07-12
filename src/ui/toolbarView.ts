@@ -74,7 +74,11 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 		btn(bar, "heading", "Heading…", (): void => {
 			openPopover(bar, (panel, close) => {
 				for (const level of [1, 2, 3, 4, 5, 6]) {
-					const b = panel.createEl("button", { cls: "mica-pop-item", text: `H${level}`, attr: { type: "button" } });
+					const b = panel.createEl("button", {
+						cls: "mica-pop-item",
+						text: `H${level}`,
+						attr: { type: "button" },
+					});
 					b.addEventListener("click", () => {
 						verbs.setHeading(getView(), level);
 						close();

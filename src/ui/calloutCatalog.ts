@@ -16,18 +16,36 @@ export interface CalloutType {
 /** Obsidian's built-in callout types, their icons, and aliases (help.obsidian.md/callouts). */
 const BUILTIN: CalloutType[] = [
 	{ id: "note", icon: "pencil", aliases: [], source: "obsidian", color: "var(--color-blue)" },
-	{ id: "abstract", icon: "clipboard-list", aliases: ["summary", "tldr"], source: "obsidian", color: "var(--color-cyan)" },
+	{
+		id: "abstract",
+		icon: "clipboard-list",
+		aliases: ["summary", "tldr"],
+		source: "obsidian",
+		color: "var(--color-cyan)",
+	},
 	{ id: "info", icon: "info", aliases: [], source: "obsidian", color: "var(--color-blue)" },
 	{ id: "todo", icon: "circle-check", aliases: [], source: "obsidian", color: "var(--color-blue)" },
 	{ id: "tip", icon: "flame", aliases: ["hint", "important"], source: "obsidian", color: "var(--color-cyan)" },
 	{ id: "success", icon: "check", aliases: ["check", "done"], source: "obsidian", color: "var(--color-green)" },
 	{ id: "question", icon: "circle-help", aliases: ["help", "faq"], source: "obsidian", color: "var(--color-orange)" },
-	{ id: "warning", icon: "triangle-alert", aliases: ["caution", "attention"], source: "obsidian", color: "var(--color-orange)" },
+	{
+		id: "warning",
+		icon: "triangle-alert",
+		aliases: ["caution", "attention"],
+		source: "obsidian",
+		color: "var(--color-orange)",
+	},
 	{ id: "failure", icon: "x", aliases: ["fail", "missing"], source: "obsidian", color: "var(--color-red)" },
 	{ id: "danger", icon: "zap", aliases: ["error"], source: "obsidian", color: "var(--color-red)" },
 	{ id: "bug", icon: "bug", aliases: [], source: "obsidian", color: "var(--color-red)" },
 	{ id: "example", icon: "list", aliases: [], source: "obsidian", color: "var(--color-purple)" },
-	{ id: "quote", icon: "quote", aliases: ["cite"], source: "obsidian", color: "var(--color-base-70, var(--text-muted))" },
+	{
+		id: "quote",
+		icon: "quote",
+		aliases: ["cite"],
+		source: "obsidian",
+		color: "var(--color-base-70, var(--text-muted))",
+	},
 ];
 
 interface AdmonitionDef {
@@ -51,7 +69,10 @@ export function calloutCatalog(app: App): CalloutType[] {
 		for (const [id, def] of Object.entries(custom)) {
 			if (seen.has(id)) continue;
 			seen.add(id);
-			const rgb = typeof def.color === "string" && /^[\d, ]+$/.test(def.color) ? `rgb(${def.color})` : "var(--text-accent)";
+			const rgb =
+				typeof def.color === "string" && /^[\d, ]+$/.test(def.color)
+					? `rgb(${def.color})`
+					: "var(--text-accent)";
 			out.push({
 				id,
 				icon: def.icon?.name ?? "shield",

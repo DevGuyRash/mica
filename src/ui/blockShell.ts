@@ -571,7 +571,9 @@ function renderInsertZone(el: HTMLElement, ctx: RenderCtx, path: number[], at: n
 			i
 				.setTitle("Callout")
 				.setIcon("megaphone")
-				.onClick(() => ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\n> [!note] Title\n> Body\n" })),
+				.onClick(() =>
+					ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\n> [!note] Title\n> Body\n" }),
+				),
 		);
 		menu.addItem((i) =>
 			i
@@ -608,7 +610,9 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	nav.setAttribute("data-len", String(node.children.length));
 	nav.setAttribute("data-axis", "x");
 	const panels = wrap.createDiv({ cls: "mica-tab-panels" });
-	const tabs = node.children.map((c, idx) => ({ c, idx })).filter((x) => x.c.kind === "container" && x.c.name === "tab");
+	const tabs = node.children
+		.map((c, idx) => ({ c, idx }))
+		.filter((x) => x.c.kind === "container" && x.c.name === "tab");
 
 	let revealTab = -1;
 	const r = ctx.ui?.reveal;
@@ -841,7 +845,9 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			attr: { type: "button", "aria-label": "Add a cell" },
 		});
 		setIcon(ghost.createSpan(), "plus");
-		ghost.addEventListener("click", () => ctx.editable?.apply({ op: "insertCell", path, at: node.children.length }));
+		ghost.addEventListener("click", () =>
+			ctx.editable?.apply({ op: "insertCell", path, at: node.children.length }),
+		);
 
 		const bar = wrap.createDiv({ cls: "mica-grid-actions" });
 		const colsBtn = bar.createEl("button", {
@@ -960,7 +966,9 @@ function renderVersionChip(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo): vo
 			for (const secs of [2, 5, 10, 30]) {
 				menu.addItem((i) =>
 					i
-						.setTitle(`Auto-save after ${secs}s idle${p.settings.snapshotDebounceMs === secs * 1000 ? "  ✓" : ""}`)
+						.setTitle(
+							`Auto-save after ${secs}s idle${p.settings.snapshotDebounceMs === secs * 1000 ? "  ✓" : ""}`,
+						)
 						.onClick(async () => {
 							p.settings.snapshotDebounceMs = secs * 1000;
 							p.engine.resetDebouncers();

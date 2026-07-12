@@ -195,8 +195,26 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 			const r = kid.getBoundingClientRect();
 			slots.push(
 				horizontal
-					? { parentPath, index: idx, x: r.left - 2, y: r.top, w: 3, h: r.height, cx: r.left, cy: r.top + r.height / 2 }
-					: { parentPath, index: idx, x: r.left, y: r.top - 2, w: r.width, h: 3, cx: r.left + r.width / 2, cy: r.top },
+					? {
+							parentPath,
+							index: idx,
+							x: r.left - 2,
+							y: r.top,
+							w: 3,
+							h: r.height,
+							cx: r.left,
+							cy: r.top + r.height / 2,
+						}
+					: {
+							parentPath,
+							index: idx,
+							x: r.left,
+							y: r.top - 2,
+							w: r.width,
+							h: 3,
+							cx: r.left + r.width / 2,
+							cy: r.top,
+						},
 			);
 		}
 		// Append slot after the last child.
@@ -204,8 +222,26 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 		const r = last.getBoundingClientRect();
 		slots.push(
 			horizontal
-				? { parentPath, index: len, x: r.right - 1, y: r.top, w: 3, h: r.height, cx: r.right, cy: r.top + r.height / 2 }
-				: { parentPath, index: len, x: r.left, y: r.bottom - 1, w: r.width, h: 3, cx: r.left + r.width / 2, cy: r.bottom },
+				? {
+						parentPath,
+						index: len,
+						x: r.right - 1,
+						y: r.top,
+						w: 3,
+						h: r.height,
+						cx: r.right,
+						cy: r.top + r.height / 2,
+					}
+				: {
+						parentPath,
+						index: len,
+						x: r.left,
+						y: r.bottom - 1,
+						w: r.width,
+						h: 3,
+						cx: r.left + r.width / 2,
+						cy: r.bottom,
+					},
 		);
 	}
 	return slots;

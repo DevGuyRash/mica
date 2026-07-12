@@ -1,29 +1,40 @@
 # Mica
 
-**Versioned, structured content blocks for Obsidian.** Fast nested tabs and grids, first-class per-block version history, and Meld-class diffing — all in plain, portable Markdown. Mica is a modern replacement for the `obsidian-tabs` plugin, built so the old "auto-save corrupts my note" bug is impossible by construction.
+**Versioned, structured content blocks for Obsidian — with a real command line.** Fast nested tabs and grids, first-class per-block version history, Meld-class diffing, a full markdown editor with toolbar, and a standalone `mica` CLI that drives your vault with Obsidian closed — all in plain, portable Markdown. Mica is a modern replacement for the `obsidian-tabs` plugin, built so the old "auto-save corrupts my note" bug is impossible by construction.
 
 - **Tabs & grids** that nest as deep as you like, without stacking backticks.
-- **Every block is versioned.** Edit freely; Mica snapshots changes into a sidecar folder you can read, diff, and revert.
-- **Meld-style diffing** — inline / side-by-side / 3-up, char / word / line, swap base, copy patch, branch-edit any old version.
-- **Three ways to work:** read-only, edit-the-rendered-view, or raw Markdown — your choice, per note.
-- **Drivable by API** so scripts and AI agents can create, edit, diff, and version blocks headlessly.
+- **A real editor.** Click any text to edit in place with a CodeMirror markdown editor and toolbar; expand to a full-screen lightbox with live preview. Nothing ever commits on blur, and drafts survive anything.
+- **Every block is versioned.** Edit freely; Mica snapshots changes into a sidecar folder you can read, diff, label, and restore — from the app or the shell.
+- **Drag anything.** Tabs, cells, and whole groups move by pointer with live insertion indicators, spring-loaded tabs, and keyboard alternatives.
+- **Two engines, one brain.** The Obsidian plugin and the `mica` CLI share the same Rust core, so a script at 2 a.m. and a click at noon behave identically.
 
 ---
 
 ## Install
 
+### The plugin
+
 Mica isn't in the community-plugin store yet, so install it manually:
 
-1. Copy `manifest.json`, `main.js`, and `styles.css` into a new folder `<your vault>/.obsidian/plugins/mica/`.
+1. Copy `manifest.json`, `main.js`, and `styles.css` into `<your vault>/.obsidian/plugins/mica/`.
    _(Or, if you're developing it, symlink the repo there — see [Development](#development).)_
 2. In Obsidian: **Settings → Community plugins → Reload**, then enable **Mica**.
-3. You'll see `Mica: loaded` in the developer console (Ctrl/Cmd-Shift-I). That's it.
+
+### The CLI (optional, recommended)
+
+```sh
+cargo build --release -p mica-cli     # → target/release/mica
+# put it on your PATH, then from anywhere inside a vault:
+mica ls "My Note"
+```
+
+The CLI operates on vault files directly — Obsidian does not need to be running — and writes the exact same sidecar format the plugin reads.
 
 ---
 
 ## Quick start
 
-**1. Make a block.** Create a note and paste this — a `tab:` line starts each tab, and you never close anything:
+**1. Make a block.** Run **`Mica: Insert Mica block`** from the command palette (or paste this) — a `tab:` line starts each tab, and you never close anything:
 
 ````markdown
 ```mica
@@ -37,13 +48,15 @@ The second tab. Click the tab bar to switch (or arrow keys when focused).
 ```
 ````
 
-Switch to **Reading view** or **Live Preview** and you'll see a tabbed block.
+Already have markdown you want inside a block? Select it and run **`Mica: Wrap selection in a Mica block`**.
 
-**2. Edit it.** In **Live Preview**, click any text in the block to edit just that piece in place — the editor shows clean Markdown, never the tab/grid plumbing. Add a tab with the **`+`** in the tab bar, drop a whole group with the quiet **`+ Tabs` / `+ Grid`** buttons where you're working, hover a tab for **×** (delete) or double-click it to rename. Nothing you do can corrupt the note.
+**2. Edit it.** In **Live Preview**, click any text to open the **quick editor** — real markdown highlighting, a toolbar (bold, italic, lists, callout picker, code blocks, …), and Save/Cancel that never move out from under your pointer. Press the expand button (or **Ctrl/Cmd+click** the text) for the **full-screen lightbox** with a live preview pane. `Ctrl+Enter` saves; `Esc` asks before discarding real changes; clicking away never silently commits or destroys anything.
 
-**3. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history — no command needed. The block's footer shows an **Auto** pill and a **`v2 ●`** chip; click the chip to compare and restore versions.
+**3. Restructure it.** Add a tab with **`+`**, rename with a double-click, right-click a tab for icons/duplicate/delete, and **drag** tabs, cells, or whole groups wherever they should live — insertion lines show exactly where things land, and hovering a tab mid-drag springs it open so you can drop inside. Deletions offer **Undo** instead of nagging with confirms. Hover between any two sections for a quiet **+** that inserts prose, a callout, a code block, or a whole new group right there.
 
-> **Already using `obsidian-tabs`?** Skip straight to [Migrating](#migrating-from-obsidian-tabs) — one command converts a note (or your whole vault) and turns your manual "archived" callouts into real version history.
+**4. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history. The footer's **`v3 ●`** chip means three versions and unsaved changes; click it for the **timeline** — labels, relative times, one-click restore, branch-edit, and readable diffs. Right-click the chip for auto-save controls.
+
+> **Already using `obsidian-tabs`?** Run **`Mica: Migrate tabs → Mica (dry run, whole vault)`**, review, then convert — your manual "archived" callouts become real, labeled version history. Or from the shell: `mica migrate --dry-run`.
 
 ---
 
@@ -51,163 +64,120 @@ Switch to **Reading view** or **Live Preview** and you'll see a tabbed block.
 
 Make tabs the easy way: inside a ` ```mica ` block, a `tab: Title` line starts each tab, running until the next `tab:`. **You never close anything.**
 
-````markdown
-```mica
-tab: Kernel
-The Kernel tab — any Markdown works.
+The extras:
 
-tab: Frame Gate
-The Frame Gate tab.
-```
-````
+- **Block header attrs** (managed for you, editable by hand): ` ```mica id=… name="…" accent=#7c5cff density=compact tabstyle=pill radius=8 ` — `id` anchors history; the rest are per-block appearance, set from the block's ⋮ menu.
+- **Per-tab icons**: `tab: Deploy {icon=rocket}` shows a Lucide icon in the chip (set via right-click → _Set icon…_).
+- **Callouts** — any Obsidian callout works, rendered natively.
+- **Grids** — `:::grid {cols=3}` … `:::` containing `:::cell` … `:::` cells.
+- **Nesting** — the flat `tab:` form can't nest, so nested groups use the explicit `:::tabs` / `:::tab Title` form. You'll rarely type it: the insert menus and drag-and-drop build (and convert) nesting for you, correctly, every time.
 
-That's the whole syntax for tabs. The extras:
-
-- **Block header** (optional): ` ```mica id=… name="…" `. The `id` (added automatically) lets versioning and the API follow a block across renames; `name` is a label.
-- **Callouts** — any Obsidian callout (`> [!note]`, `> [!tip]`, `> [!warning]`, …) works, rendered natively.
-- **Grids / menus** — a `:::grid {cols=3}` … `:::` block containing `:::cell` … `:::` cells.
-- **Nesting** (a tab group _inside_ a tab) — the `tab:` shorthand is flat, so for nesting use the explicit form there: `:::tabs` … `:::` with `:::tab Title` … `:::` inside (add colons to go deeper — `::::tabs` wraps `:::tab`). You'll rarely type this by hand: migration generates it, and the **`+ Tabs` / `+ Grid`** affordances build nesting for you.
-
-Everything is ordinary Markdown, and Mica sizes the outer ` ```mica ` fence for you — so you never count backticks.
+Everything is ordinary Markdown, and Mica sizes fences for you — you never count backticks.
 
 ### The three view modes
 
-Mica works in all of Obsidian's modes, and you choose per note:
+- **Reading view** — rendered, read-only: switch tabs, browse history, use the navigator. The active tab is **shared** with editing mode.
+- **Live Preview** — rendered and editable: the full direct-manipulation experience. A pencil glyph in the block header tells you it's editable (a book means read-only).
+- **Source mode** — plain Markdown, byte-exact round-trips, nothing hidden.
 
-- **Reading view** — fully rendered, read-only tabs/grids; switch tabs, open history.
-- **Live Preview** — rendered, editable tabs/grids. Click any text to edit just that region in place (clean Markdown, no `:::` plumbing); add, rename, and delete tabs and cells with the inline **+**, **×**, and rename affordances.
-- **Source mode** — plain Markdown. Everything round-trips byte-for-byte; nothing is hidden or rewritten behind your back.
+### The block header
+
+Hover a block (or pin it via settings) for its header: **name** (click to rename), the **navigator** (a tree of every tab/grid/cell with word counts — click to jump), and the **⋮ menu** (edit whole block in the lightbox, per-block appearance, copy markdown, version history, save version now). The chevron collapses the block to one line.
 
 ---
 
 ## Versioning
 
-Mica keeps each block's history automatically — it stamps the block with an id the first time you edit it (or run **Prepare note for Mica** to do it now; turn this off in settings if you prefer manual ids).
+- **Smart auto-snapshots.** A short while after a block's _content_ changes, it's snapshotted. Structure-only churn — adding empty tabs, reordering, renaming — never mints a version. Toggle auto/manual and the idle interval from the version chip's right-click menu.
+- **Pre-image safety.** Structural edits and every CLI/API mutation snapshot the current state _first_, so no operation can destroy the only copy of anything.
+- **Where it lives.** Next to `My Note.md`, a visible `My Note.mica/` folder holds content-addressed version objects (plain Markdown), an append-only `ledger.jsonl`, and a `manifest.json`. Human-readable; rides Obsidian Sync and git.
 
-- **Smart auto-snapshots.** A short while after you change a block's _content_, it's snapshotted. Pure structure changes — adding an empty tab or cell, reordering, renaming — never create a version, and unchanged content is never re-stored, so history stays clean.
-- **Auto ↔ Manual.** Each block's footer has a green/red pill (with an editable interval) to toggle auto-snapshotting per session; in **Manual** mode a **Save version** button snapshots on demand.
-- **Where it lives.** Next to `My Note.md`, Mica creates a visible `My Note.mica/` folder holding your version objects (plain Markdown files), an append-only `ledger.jsonl`, and a `manifest.json`. It's human-readable, and it rides Obsidian Sync / Git like any other file.
-- **The version chip.** In the footer sits a `v<count>` chip. A dot (`v3 ●`) means the block has unsaved _content_ changes vs. its last snapshot. Click the chip to open **Compare**.
+### The timeline
 
-### Compare & restore
-
-The compare window (chip, or **`Mica: Compare block versions`**) lets you:
-
-- Pick a **Base** and a **Compare** version (and an optional third for 3-up).
-- Choose **granularity** (line / word / char) and **mode** (inline / side-by-side / patch).
-- **Swap base** ↔ compare, or **Copy patch** (a unified diff) to the clipboard.
-- **Edit compare as new version** — opens an old version for editing; saving creates a _new_ version that records which one it branched from. History is never rewritten.
-
-To roll a block back, open compare, pick the version, and branch-edit it (or use the API `versions.revert`). Your current content is always snapshotted first, so nothing is ever lost.
+Click the version chip: every version with its label, age, head marker, and preview — plus the dirty **working copy** when you have unsaved changes. Select any two points to diff (inline / split / patch, line / word / char, layout syntax dimmed). Per version: **Restore** (current state is snapshotted first), **Branch-edit** (opens the lightbox; saving creates a new version that records its parent), **Label**, **Copy**.
 
 ---
 
-## Migrating from `obsidian-tabs`
+## The `mica` CLI
 
-If you have notes using ` `````tabs ` blocks, Mica converts them.
+Everything above, from the shell, with Obsidian closed. Sidecars are byte-compatible — mix and match freely.
 
-1. **Preview first.** Run **`Mica: Migrate tabs → Mica (dry run, whole vault)`**. Nothing is written — a report of what _would_ convert prints to the console (Ctrl/Cmd-Shift-I).
-2. **Convert.** Happy with the preview? Run **`Mica: Migrate tabs → Mica (active note)`** for one note, or **`… (whole vault)`** for all of them.
+````sh
+mica ls "My Note" --tree              # blocks, tabs, versions — with addressable paths
+mica cat "My Note" --tab Overview     # print one tab's body
+mica set "My Note" -b demo -f new.md  # replace content (pre-image + result versioned)
+mica tab add "My Note" --title Notes  # structural edits: tab/cell/grid/mv
+mica versions "My Note"               # the timeline, in your terminal
+mica diff "My Note"                   # working copy vs head, colored
+mica restore "My Note" v3             # roll back (snapshots current state first)
+mica label "My Note" v3 "Golden"      # name a version
+mica snapshot "My Note"               # change-gated snapshot now
+mica watch                            # daemon: auto-snapshot the vault while Obsidian is closed
+mica migrate --dry-run                # legacy ```tabs conversion report
+mica repair                           # re-home sidecars after renames; report orphans
+mica doctor                           # sidecar health (missing objects, bad ledger lines)
+````
 
-What migration guarantees:
+Global flags: `--vault DIR` (else it walks up to `.obsidian`), `--json` on every read command for scripting. Blocks are addressed by id, `name`, or 1-based index; versions by `vN`, label, or hash prefix.
 
-- **Lossless.** The entire original note is backed up as a content-addressed object _before_ anything is written, tab bodies are copied verbatim (blank lines and dividers included), and notes containing Templater tokens (`<%`) are skipped untouched.
-- **Your archives become real history.** Version-style callouts inside tabs — e.g. `> [!success]- Review Kernel (V1.0)` or `> [!bug]- Frame Gate (V0.3)` — are imported as **labeled versions** you can diff and restore. By default Mica recognizes **every built-in Obsidian callout type**; narrow or broaden this in **Settings → Version callout types** (leave it empty to import _any_ callout type, including custom ones).
+## Scripting & AI agents
+
+The plugin's full surface is also programmatic — nothing is UI-only.
+
+**From the console or a scripting plugin:**
+
+```js
+await window.mica.blockList("My Note.md");
+await window.mica.blockUpdate("My Note.md", "<id>", "new body"); // corruption-proof
+await window.mica.blockApply("My Note.md", "<id>", { op: "insertTab", path: [0], at: 2 });
+await window.mica.blockSetAttr("My Note.md", "<id>", "accent", "#7c5cff");
+await window.mica.versionsList("My Note.md", "<id>");
+await window.mica.versionsLabel("My Note.md", "<id>", "<hash>", "Golden");
+await window.mica.versionsDiff("My Note.md", base, other, "word");
+```
+
+**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-bridge/inbox/`; the result appears in `mica-bridge/outbox/`. Verbs: `block.list/read/update/apply/attr`, `versions.list/snapshot/revert/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. Destructive verbs snapshot first.
 
 ---
 
 ## Commands
 
-Open the command palette (Ctrl/Cmd-P) and type "Mica":
-
 | Command                                   | Does                                                 |
 | ----------------------------------------- | ---------------------------------------------------- |
-| **Prepare note for Mica (add ids)**       | Stamps blocks + frontmatter so versioning works.     |
+| **Insert Mica block (tabs) here**         | Drop a fresh block at the cursor.                    |
+| **Wrap selection in a Mica block**        | Fence the selected markdown (fences auto-sized).     |
+| **Collapse / expand all Mica blocks**     | One-keystroke overview of long notes.                |
+| **Prepare note for Mica (add ids)**       | Stamp blocks + frontmatter so versioning works.      |
 | **Snapshot versions now**                 | Force a snapshot of the active note.                 |
-| **Compare block versions**                | Open the diff window for the note's first block.     |
+| **Compare block versions**                | Open the timeline for the note's first block.        |
 | **Repair history (reconcile)**            | Re-home histories whose notes moved; report orphans. |
 | **Migrate tabs → Mica**                   | Dry-run or convert; active note or whole vault.      |
 | **Run instruction (JSON from clipboard)** | Execute an API instruction manually.                 |
 
----
-
 ## Settings
 
-**Settings → Mica** is grouped by intent — **Versioning**, **Comparing**, **Appearance**, **Migration**:
+Grouped by intent — **Versioning**, **Comparing**, **Appearance**, **Migration**:
 
-- **Versioning** — **Auto-snapshot** master switch + **interval** (1–15 s) for smart auto-snapshotting (also toggled per session from each block's footer pill), whether ids are stamped automatically, and **Reconcile history on startup**.
-- **Comparing** — the **granularity** (char / word / line) and **mode** the compare window opens with.
-- **Appearance** — see below.
-- **Migration** — which **callout types** import as history (default: all built-in types; empty = any).
-
-### Appearance
-
-Mica's chrome is a real design surface, driven by **one accent** — pick a look, then tweak any single piece; per-item overrides win over the theme:
-
-- **Theme** — 7 presets: _Match Obsidian_ (default, borrows your theme's accent), _Slate, Ocean, Forest, Sunset, Grape, Rose_.
-- **Accent color** — override the theme's accent with a color picker (tab fills, borders, and the version chip all retint from it); reset to fall back to the preset.
-- **Density** — _comfortable_ or _compact_ (retunes control heights, gaps, padding).
-- **Corner radius** — 0–20 px.
-- **Tab style** — _connected_ (tabs merge into the panel), _underline_, or _pill_.
-- **Animations** — panel fade-in + a pulse when a version is saved; honors your OS "reduce motion" setting, and can be turned off.
-- Plus the per-block **version chip** toggle, **tab spacing**, and **layout** knobs (grow-with-content inline editor + max heights, cap tab/cell height with a scrollbar).
-
-Everything resolves to CSS custom properties on `body` (`--mica-accent`, `--mica-radius`, `--mica-tab-gap`, …; see `styles.css`), so the [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) plugin or your own theme can override anything further. To eyeball the themes without launching Obsidian, open **`preview.html`** in any browser — it imports the real `styles.css` and lets you flip theme / tab style / density / accent live.
-
----
-
-## Scripting & AI agents
-
-Mica's whole feature set is reachable from code — nothing is UI-only.
-
-**From the console or a scripting plugin** (`js-engine`, `customjs`, Templater):
-
-```js
-await window.mica.blockList("My Note.md"); // [{ id, name }]
-await window.mica.blockUpdate("My Note.md", "<id>", "new body"); // corruption-proof
-await window.mica.versionsList("My Note.md", "<id>"); // [{ hash, ts, label }]
-await window.mica.versionsDiff("My Note.md", baseHash, otherHash, "word");
-await window.mica.migrateScan(); // dry-run report
-```
-
-**From an AI agent (or any process), via the file-bridge** — no server, works on desktop, mobile, and over Sync. Drop an instruction file into `mica-bridge/inbox/`:
-
-```json
-{ "verb": "versions.diff", "args": ["My Note.md", "<baseHash>", "<otherHash>", "line"] }
-```
-
-Mica runs it, **deletes the instruction** (so it can't replay), and writes the result to `mica-bridge/outbox/<same-name>.json`:
-
-```json
-{ "ok": true, "result": { "hunks": [ … ], "similarity": 0.82 }, "error": null }
-```
-
-Verbs: `block.list/read/update`, `versions.list/snapshot/revert/diff/patch/edit`, `migrate.scan/run`, `prepare`, `repair`. Destructive verbs snapshot before writing, so an agent can never destroy the only copy of a block.
-
----
+- **Appearance** — a **theme gallery** (Match Obsidian, Slate, Ocean, Forest, Sunset, Grape, Rose, Carbon, Cyber, Solar) with live previews; accent override; density; corner radius; tab style (connected / underline / pill); **block header** visibility (hover / always / never); animations; version chip; tab spacing; editor sizing. Any single block can override accent/density/tab style/radius from its ⋮ menu.
+- Everything resolves to CSS custom properties (`--mica-accent`, `--mica-radius`, …), so [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) or your theme can go further. `preview.html` previews themes without launching Obsidian.
 
 ## How it works (in one breath)
 
-A small, pure **Rust core** (compiled to WebAssembly) does the exact, fiddly parts — locating blocks by a real fence grammar, computing edits, hashing, diffing — and a **TypeScript / CodeMirror 6** shell wires it into Obsidian. One rule everywhere: _derive state from the live document, never trust a cached offset._ That's why editing a rendered tab can't corrupt your note the way `obsidian-tabs` did. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full picture, [`PRD.md`](PRD.md) for the vision, and [`DESIGN.md`](DESIGN.md) for UX & syntax.
-
----
+A pure **Rust core** (one crate) does the exact, fiddly parts — fence grammar, the CST, **every structural edit**, content-signature gating, hashing, diffing — and compiles twice: to WebAssembly inside the plugin, and natively inside the `mica` binary. The TypeScript shell and the CLI are thin hosts around the same reducer, and both obey one rule: _derive state from the live document; never trust a cached offset._ That's why editing a rendered tab can't corrupt your note the way `obsidian-tabs` did. See [`ARCHITECTURE.md`](ARCHITECTURE.md), [`PRD.md`](PRD.md), and [`DESIGN.md`](DESIGN.md).
 
 ## Development
 
 ```sh
-just bootstrap   # pnpm install + add the wasm32 target
+just bootstrap   # pnpm install + wasm32 target
 just build       # wasm-pack + bundled main.js
+just cli         # target/release/mica
 just link        # symlink into your vault for live testing
-just dev         # watch-rebuild main.js
-just check       # typecheck, lint, format-check, Rust tests
+just check       # format-check, typecheck, lint, Rust tests (workspace)
 pnpm smoke       # WASM boundary test in Node (no Obsidian needed)
-just e2e         # full contract + rendering suite in a REAL sandboxed Obsidian (Xvfb)
-just e2e-cli     # contract checks via the official Obsidian CLI (skips if not activated)
+just e2e         # contract + UI suite in a REAL sandboxed Obsidian (Xvfb)
 ```
 
-Open **`preview.html`** in a browser to iterate on appearance (themes, tab styles, density, accent) against the real `styles.css` — no Obsidian, no build step.
-
-Requirements: Node + pnpm, the Rust toolchain with `wasm-pack` and the `wasm32-unknown-unknown` target, and `just`. CI runs all tiers on every push.
+Requirements: Node + pnpm, Rust with `wasm-pack` and the `wasm32-unknown-unknown` target, and `just`. CI runs every tier (including clippy `-D warnings` and the CLI build) on each push.
 
 ## License
 

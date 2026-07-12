@@ -89,7 +89,9 @@ export default class MicaPlugin extends Plugin {
 				let run = 2;
 				for (const m of sel.matchAll(/`+/g)) run = Math.max(run, m[0].length);
 				const fence = "`".repeat(Math.max(3, run + 1));
-				editor.replaceSelection(`${fence}mica\ntab: New tab\n${sel}${sel.endsWith("\n") ? "" : "\n"}${fence}\n`);
+				editor.replaceSelection(
+					`${fence}mica\ntab: New tab\n${sel}${sel.endsWith("\n") ? "" : "\n"}${fence}\n`,
+				);
 			},
 		});
 		this.addCommand({

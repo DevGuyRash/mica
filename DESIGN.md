@@ -57,9 +57,27 @@ tab: Kernel
 
 ## Tab & grid UX
 
-- Tab bar: keyboard-navigable (arrow keys, Home/End), ARIA `tablist`/`tab`/`tabpanel`, active state via `--mica-tab-*` vars.
-- Grids: responsive columns from `{cols}`, collapsing gracefully on narrow panes.
-- Live Preview: click a tab to switch; edit its body inline; a subtle dirty indicator shows uncommitted changes vs the current version.
+- Tab bar: keyboard-navigable (arrows, Home/End; Alt+arrows REORDER), ARIA roles,
+  active state legible on any theme (accent underline + fill), optional per-tab
+  Lucide icons, an all-tabs menu when the strip overflows.
+- Grids: responsive columns from `{cols}`; visible cell borders; hover tools
+  (grip / delete); a ghost "+" tile adds the next cell; the cols chip edits count.
+- Direct manipulation: pointer drag for tabs, cells, and whole groups with live
+  insertion indicators, spring-loaded tabs, auto-scroll, Esc cancel. Insert-between
+  zones put prose/callouts/code/groups anywhere. Deletes offer Undo, never confirms.
+- Every block has a hover header: name, navigator tree (jump anywhere), ⋮ menu,
+  collapse. A pencil/book glyph says whether THIS view can edit.
+
+## Editing UX
+
+- One CodeMirror 6 markdown editor everywhere: the in-place quick editor (pinned
+  action bar on top, mini toolbar) and the full-screen lightbox (full toolbar,
+  live preview pane, word count).
+- The toolbar's callout picker lists every Obsidian type AND the Admonition
+  plugin's custom types, with fold modes and an optional title; the code-block
+  picker sizes fences to out-nest their content.
+- Save is explicit (button / Ctrl+Enter). Esc double-taps to discard when dirty.
+  Blur never commits. Drafts survive rebuilds and mode flips.
 
 ## Versioning UX
 
@@ -75,8 +93,12 @@ tab: Kernel
 
 ## Customization surface
 
-- CSS custom properties under `.mica` (see `styles.css`) — override in a theme or the Style Settings plugin.
-- Settings (shipped): snapshot debounce, default diff granularity, default diff mode (inline / side-by-side / patch), version-chip visibility, reconcile-on-startup. Future: sidecar location, theming presets.
+- Ten themes in a live-preview gallery; one accent drives everything; CSS custom
+  properties under `.mica` for anything finer (Style Settings compatible).
+- Per-block overrides (accent / density / tab style / radius / name) live as
+  fence-header attrs, edited from the block's ⋮ menu — they travel with the note.
+- Settings: snapshot debounce, diff defaults, version chip, block-header mode
+  (hover/always/never), density, radius, tab style, animations, editor sizing.
 
 ## Accessibility
 

@@ -4,15 +4,24 @@
 
 ## Shape
 
-Two halves over one shared **Rust → WASM** core. TypeScript owns everything the Obsidian API requires (plugin shell, CodeMirror 6, DOM, Vault I/O, API); Rust owns the CPU-bound cores (fence scanner + CST, diff, hashing, id minting).
+One pure Rust core, two hosts. The core owns everything exact: the fence
+grammar, the CST, **every structural edit (the op reducer)**, the snapshot
+change-gate, hashing, diffing, migration. It compiles to WASM for the Obsidian
+plugin and natively for the standalone `mica` CLI — so a script and a click can
+never disagree.
 
 ```text
-mica-core (Rust -> WASM)          TypeScript shell (Obsidian plugin)
-  fence scanner + CST               WasmBridge (serde boundary)
-  serializer + fence normalizer     Reading renderer (code-block processor)
-  diff (similar)                    Live Preview widget (CM6 StateField)
-  BLAKE3 hashing · UUIDv7           version engine + sidecar storage
-  block edits · migration           reconcile, diff UI, window.mica + file-bridge
+crates/mica-core (pure Rust)         hosts
+  fence scanner + CST                 TypeScript plugin (src/)
+  serializer + fence normalizer         WasmBridge (serde boundary)
+  ops reducer (apply_op)                block shell (header/tabs/grids/regions)
+  snapshot gate (content signature)     CM6 editors (quick + lightbox) + toolbar
+  ledger fold (+labels)                 pointer DnD engine
+  diff (similar) · BLAKE3 · UUIDv7      versions timeline · settings · window.mica
+  block edits · header attrs            file-bridge
+  migration                           mica CLI (crates/mica-cli, native)
+                                        vault discovery · sidecar I/O (byte-
+                                        compatible) · watch daemon · doctor
 ```
 
 ## Core principle: derive state, never cache it
@@ -37,7 +46,25 @@ Every correctness guarantee comes from one discipline repeated at three layers:
 
 ## Editing (corruption-proof)
 
-The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMarkdownEditor` upgrade is planned), and always available — no id required. Save re-scans the **live** document for the block (by id, or by its start position before an id exists), re-parses it, verifies the target tab's identity (name + title) — refusing to write if the block changed underneath the editor — swaps that tab's children in the CST, re-serializes, and dispatches a `{from,to,insert}` change whose bounds were recomputed at that instant. No cached offset or node path is ever trusted at write time. Block ids are auto-stamped on the debounced save path (setting-gated) so versioning and the chip appear without any command.
+Every gesture becomes a `StructOp` applied by the **shared Rust reducer**
+(`ops.rs::apply_op_impl`) — insertTab, renameTab, saveRegion, moveNode (tabs,
+cells, and whole groups, with subtree-cycle rejection and automatic
+friendly⇄directive form conformance so a move can never reparse into a
+different structure), insertLeaf, duplicateNode, setTabAttr, setCols. The host
+re-scans the **live** document, applies the op to a fresh parse, and dispatches
+one `{from,to,insert}` change whose bounds were recomputed at that instant.
+`saveRegion` carries the region's expected text and is refused if the block
+changed underneath the editor. No cached offset or node path is ever trusted
+at write time.
+
+The editors are CodeMirror 6 (`src/ui/mdEditor.ts`) — a compact quick editor
+in place and a full lightbox — with an explicit save lifecycle: Save /
+Ctrl+Enter commit, Esc double-taps to discard when dirty, and blur does
+NOTHING. In-progress drafts live on the plugin keyed by block id, so widget
+rebuilds and reading⇄editing flips reopen the editor with nothing lost.
+Destructive ops capture a pre-image and offer an Undo toast instead of a
+confirm dialog. Block ids are auto-stamped on the debounced save path
+(setting-gated).
 
 ## Storage & versioning
 
@@ -48,6 +75,17 @@ The Live Preview widget hosts a plain-textarea editor per tab (an `EmbeddableMar
 ## Diff
 
 The Rust `similar` crate provides char/word/line granularity, intra-line emphasis, grouped hunks, and unified patches. N-way compare = N pairwise diffs against a user-selectable base. The engine returns hunks/spans/patches; the TS side renders inline / side-by-side / N-up / swap-base / patch.
+
+## The standalone CLI
+
+`crates/mica-cli` is a native binary over the same core: vault discovery (walk
+up to `.obsidian`), sidecar I/O byte-compatible with the plugin (same paths,
+same tab-indented manifest, same append-only ledger), the same snapshot gate,
+and the same reducer for structural edits. Commands: ls/cat/set, tab/cell/
+grid/mv, versions/show/diff/restore/label, snapshot, watch (a polling
+auto-snapshot daemon for when Obsidian is closed), migrate, prepare, repair,
+doctor. `--json` everywhere for scripting. Exit codes: 1 I/O, 2 bad args,
+3 not found, 4 corrupt state.
 
 ## Scriptable API
 

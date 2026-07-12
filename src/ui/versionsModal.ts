@@ -59,9 +59,7 @@ export class VersionsModal extends Modal {
 	private async reload(): Promise<void> {
 		const state = (await this.plugin.engine.state(this.file))[this.blockId];
 		const versions = state?.versions ?? [];
-		this.rows = versions
-			.map((meta, i) => ({ meta, n: i + 1, head: state?.head === meta.hash }))
-			.reverse(); // newest first
+		this.rows = versions.map((meta, i) => ({ meta, n: i + 1, head: state?.head === meta.hash })).reverse(); // newest first
 		this.contents.clear();
 		for (const r of this.rows) {
 			this.contents.set(r.meta.hash, (await readObject(this.plugin.app.vault, this.file, r.meta.hash)) ?? "");
@@ -105,7 +103,9 @@ export class VersionsModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		if (!this.rows.length && !this.working.trim()) {
-			contentEl.createEl("p", { text: "No stored versions yet. Edit the block, or run “Snapshot versions now”." });
+			contentEl.createEl("p", {
+				text: "No stored versions yet. Edit the block, or run “Snapshot versions now”.",
+			});
 			return;
 		}
 		const root = contentEl.createDiv({ cls: "mica-versions-root" });
@@ -279,7 +279,9 @@ export class VersionsModal extends Modal {
 			menu.addSeparator();
 			for (const r of this.rows) {
 				menu.addItem((i) =>
-					i.setTitle(`v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`).onClick(() => this.setBase(r.meta.hash)),
+					i
+						.setTitle(`v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`)
+						.onClick(() => this.setBase(r.meta.hash)),
 				);
 			}
 			menu.showAtMouseEvent(e);

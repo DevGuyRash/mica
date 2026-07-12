@@ -179,7 +179,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 		await browser.executeObsidian(() => {
 			(
-				document.querySelector(".mica-lp .mica-tab-panel.is-active .mica-region.is-editable") as HTMLElement | null
+				document.querySelector(
+					".mica-lp .mica-tab-panel.is-active .mica-region.is-editable",
+				) as HTMLElement | null
 			)?.click();
 		});
 		// The quick editor is CodeMirror now; it mounts on a microtask.
@@ -187,7 +189,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			() =>
 				browser.executeObsidian(() =>
 					Boolean(
-						document.querySelector(".mica-lp .mica-tab-panel.is-active .mica-region.is-editing .mica-mdeditor"),
+						document.querySelector(
+							".mica-lp .mica-tab-panel.is-active .mica-region.is-editing .mica-mdeditor",
+						),
 					),
 				),
 			{ timeout: 8000, timeoutMsg: "the quick editor never opened" },
@@ -208,7 +212,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			} | null;
 			ed?.micaEditor?.setValue("edited inline body");
 			(
-				document.querySelector(".mica-lp .mica-region.is-editing .mica-qe-bar button.mod-cta") as HTMLElement | null
+				document.querySelector(
+					".mica-lp .mica-region.is-editing .mica-qe-bar button.mod-cta",
+				) as HTMLElement | null
 			)?.click();
 		});
 		await browser.waitUntil(
@@ -230,9 +236,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			{ timeout: 8000, timeoutMsg: "the footer never appeared" },
 		);
 		// Auto mode: no always-on pill, no Save button — just the chip.
-		expect(
-			await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-save-now"))),
-		).toBe(false);
+		expect(await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-save-now")))).toBe(
+			false,
+		);
 
 		await setAutoSave(false);
 		await seedAndOpen("Toggle2.md", "Intro line.\n\n```mica id=tg-2\ntab: One\nbody\n```\n", "live");
@@ -459,7 +465,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			{ timeout: 8000, timeoutMsg: "the cell quick editor never opened" },
 		);
 		await browser.executeObsidian(() => {
-			const ed = document.querySelector(".mica-lp .mica-cell .mica-region.is-editing .mica-mdeditor") as unknown as {
+			const ed = document.querySelector(
+				".mica-lp .mica-cell .mica-region.is-editing .mica-mdeditor",
+			) as unknown as {
 				micaEditor?: { setValue(v: string): void };
 			} | null;
 			ed?.micaEditor?.setValue("abc"); // no trailing newline on purpose
