@@ -37,15 +37,78 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 	const bar = host.createDiv({ cls: `mica-toolbar ${compact ? "is-compact" : ""}` });
 	const layout = toolbarConfig().layout;
 
+	// Every top-level element in layout order — the responsive unit.
+	const pieces: HTMLElement[] = [];
+	const track = <T extends HTMLElement>(el: T): T => {
+		pieces.push(el);
+		return el;
+	};
 	for (const id of layout) {
 		if (id === "|") {
-			bar.createSpan({ cls: "mica-tool-sep" });
+			track(bar.createSpan({ cls: "mica-tool-sep" }));
 			continue;
 		}
 		const item = resolveTool(id);
 		if (!item) continue; // a removed custom tool leaves no corpse
+		const before = bar.lastElementChild;
 		renderItem(bar, app, getView, item);
+		// renderItem appends exactly one root element per item.
+		const added = bar.lastElementChild;
+		if (added && added !== before) track(added as HTMLElement);
 	}
+
+	// Overflow: whatever doesn't fit folds into a "More tools" popover, so the
+	// ribbon works at every width (narrow cells, split panes, mobile).
+	const more = bar.createEl("button", {
+		cls: "clickable-icon mica-tool mica-toolbar-more",
+		attr: { type: "button", "aria-label": "More tools…" },
+	});
+	setIcon(more, "ellipsis");
+	more.style.display = "none";
+	const hidden: HTMLElement[] = [];
+	more.addEventListener("mousedown", (e) => e.preventDefault());
+	more.addEventListener("click", () => {
+		openPopover(bar, (panel) => {
+			panel.addClass("mica-overflow-panel");
+			// Relocate the real elements (their handlers travel with them); they
+			// return to the bar on the next relayout.
+			for (const el of hidden) panel.appendChild(el);
+		});
+	});
+
+	let relayoutQueued = false;
+	const relayout = (): void => {
+		if (relayoutQueued) return;
+		relayoutQueued = true;
+		window.requestAnimationFrame(() => {
+			relayoutQueued = false;
+			// Restore everything, measure, then trim from the tail.
+			bar.querySelector(".mica-popover")?.remove();
+			for (const el of pieces) {
+				el.style.display = "";
+				bar.insertBefore(el, more);
+			}
+			hidden.length = 0;
+			const avail = bar.clientWidth;
+			if (avail === 0) return; // not laid out yet
+			let used = 34; // reserve room for the "more" button
+			let overflowing = false;
+			for (const el of pieces) {
+				if (!overflowing) {
+					used += el.offsetWidth + 5;
+					if (used > avail) overflowing = true;
+				}
+				if (overflowing) {
+					el.style.display = "none";
+					if (!el.hasClass("mica-tool-sep")) hidden.push(el);
+				}
+			}
+			more.style.display = hidden.length ? "" : "none";
+		});
+	};
+	const ro = new ResizeObserver(relayout);
+	ro.observe(bar);
+	relayout();
 }
 
 function toolButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {

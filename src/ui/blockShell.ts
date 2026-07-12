@@ -471,6 +471,8 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 				md += (nodes[j] as Leaf).text;
 				j++;
 			}
+			// A boundary after a container gets its insert zone too.
+			if (ctx.editable && i > 0) renderInsertZone(el, ctx, path, i);
 			const auto: boolean = Boolean(opts.autoOpen) && !opened;
 			renderRegion(el, ctx, { path, start: i, end: j, original: md }, auto);
 			opened = opened || auto;
@@ -486,7 +488,8 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 	if (ctx.editable && nodes.length === 0) {
 		renderRegion(el, ctx, { path, start: 0, end: 0, original: "" }, Boolean(opts.autoOpen) && !opened);
 	}
-	if (ctx.editable && opts.insert) renderInsertZone(el, ctx, path, nodes.length, true);
+	// Append-at-end is available EVERYWHERE there is already content.
+	if (ctx.editable && nodes.length > 0) renderInsertZone(el, ctx, path, nodes.length, true);
 }
 
 /**
@@ -536,6 +539,72 @@ function showInsertMenu(ctx: RenderCtx, path: number[], at: number, e: MouseEven
 			.setIcon("layout-grid")
 			.onClick(() => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "grid" })),
 	);
+	menu.showAtMouseEvent(e);
+}
+
+/**
+ * Insert a cell at flow position `at`, choosing its content type — used by the
+ * "+" tile and the vertical column strips. `extra` appends context items
+ * (e.g. "New column").
+ */
+function showCellTypeMenu(
+	ctx: RenderCtx,
+	gridPath: number[],
+	at: number,
+	e: MouseEvent,
+	extra?: (menu: Menu) => void,
+): void {
+	const menu = new Menu();
+	const addCellWith = (follow?: StructOp): void => {
+		ctx.editable?.apply({ op: "insertCell", path: gridPath, at });
+		// The second op targets the fresh cell; each dispatch re-scans the live
+		// document, so chaining is corruption-proof.
+		if (follow) window.setTimeout(() => ctx.editable?.apply(follow), 0);
+	};
+	menu.addItem((i) =>
+		i
+			.setTitle("Text")
+			.setIcon("text")
+			.onClick(() => {
+				if (ctx.ui) ctx.ui.reveal = { path: [...gridPath, at], kind: "region-edit" };
+				ctx.editable?.apply({ op: "insertCell", path: gridPath, at });
+			}),
+	);
+	menu.addItem((i) =>
+		i
+			.setTitle("Callout")
+			.setIcon("megaphone")
+			.onClick(() =>
+				addCellWith({ op: "insertLeaf", path: [...gridPath, at], at: 0, text: "\n> [!note] Title\n> Body\n" }),
+			),
+	);
+	menu.addItem((i) =>
+		i
+			.setTitle("Code block")
+			.setIcon("square-code")
+			.onClick(() =>
+				addCellWith({
+					op: "insertLeaf",
+					path: [...gridPath, at],
+					at: 0,
+					text: "\n\u0060\u0060\u0060\ncode\n\u0060\u0060\u0060\n",
+				}),
+			),
+	);
+	menu.addSeparator();
+	menu.addItem((i) =>
+		i
+			.setTitle("Tabs")
+			.setIcon("app-window")
+			.onClick(() => addCellWith({ op: "insertGroup", path: [...gridPath, at], at: 0, kind: "tabs" })),
+	);
+	menu.addItem((i) =>
+		i
+			.setTitle("Grid (nested)")
+			.setIcon("layout-grid")
+			.onClick(() => addCellWith({ op: "insertGroup", path: [...gridPath, at], at: 0, kind: "grid" })),
+	);
+	extra?.(menu);
 	menu.showAtMouseEvent(e);
 }
 
@@ -876,6 +945,15 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		markGroupContainer(cell, cellPath, c.children.length);
 		renderNodes(c.children, cell, ctx, cellPath, { autoOpen: takeRegionReveal(ctx, cellPath) });
 		if (ctx.editable) {
+			// Vertical column strip on the cell's left edge: insert a cell (typed)
+			// at this flow position — the "add to the left" affordance.
+			const colzone = cell.createDiv({ cls: "mica-cell-colzone" });
+			colzone.createDiv({ cls: "mica-colzone-line" });
+			const colplus = iconButton(colzone, "mica-colzone-plus", "plus", "Insert a cell here (column-wise)");
+			colplus.addEventListener("click", (e) => {
+				e.stopPropagation();
+				showCellTypeMenu(ctx, path, idx, e);
+			});
 			const bar = cell.createDiv({ cls: "mica-cell-bar" });
 			const drag = iconButton(bar, "mica-cell-tool", "grip-vertical", "Drag to move this cell");
 			makeDraggable(drag, "cell", cellPath, (op) => ctx.editable?.apply(op), cell);
@@ -902,12 +980,29 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		// Ghost tile: add a cell where the next one would land.
 		const ghost = grid.createEl("button", {
 			cls: "clickable-icon mica-cell-ghost",
-			attr: { type: "button", "aria-label": "Add a cell" },
+			attr: { type: "button", "aria-label": "Add a cell (choose its content)" },
 		});
 		setIcon(ghost.createSpan(), "plus");
-		ghost.addEventListener("click", () =>
-			ctx.editable?.apply({ op: "insertCell", path, at: node.children.length }),
-		);
+		ghost.addEventListener("click", (e) => {
+			showCellTypeMenu(ctx, path, node.children.length, e);
+		});
+
+		// Right-edge strip: append a cell, or grow the grid by a column.
+		const endzone = grid.createDiv({ cls: "mica-grid-colzone-end" });
+		endzone.createDiv({ cls: "mica-colzone-line" });
+		const endplus = iconButton(endzone, "mica-colzone-plus", "plus", "Add a cell or a new column");
+		endplus.addEventListener("click", (e) => {
+			e.stopPropagation();
+			showCellTypeMenu(ctx, path, node.children.length, e, (menu) => {
+				menu.addSeparator();
+				menu.addItem((i) =>
+					i
+						.setTitle(`New column (${cols} → ${cols + 1})`)
+						.setIcon("columns-3")
+						.onClick(() => ctx.editable?.apply({ op: "setCols", path, cols: cols + 1 })),
+				);
+			});
+		});
 
 		const bar = wrap.createDiv({ cls: "mica-grid-actions" });
 		const colsBtn = bar.createEl("button", {

@@ -1189,12 +1189,19 @@ body.mica-theme-solar {
 /* ---------- Insert-between zones ---------- */
 .mica-insert-zone {
 	position: relative;
-	height: 10px;
+	height: 14px;
 	margin: 2px 0;
 	display: flex;
 	align-items: center;
 	opacity: 0;
 	transition: opacity 100ms ease;
+}
+.mica-insert-zone.is-tail {
+	margin-bottom: 6px;
+}
+.mica-block-body,
+.mica-tab-body {
+	padding-bottom: 2px;
 }
 .mica-insert-zone:hover {
 	opacity: 1;
@@ -1282,69 +1289,6 @@ body.mica-theme-solar {
 .mica-danger {
 	color: var(--text-on-accent) !important;
 	background: var(--color-red) !important;
-}
-
-/* ---------- The shared markdown editor ---------- */
-.mica-mdeditor.cm-editor {
-	background: transparent;
-	font-size: var(--font-text-size, 16px);
-	outline: none;
-}
-.mica-mdeditor .cm-content {
-	padding: 8px 12px;
-	font-family: var(--font-text);
-	caret-color: var(--mica-accent);
-}
-.mica-mdeditor .cm-scroller {
-	overflow: auto;
-	line-height: 1.55;
-}
-.mica-mdeditor.cm-focused {
-	outline: none;
-}
-.mica-mdeditor .cm-cursor {
-	border-left-color: var(--mica-accent);
-}
-.mica-mdeditor .cm-selectionBackground {
-	background: color-mix(in srgb, var(--mica-accent) 22%, transparent) !important;
-}
-.mica-mh {
-	font-weight: 700;
-	color: var(--text-normal);
-}
-.mica-mh1 {
-	font-size: 1.4em;
-}
-.mica-mh2 {
-	font-size: 1.25em;
-}
-.mica-mh3 {
-	font-size: 1.12em;
-}
-.mica-mstrong {
-	font-weight: 700;
-}
-.mica-mem {
-	font-style: italic;
-}
-.mica-mstrike {
-	text-decoration: line-through;
-	color: var(--text-muted);
-}
-.mica-mcode {
-	font-family: var(--font-monospace);
-	font-size: 0.92em;
-	color: var(--code-normal, var(--text-normal));
-}
-.mica-mquote {
-	color: var(--text-muted);
-}
-.mica-mlink,
-.mica-murl {
-	color: var(--link-color, var(--text-accent));
-}
-.mica-mmark {
-	color: color-mix(in srgb, var(--mica-accent) 75%, var(--text-faint));
 }
 
 /* ---------- Toolbar + popovers ---------- */
@@ -1551,10 +1495,7 @@ body.mica-theme-solar {
 	overflow: hidden;
 	display: flex;
 }
-.mica-lightbox-editor .cm-editor {
-	flex: 1;
-	height: 100%;
-}
+
 .mica-lightbox-preview {
 	display: none;
 	flex: 1;
@@ -1981,238 +1922,6 @@ body.mica-dnd-active * {
 	text-align: center;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Embedded-editor armor
-   The quick editor lives INSIDE the note's .markdown-source-view, so theme
-   rules written for the note's own lines (hanging-indent negative margins,
-   hover/active line bars, readable-line-length centering) leak into it.
-   These rules out-rank any theme (repeated-class specificity + !important)
-   while staying scoped to Mica's own editor.
-   ═══════════════════════════════════════════════════════════════════════════ */
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-line.cm-line.cm-line.cm-line.cm-line {
-	margin: 0 !important;
-	padding: 1px 4px !important;
-	border: none !important;
-	text-indent: 0 !important;
-	background: transparent !important;
-	border-radius: 0 !important;
-	max-width: none !important;
-}
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-line.cm-line.cm-line.cm-line.cm-line:hover {
-	background: transparent !important;
-}
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor
-	.cm-line.cm-line.cm-line.cm-line.cm-line.cm-active {
-	background: color-mix(in srgb, var(--mica-accent) 7%, transparent) !important;
-	border-image: none !important;
-}
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor
-	.cm-line.cm-line.cm-line.cm-line.cm-line.cm-active::before,
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor
-	.cm-line.cm-line.cm-line.cm-line.cm-line.cm-active::after {
-	display: none !important;
-}
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-content {
-	margin: 0 !important;
-	max-width: none !important;
-	min-height: 2.2em;
-	padding: 8px 10px !important;
-	caret-color: var(--mica-accent);
-}
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-scroller {
-	margin: 0 !important;
-	padding: 0 !important;
-}
-.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor.mica-mdeditor .cm-gutters {
-	display: none !important;
-}
-
-/* ---------- Toolbar v2: variant groups, table picker, ribbon editor ---------- */
-.mica-tool-group {
-	display: inline-flex;
-	align-items: stretch;
-	border-radius: 7px;
-}
-.mica-tool-group:hover {
-	background: color-mix(in srgb, var(--mica-accent) 8%, transparent);
-}
-.mica-tool-group .mica-tool {
-	border-top-right-radius: 0;
-	border-bottom-right-radius: 0;
-}
-.mica-tool-caret {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 13px;
-	padding: 0;
-	border-top-left-radius: 0;
-	border-bottom-left-radius: 0;
-	color: var(--text-faint);
-}
-.mica-tool-caret .svg-icon {
-	width: 10px;
-	height: 10px;
-}
-.mica-tool-caret:hover {
-	color: var(--text-normal);
-}
-.mica-variant-menu {
-	min-width: 200px;
-}
-.mica-variant {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-.mica-variant-ico {
-	display: inline-flex;
-	color: var(--text-muted);
-}
-.mica-variant-ico .svg-icon {
-	width: 14px;
-	height: 14px;
-}
-.mica-variant-check {
-	margin-left: auto;
-	display: inline-flex;
-	color: var(--mica-accent);
-}
-.mica-variant-check .svg-icon {
-	width: 13px;
-	height: 13px;
-}
-
-/* Table size picker */
-.mica-table-picker {
-	min-width: 0;
-	width: max-content;
-}
-.mica-table-label {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	margin-bottom: 6px;
-}
-.mica-table-grid {
-	display: grid;
-	grid-template-columns: repeat(var(--mica-tp-cols, 8), 18px);
-	gap: 3px;
-	margin-bottom: 8px;
-}
-.mica-table-cell {
-	width: 18px;
-	height: 18px;
-	padding: 0;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 4px;
-	background: transparent;
-	box-shadow: none;
-	cursor: pointer;
-}
-.mica-table-cell.is-on,
-.mica-table-cell.clickable-icon.is-on {
-	background: color-mix(in srgb, var(--mica-accent) 55%, transparent) !important;
-	border-color: var(--mica-accent);
-	box-shadow: 0 0 0 1px color-mix(in srgb, var(--mica-accent) 40%, transparent);
-}
-.mica-table-custom {
-	align-items: center;
-}
-.mica-table-custom input {
-	width: 64px;
-}
-
-/* Ribbon (toolbar layout) editor in settings */
-.mica-ribbon-editor {
-	display: flex;
-	gap: 10px;
-	margin: 10px 0 16px;
-	align-items: stretch;
-}
-.mica-ribbon-pane {
-	flex: 1;
-	min-width: 0;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 10px;
-	padding: 8px;
-	display: flex;
-	flex-direction: column;
-}
-.mica-ribbon-title {
-	font-size: var(--font-ui-smaller);
-	font-weight: 600;
-	color: var(--text-muted);
-	margin-bottom: 6px;
-}
-.mica-ribbon-list {
-	flex: 1;
-	overflow-y: auto;
-	max-height: 260px;
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-}
-.mica-ribbon-item {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	width: 100%;
-	text-align: left;
-	padding: 4px 8px;
-	border: 1px solid transparent;
-	border-radius: 6px;
-	background: transparent;
-	box-shadow: none;
-	cursor: pointer;
-	font-size: var(--font-ui-small);
-}
-.mica-ribbon-item:hover {
-	background: color-mix(in srgb, var(--mica-accent) 8%, transparent);
-}
-.mica-ribbon-item.is-selected {
-	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
-	border-color: var(--mica-accent);
-}
-.mica-ribbon-ico {
-	display: inline-flex;
-	color: var(--text-muted);
-}
-.mica-ribbon-ico .svg-icon {
-	width: 14px;
-	height: 14px;
-}
-.mica-ribbon-mid {
-	display: flex;
-	flex-direction: column;
-	justify-content: center;
-	gap: 4px;
-}
-.mica-ribbon-btn {
-	width: 28px;
-	height: 28px;
-}
-.mica-ribbon-order {
-	display: flex;
-	gap: 4px;
-	justify-content: flex-end;
-	margin-top: 6px;
-}
-.mica-icon-preview {
-	display: inline-flex;
-	margin-left: 8px;
-	color: var(--mica-accent);
-}
-.mica-icon-preview .svg-icon {
-	width: 18px;
-	height: 18px;
-}
-
-/* clickable-icon carriers keep OUR sizing; themes own the rest. */
-.mica-tool.clickable-icon,
-.mica-head-btn.clickable-icon {
-	padding: 0;
-}
-
 /* ---------- v2.1 polish: navigator flash, z-order, icon fixes ---------- */
 
 /* Navigator jump target: a breathing accent outline that fades. */
@@ -2268,4 +1977,109 @@ body.mica-dnd-active * {
 	box-shadow:
 		0 0 0 1px color-mix(in srgb, var(--mica-accent) 45%, transparent),
 		0 0 12px color-mix(in srgb, var(--mica-accent) 60%, transparent);
+}
+
+/* ---------- Shadow-mounted editor host ---------- */
+/* All INTERNAL editor styling lives inside its shadow root (theme-proof by
+   construction); the light DOM only sizes the host. */
+.mica-mdeditor {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+}
+.mica-qe-host {
+	display: flex;
+	flex-direction: column;
+	padding: 2px 0;
+}
+.mica-qe-host .mica-mdeditor {
+	max-height: var(--mica-editor-max-height, 400px);
+}
+.mica-qe-host.is-fixed .mica-mdeditor {
+	height: 220px;
+}
+.mica-lightbox-editor .mica-mdeditor {
+	height: 100%;
+}
+
+/* ---------- Grid column strips (add cell / column left-right) ---------- */
+.mica-cell-colzone {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: -7px;
+	width: 14px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	transition: opacity 100ms ease;
+	z-index: 2;
+}
+.mica-grid-colzone-end {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	right: -7px;
+	width: 14px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	transition: opacity 100ms ease;
+	z-index: 2;
+}
+.mica-cell-colzone:hover,
+.mica-grid-colzone-end:hover {
+	opacity: 1;
+}
+.mica-colzone-line {
+	position: absolute;
+	top: 4px;
+	bottom: 4px;
+	left: 50%;
+	width: 2px;
+	transform: translateX(-50%);
+	border-radius: 1px;
+	background: color-mix(in srgb, var(--mica-accent) 45%, transparent);
+}
+.mica-colzone-plus {
+	position: relative;
+	width: 18px;
+	height: 18px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
+	border-radius: 50%;
+	background: var(--background-primary);
+	color: var(--mica-accent);
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-colzone-plus .svg-icon {
+	width: 11px;
+	height: 11px;
+}
+.mica-grid {
+	position: relative;
+}
+
+/* ---------- Responsive toolbar overflow ---------- */
+.mica-toolbar {
+	flex-wrap: nowrap;
+	overflow: visible;
+	min-width: 0;
+}
+.mica-toolbar-more {
+	flex-shrink: 0;
+}
+.mica-overflow-panel {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	max-width: 320px;
 }
