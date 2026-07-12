@@ -11,6 +11,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
   lived-in feel is the remaining unknown.
 - **Commits are unsigned** (1Password SSH signer was unavailable to the autonomous
   session). Re-sign with: `git rebase --exec 'git commit --amend --no-edit -S' 65a1e9e`.
+- **Obsidian CLI socket fragility**: any `obsidian <cmd>` invocation while the app
+  is booting spawns a second instance that unlinks `$XDG_RUNTIME_DIR/<obsidian-ipc-endpoint>`;
+  a stale file also blocks the next bind (EADDRINUSE). If `obsidian eval` reports
+  "Unable to connect", remove the stale socket file and toggle Settings → Command
+  line interface off/on (or restart the app once, without probing during boot).
 
 ## Remaining scope
 
