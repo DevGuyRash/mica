@@ -1232,7 +1232,10 @@ body.mica-theme-solar {
 	border: 1px solid color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
 	border-radius: calc(var(--mica-radius) * 0.6);
 	background: var(--background-primary);
-	overflow: hidden;
+	/* NOT overflow:hidden — the toolbar's popovers (callout picker, languages)
+	   must escape the region. The editor host clips itself. */
+	position: relative;
+	z-index: 5;
 }
 .mica-qe-bar {
 	display: flex;

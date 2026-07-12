@@ -24,27 +24,19 @@ if ! command -v obsidian >/dev/null 2>&1; then
 	exit 0
 fi
 
-# The desktop app's own launcher is also called `obsidian`. Never probe that —
-# passing args to the Electron binary could poke the user's live session. The
-# registered CLI shim lives elsewhere (e.g. ~/.local/bin on Linux).
-OBSIDIAN_BIN=$(command -v obsidian)
-case "$(readlink -f "$OBSIDIAN_BIN" 2>/dev/null || printf '%s' "$OBSIDIAN_BIN")" in
-*/usr/bin/obsidian | */usr/lib/obsidian/* | *electron*)
-	echo "SKIP: '$OBSIDIAN_BIN' is the desktop app launcher, not the CLI shim."
-	echo "  Activate the CLI in Obsidian Settings and register it, then re-run."
+# On some distros (e.g. Arch) the app launcher itself IS the CLI client — the
+# only honest test is a capability probe: does `eval code=…` answer? (When the
+# app is not running, the probe fails fast with "Unable to connect".)
+if ! obsidian eval "code=1 + 1" 2>/dev/null | grep -q "=> 2"; then
+	echo "SKIP: 'obsidian' CLI not responding (is the app running with the CLI activated?)."
 	echo "  Docs: https://obsidian.md/cli"
-	exit 0
-	;;
-esac
-
-if ! obsidian eval "1 + 1" >/dev/null 2>&1; then
-	echo "SKIP: 'obsidian' CLI present but not responding (is the app running with the CLI activated?)."
 	exit 0
 fi
 
 # eval_js <js> — print the CLI's result for a (synchronous) expression.
+# The CLI prints results as "=> value"; strip the arrow for clean matching.
 eval_js() {
-	obsidian eval "$1" 2>/dev/null
+	obsidian eval "code=$1" 2>/dev/null | sed -n 's/^=> //p'
 }
 
 # fire_async <js-promise-expr> — run an async expression, parking its result in
