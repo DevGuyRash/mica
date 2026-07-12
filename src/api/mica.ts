@@ -4,13 +4,18 @@ import {
 	coreVersion,
 	diffText,
 	makePatch,
+	newId,
+	parseBlock,
 	replaceBlockContent,
 	scanBlocksView,
+	serializeCst,
+	setBlockAttr,
 	type DiffGranularity,
 	type DiffResult,
 	type VersionMeta,
 } from "../wasm/bridge";
-import { readObject } from "../storage/sidecar";
+import { applyOp, type StructOp } from "../cst/ops";
+import { appendEvents, readObject } from "../storage/sidecar";
 import { ensureBlockIds, ensureNoteId } from "../identity/identity";
 import { repair, type RepairReport } from "../identity/reconcile";
 import { migrateFile, migrateVault, type MigrateFileReport } from "../migrate/migrate";
@@ -102,6 +107,41 @@ export class MicaApi {
 		await this.plugin.engine.editVersion(this.note(notePath), blockId, parentHash, content);
 	}
 
+	/** Label (or clear the label of) a stored version. */
+	async versionsLabel(notePath: string, blockId: string, hash: string, label: string): Promise<void> {
+		await appendEvents(this.plugin.app.vault, this.note(notePath), [
+			{ type: "label", eid: newId(), ts: Date.now(), block: blockId, hash, label: label || null },
+		]);
+	}
+
+	/**
+	 * Apply one structural op (the same shapes the UI and the mica CLI use:
+	 * insertTab, renameTab, moveNode, …) to a block, corruption-proof.
+	 */
+	async blockApply(notePath: string, blockId: string, op: StructOp): Promise<boolean> {
+		const file = this.note(notePath);
+		await this.plugin.engine.snapshot(file); // pre-image
+		const doc = await this.plugin.app.vault.read(file);
+		const b = scanBlocksView(doc).find((x) => x.id === blockId);
+		if (!b) throw new Error(`Block not found: ${blockId}`);
+		const { changed, cst } = applyOp(parseBlock(doc.slice(b.content_start, b.content_end)), op);
+		if (!changed) return false;
+		const next = replaceBlockContent(doc, blockId, serializeCst(cst));
+		if (next === null) throw new Error(`Block not found: ${blockId}`);
+		await this.plugin.app.vault.modify(file, next);
+		await this.plugin.engine.snapshot(file);
+		return true;
+	}
+
+	/** Set / remove one fence-header attribute (name, accent, density, …). */
+	async blockSetAttr(notePath: string, blockId: string, key: string, value: string | null): Promise<void> {
+		const file = this.note(notePath);
+		const doc = await this.plugin.app.vault.read(file);
+		const next = setBlockAttr(doc, blockId, key, value);
+		if (next === null) throw new Error(`Cannot set ${key} on block ${blockId}`);
+		if (next !== doc) await this.plugin.app.vault.modify(file, next);
+	}
+
 	async prepare(notePath: string): Promise<string> {
 		const file = this.note(notePath);
 		const id = await ensureNoteId(this.plugin, file);
@@ -140,6 +180,9 @@ export class MicaApi {
 			"versions.diff": (n, b, o, g) => this.versionsDiff(n, b, o, g),
 			"versions.patch": (n, b, o) => this.versionsPatch(n, b, o),
 			"versions.edit": (n, id, parent, c) => this.versionsEdit(n, id, parent, c),
+			"versions.label": (n, id, h, l) => this.versionsLabel(n, id, h, l ?? ""),
+			"block.apply": (n, id, op) => this.blockApply(n, id, JSON.parse(op) as StructOp),
+			"block.attr": (n, id, k, v) => this.blockSetAttr(n, id, k, v ?? null),
 			"migrate.scan": () => this.migrateScan(),
 			"migrate.run": (n?) => this.migrateRun(n),
 			prepare: (n) => this.prepare(n),

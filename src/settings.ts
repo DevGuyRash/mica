@@ -15,6 +15,9 @@ export const MICA_THEMES: { id: string; name: string }[] = [
 	{ id: "sunset", name: "Sunset" },
 	{ id: "grape", name: "Grape" },
 	{ id: "rose", name: "Rose" },
+	{ id: "carbon", name: "Carbon" },
+	{ id: "cyber", name: "Cyber" },
+	{ id: "solar", name: "Solar" },
 ];
 
 export interface MicaSettings {
@@ -50,6 +53,8 @@ export interface MicaSettings {
 	animations: boolean;
 	/** Comma-separated callout types imported as versions on migration (empty = any). */
 	versionCalloutTypes: string;
+	/** Block header bar: revealed on hover, always shown, or never. */
+	blockHeaderMode: "hover" | "always" | "never";
 }
 
 export const DEFAULT_SETTINGS: MicaSettings = {
@@ -72,6 +77,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	tabStyle: "connected",
 	animations: true,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
+	blockHeaderMode: "hover",
 };
 
 export class MicaSettingTab extends PluginSettingTab {
@@ -200,15 +206,31 @@ export class MicaSettingTab extends PluginSettingTab {
 			.setName("Theme")
 			.setDesc(
 				"A named look. Each sets an accent that retints the whole block; “Match Obsidian” follows your theme's accent.",
-			)
-			.addDropdown((d) => {
-				for (const t of MICA_THEMES) d.addOption(t.id, t.name);
-				d.setValue(s.theme).onChange(async (v) => {
-					s.theme = v;
+			);
+		const gallery = containerEl.createDiv({ cls: "mica-theme-gallery" });
+		const paintGallery = (): void => {
+			gallery.empty();
+			for (const t of MICA_THEMES) {
+				const card = gallery.createEl("button", {
+					cls: `mica-theme-card mica-theme-${t.id} ${s.theme === t.id ? "is-on" : ""}`,
+					attr: { type: "button", "aria-label": `Use the ${t.name} theme` },
+				});
+				const mini = card.createDiv({ cls: "mica-theme-mini" });
+				const tabs = mini.createDiv({ cls: "mica-theme-mini-tabs" });
+				tabs.createSpan({ cls: "is-active" });
+				tabs.createSpan();
+				tabs.createSpan();
+				mini.createDiv({ cls: "mica-theme-mini-body" });
+				card.createDiv({ cls: "mica-theme-card-name", text: t.name });
+				card.addEventListener("click", async () => {
+					s.theme = t.id;
 					this.micaPlugin.applyStyleVars();
 					await save();
+					paintGallery();
 				});
-			});
+			}
+		};
+		paintGallery();
 
 		new Setting(containerEl)
 			.setName("Accent color")
@@ -274,6 +296,21 @@ export class MicaSettingTab extends PluginSettingTab {
 					.onChange(async (v) => {
 						s.tabStyle = v as MicaTabStyle;
 						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Block header")
+			.setDesc("The per-block bar with the name, navigator, and menu: show on hover, always, or never.")
+			.addDropdown((d) =>
+				d
+					.addOption("hover", "On hover")
+					.addOption("always", "Always")
+					.addOption("never", "Never")
+					.setValue(s.blockHeaderMode)
+					.onChange(async (v) => {
+						s.blockHeaderMode = v as MicaSettings["blockHeaderMode"];
 						await save();
 					}),
 			);

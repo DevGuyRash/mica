@@ -161,6 +161,10 @@ body[data-mica-density="compact"] {
 }
 
 .mica-tab-btn.is-active {
+	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
+	   EVERY tab style, so heavily translucent community themes can't wash it out. */
+	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	font-weight: 600;
 	position: relative;
 	z-index: 1;
 	color: var(--mica-tab-fg-active);
@@ -176,6 +180,10 @@ body[data-mica-density="compact"] {
 
 /* Tab style: UNDERLINE — minimal accent underline, no surface change/merge. */
 body[data-mica-tabstyle="underline"] .mica-tab-btn.is-active {
+	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
+	   EVERY tab style, so heavily translucent community themes can't wash it out. */
+	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	font-weight: 600;
 	background: transparent;
 	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
 	margin-bottom: 0;
@@ -196,6 +204,10 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn {
 	padding: 3px 12px;
 }
 body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
+	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
+	   EVERY tab style, so heavily translucent community themes can't wash it out. */
+	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	font-weight: 600;
 	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
 	color: var(--mica-accent);
 	box-shadow: none;
@@ -1044,4 +1056,925 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-smaller);
 	resize: vertical;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   v0.2 — block shell, editors, DnD, versions, pickers
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ---------- New themes ---------- */
+body.mica-theme-carbon {
+	--mica-accent: #9ba3af;
+}
+body.mica-theme-cyber {
+	--mica-accent: #00e5ff;
+}
+body.mica-theme-solar {
+	--mica-accent: #d98e04;
+}
+
+/* ---------- Block header ---------- */
+.mica {
+	position: relative;
+}
+.mica-head {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 6px;
+	min-height: 28px;
+	border-bottom: 1px solid transparent;
+	opacity: 0;
+	transition: opacity 120ms ease;
+}
+.mica-head.is-pinned,
+.mica:hover .mica-head,
+.mica:focus-within .mica-head {
+	opacity: 1;
+}
+.mica-head-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-head-btn:hover {
+	background: color-mix(in srgb, var(--mica-accent) 14%, transparent);
+	color: var(--text-normal);
+}
+.mica-head-btn .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+.mica-head-name {
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	padding: 2px 6px;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	color: var(--text-normal);
+	cursor: pointer;
+	border-radius: 6px;
+}
+.mica-head-name.is-unnamed {
+	color: var(--text-faint);
+	font-weight: 400;
+	font-style: italic;
+}
+.mica-head-name:hover {
+	background: color-mix(in srgb, var(--mica-accent) 12%, transparent);
+}
+.mica[data-mica-mode="read"] .mica-head-name {
+	cursor: default;
+}
+.mica-head-mode {
+	display: inline-flex;
+	color: var(--text-faint);
+}
+.mica-head-mode .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+.mica-head-summary {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+.mica.is-collapsed .mica-head {
+	border-bottom: none;
+}
+
+/* ---------- Regions: hover pencil, editability ---------- */
+.mica-region {
+	position: relative;
+}
+.mica-region-pencil {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	width: 22px;
+	height: 22px;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-muted);
+	cursor: pointer;
+	box-shadow: var(--shadow-s);
+	z-index: 3;
+}
+.mica-region.is-editable:hover .mica-region-pencil {
+	display: inline-flex;
+}
+.mica-region-pencil:hover {
+	color: var(--mica-accent);
+	border-color: var(--mica-accent);
+}
+.mica-region-pencil .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+
+/* ---------- Insert-between zones ---------- */
+.mica-insert-zone {
+	position: relative;
+	height: 10px;
+	margin: 2px 0;
+	display: flex;
+	align-items: center;
+	opacity: 0;
+	transition: opacity 100ms ease;
+}
+.mica-insert-zone:hover {
+	opacity: 1;
+}
+.mica-insert-line {
+	flex: 1;
+	height: 2px;
+	border-radius: 1px;
+	background: color-mix(in srgb, var(--mica-accent) 45%, transparent);
+}
+.mica-insert-plus {
+	position: absolute;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 20px;
+	height: 20px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
+	border-radius: 50%;
+	background: var(--background-primary);
+	color: var(--mica-accent);
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-insert-plus .svg-icon {
+	width: 12px;
+	height: 12px;
+}
+
+/* ---------- Quick editor ---------- */
+.mica-region.is-editing {
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
+	border-radius: calc(var(--mica-radius) * 0.6);
+	background: var(--background-primary);
+	overflow: hidden;
+}
+.mica-qe-bar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 6px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background: color-mix(in srgb, var(--mica-accent) 6%, var(--background-secondary));
+}
+.mica-qe-bar button {
+	font-size: var(--font-ui-smaller);
+	padding: 2px 10px;
+	height: 24px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.mica-qe-tools {
+	display: flex;
+	align-items: center;
+}
+.mica-qe-expand {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	padding: 0;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	color: var(--text-muted);
+}
+.mica-qe-expand:hover {
+	color: var(--mica-accent);
+}
+.mica-qe-host {
+	padding: 2px 0;
+}
+.mica-qe-host .cm-editor {
+	max-height: var(--mica-editor-max-height, 400px);
+}
+.mica-qe-host.is-fixed .cm-editor {
+	height: 220px;
+}
+.mica-danger {
+	color: var(--text-on-accent) !important;
+	background: var(--color-red) !important;
+}
+
+/* ---------- The shared markdown editor ---------- */
+.mica-mdeditor.cm-editor {
+	background: transparent;
+	font-size: var(--font-text-size, 16px);
+	outline: none;
+}
+.mica-mdeditor .cm-content {
+	padding: 8px 12px;
+	font-family: var(--font-text);
+	caret-color: var(--mica-accent);
+}
+.mica-mdeditor .cm-scroller {
+	overflow: auto;
+	line-height: 1.55;
+}
+.mica-mdeditor.cm-focused {
+	outline: none;
+}
+.mica-mdeditor .cm-cursor {
+	border-left-color: var(--mica-accent);
+}
+.mica-mdeditor .cm-selectionBackground {
+	background: color-mix(in srgb, var(--mica-accent) 22%, transparent) !important;
+}
+.mica-mh {
+	font-weight: 700;
+	color: var(--text-normal);
+}
+.mica-mh1 {
+	font-size: 1.4em;
+}
+.mica-mh2 {
+	font-size: 1.25em;
+}
+.mica-mh3 {
+	font-size: 1.12em;
+}
+.mica-mstrong {
+	font-weight: 700;
+}
+.mica-mem {
+	font-style: italic;
+}
+.mica-mstrike {
+	text-decoration: line-through;
+	color: var(--text-muted);
+}
+.mica-mcode {
+	font-family: var(--font-monospace);
+	font-size: 0.92em;
+	color: var(--code-normal, var(--text-normal));
+}
+.mica-mquote {
+	color: var(--text-muted);
+}
+.mica-mlink,
+.mica-murl {
+	color: var(--link-color, var(--text-accent));
+}
+.mica-mmark {
+	color: color-mix(in srgb, var(--mica-accent) 75%, var(--text-faint));
+}
+
+/* ---------- Toolbar + popovers ---------- */
+.mica-toolbar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 2px;
+	position: relative;
+}
+.mica-tool {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+.mica-tool:hover {
+	background: color-mix(in srgb, var(--mica-accent) 14%, transparent);
+	color: var(--text-normal);
+}
+.mica-tool.is-on {
+	color: var(--mica-accent);
+}
+.mica-tool .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+.mica-toolbar.is-compact .mica-tool {
+	width: 22px;
+	height: 22px;
+}
+.mica-toolbar.is-compact .mica-tool .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+.mica-tool-sep {
+	width: 1px;
+	height: 16px;
+	margin: 0 4px;
+	background: var(--background-modifier-border);
+}
+.mica-toolbar-spacer {
+	flex: 1;
+}
+.mica-popover {
+	position: absolute;
+	top: calc(100% + 4px);
+	left: 0;
+	z-index: 30;
+	min-width: 260px;
+	max-width: 340px;
+	padding: 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-primary);
+	box-shadow: var(--shadow-l, 0 8px 30px rgba(0, 0, 0, 0.3));
+}
+.mica-pop-search {
+	width: 100%;
+	margin-bottom: 6px;
+}
+.mica-pop-row {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 6px;
+}
+.mica-pop-seg {
+	flex: 1;
+	font-size: var(--font-ui-smaller);
+	padding: 3px 8px;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: transparent;
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-pop-seg.is-on {
+	background: color-mix(in srgb, var(--mica-accent) 18%, transparent);
+	border-color: var(--mica-accent);
+	color: var(--text-normal);
+}
+.mica-pop-item {
+	display: block;
+	width: 100%;
+	text-align: left;
+	padding: 4px 8px;
+	border: none;
+	background: transparent;
+	border-radius: 6px;
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-pop-item:hover {
+	background: color-mix(in srgb, var(--mica-accent) 14%, transparent);
+}
+.mica-pop-empty {
+	color: var(--text-faint);
+	text-align: center;
+	padding: 8px;
+}
+
+/* Callout picker grid */
+.mica-callout-grid {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 4px;
+	max-height: 260px;
+	overflow-y: auto;
+}
+.mica-callout-type {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 8px;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--mica-co-color, var(--text-accent)) 8%, transparent);
+	cursor: pointer;
+	box-shadow: none;
+	text-align: left;
+}
+.mica-callout-type:hover {
+	border-color: var(--mica-co-color, var(--text-accent));
+}
+.mica-callout-ico {
+	display: inline-flex;
+	color: var(--mica-co-color, var(--text-accent));
+}
+.mica-callout-ico .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+.mica-callout-name {
+	flex: 1;
+	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.mica-callout-src {
+	font-size: 9px;
+	padding: 1px 4px;
+	border-radius: 4px;
+	background: var(--background-modifier-border);
+	color: var(--text-faint);
+}
+.mica-lang-list {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 2px;
+	max-height: 200px;
+	overflow-y: auto;
+}
+
+/* ---------- Lightbox ---------- */
+.mica-lightbox {
+	width: min(1100px, 92vw);
+	height: min(85vh, 900px);
+	display: flex;
+	flex-direction: column;
+}
+.mica-lightbox .modal-content {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+.mica-lightbox-root {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-height: 0;
+}
+.mica-lightbox-toolbar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 2px;
+	padding: 4px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-secondary);
+	position: relative;
+}
+.mica-lightbox-split {
+	flex: 1;
+	display: flex;
+	gap: 8px;
+	min-height: 0;
+}
+.mica-lightbox-editor {
+	flex: 1;
+	min-width: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	overflow: hidden;
+	display: flex;
+}
+.mica-lightbox-editor .cm-editor {
+	flex: 1;
+	height: 100%;
+}
+.mica-lightbox-preview {
+	display: none;
+	flex: 1;
+	min-width: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 8px 14px;
+	overflow-y: auto;
+}
+.mica-lightbox-split.is-split .mica-lightbox-preview {
+	display: block;
+}
+.mica-lightbox-footer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.mica-lightbox-stats,
+.mica-lightbox-hint {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+/* ---------- Drag & drop v2 ---------- */
+.mica-drag-ghost {
+	position: fixed;
+	top: 0;
+	left: 0;
+	z-index: 1000;
+	pointer-events: none;
+	opacity: 0.85;
+	transform-origin: top left;
+	box-shadow: var(--shadow-l, 0 10px 30px rgba(0, 0, 0, 0.35));
+	border-radius: 8px;
+	background: var(--background-primary);
+	max-height: 160px;
+	overflow: hidden;
+}
+.mica-dragging {
+	opacity: 0.35;
+}
+.mica-drop-indicator {
+	position: fixed;
+	top: 0;
+	left: 0;
+	z-index: 999;
+	pointer-events: none;
+	display: none;
+	background: var(--mica-accent);
+	border-radius: 2px;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--mica-accent) 40%, transparent);
+}
+.mica-drop-indicator.is-into {
+	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
+	border: 2px dashed var(--mica-accent);
+	box-shadow: none;
+}
+body.mica-dnd-active {
+	user-select: none;
+	cursor: grabbing;
+}
+body.mica-dnd-active * {
+	cursor: grabbing !important;
+}
+.mica-draggable {
+	touch-action: none;
+}
+.mica-group-grip {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-faint);
+	cursor: grab;
+	opacity: 0;
+}
+.mica-tab-nav-outer:hover .mica-group-grip,
+.mica-grid-actions:hover .mica-group-grip {
+	opacity: 1;
+}
+.mica-group-grip .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+
+/* ---------- Tabs: icons ---------- */
+.mica-tab-icon {
+	display: inline-flex;
+	margin-right: 5px;
+	vertical-align: -2px;
+}
+.mica-tab-icon .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+
+/* ---------- Grid v2: visible cells, hover tools, ghost tile ---------- */
+.mica-cell {
+	position: relative;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: calc(var(--mica-radius) * 0.6);
+	transition: border-color 120ms ease;
+}
+.mica-cell:hover {
+	border-color: color-mix(in srgb, var(--mica-accent) 45%, var(--background-modifier-border));
+}
+.mica-cell-bar {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: none;
+	gap: 2px;
+	z-index: 3;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 1px;
+	box-shadow: var(--shadow-s);
+}
+.mica-cell:hover > .mica-cell-bar {
+	display: inline-flex;
+}
+.mica-cell-tool {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+.mica-cell-tool:hover {
+	color: var(--mica-accent);
+}
+.mica-cell-tool .svg-icon {
+	width: 12px;
+	height: 12px;
+}
+.mica-cell-ghost {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 44px;
+	border: 1px dashed color-mix(in srgb, var(--mica-accent) 35%, var(--background-modifier-border));
+	border-radius: calc(var(--mica-radius) * 0.6);
+	background: transparent;
+	color: var(--text-faint);
+	cursor: pointer;
+	box-shadow: none;
+	opacity: 0.5;
+	transition: opacity 120ms ease;
+}
+.mica-cell-ghost:hover {
+	opacity: 1;
+	color: var(--mica-accent);
+	border-color: var(--mica-accent);
+}
+.mica-cols-chip {
+	font-size: var(--font-ui-smaller);
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--background-modifier-border);
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-cols-chip:hover {
+	border-color: var(--mica-accent);
+	color: var(--text-normal);
+}
+
+/* ---------- Versions modal ---------- */
+.mica-versions-modal {
+	width: min(1100px, 92vw);
+	height: min(80vh, 860px);
+	display: flex;
+	flex-direction: column;
+}
+.mica-versions-modal .modal-content {
+	flex: 1;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+.mica-versions-root {
+	flex: 1;
+	display: flex;
+	gap: 10px;
+	min-height: 0;
+}
+.mica-versions-list {
+	width: 280px;
+	flex-shrink: 0;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 4px;
+}
+.mica-vrow {
+	position: relative;
+	padding: 7px 26px 7px 10px;
+	border-radius: 8px;
+	cursor: pointer;
+	border: 1px solid transparent;
+}
+.mica-vrow:hover {
+	background: color-mix(in srgb, var(--mica-accent) 8%, transparent);
+}
+.mica-vrow.is-selected {
+	background: color-mix(in srgb, var(--mica-accent) 14%, transparent);
+	border-color: color-mix(in srgb, var(--mica-accent) 45%, transparent);
+}
+.mica-vrow-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: var(--font-ui-small);
+}
+.mica-vrow-n {
+	font-weight: 700;
+	color: var(--text-normal);
+}
+.mica-vrow-label {
+	padding: 0 6px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--mica-accent) 20%, transparent);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+}
+.mica-vrow-head {
+	display: inline-flex;
+	color: var(--color-green);
+}
+.mica-vrow-head .svg-icon {
+	width: 12px;
+	height: 12px;
+}
+.mica-vrow-sub {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.mica-vrow.is-working .mica-vrow-title {
+	color: var(--mica-accent);
+	font-weight: 600;
+}
+.mica-vrow-more {
+	position: absolute;
+	top: 6px;
+	right: 4px;
+	width: 20px;
+	height: 20px;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+.mica-vrow:hover .mica-vrow-more {
+	display: inline-flex;
+}
+.mica-versions-main {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.mica-versions-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.mica-seg {
+	display: inline-flex;
+	gap: 2px;
+}
+.mica-base-pick {
+	font-size: var(--font-ui-smaller);
+	padding: 3px 10px;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: transparent;
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-base-pick:hover {
+	border-color: var(--mica-accent);
+}
+.mica-versions-surface {
+	flex: 1;
+	overflow: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 6px;
+}
+.mica-diff-caption {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	padding: 2px 6px 8px;
+}
+.mica-diff-row.is-directive,
+.mica-diff-cell.is-directive {
+	opacity: 0.45;
+}
+
+/* ---------- Appearance popover ---------- */
+.mica-appearance {
+	position: absolute;
+	top: 34px;
+	right: 8px;
+	z-index: 40;
+	width: 260px;
+	padding: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-primary);
+	box-shadow: var(--shadow-l, 0 8px 30px rgba(0, 0, 0, 0.3));
+}
+.mica-appearance-title {
+	font-weight: 600;
+	font-size: var(--font-ui-small);
+	margin-bottom: 8px;
+}
+.mica-appearance-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 8px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+.mica-appearance-row > span {
+	width: 52px;
+	flex-shrink: 0;
+}
+.mica-appearance-hint {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+/* ---------- Undo toast button ---------- */
+.mica-undo-btn {
+	margin-left: 8px;
+	padding: 1px 10px;
+	border-radius: 6px;
+	border: 1px solid var(--mica-accent);
+	background: transparent;
+	color: var(--mica-accent);
+	cursor: pointer;
+	box-shadow: none;
+	font-size: var(--font-ui-smaller);
+}
+.mica-undo-btn:hover {
+	background: color-mix(in srgb, var(--mica-accent) 15%, transparent);
+}
+
+/* ---------- Settings: theme gallery ---------- */
+.mica-theme-gallery {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+	gap: 8px;
+	margin: 8px 0 16px;
+}
+.mica-theme-card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-primary);
+	cursor: pointer;
+	box-shadow: none;
+}
+.mica-theme-card.is-on {
+	border-color: var(--mica-accent);
+	box-shadow: 0 0 0 1px var(--mica-accent);
+}
+.mica-theme-mini {
+	border-radius: 6px;
+	overflow: hidden;
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 35%, var(--background-modifier-border));
+}
+.mica-theme-mini-tabs {
+	display: flex;
+	gap: 2px;
+	padding: 3px;
+	background: var(--background-secondary);
+}
+.mica-theme-mini-tabs span {
+	flex: 1;
+	height: 6px;
+	border-radius: 2px;
+	background: var(--background-modifier-border);
+}
+.mica-theme-mini-tabs span.is-active {
+	background: var(--mica-accent);
+}
+.mica-theme-mini-body {
+	height: 22px;
+	background: color-mix(in srgb, var(--mica-accent) 7%, var(--background-primary));
+}
+.mica-theme-card-name {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	text-align: center;
 }

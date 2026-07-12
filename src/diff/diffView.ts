@@ -40,11 +40,18 @@ export function renderNUp(
 	}
 }
 
+/** Layout plumbing (`:::`, `tab:`) reads as noise in a diff — dim it. */
+function isDirectiveLine(value: string): boolean {
+	const t = value.trim();
+	return t.startsWith(":::") || t.startsWith("tab:");
+}
+
 function renderInline(el: HTMLElement, result: DiffResult): void {
 	for (const hunk of result.hunks) {
 		const h = el.createDiv({ cls: "mica-diff-hunk" });
 		for (const c of hunk.changes) {
 			const row = h.createDiv({ cls: `mica-diff-row is-${c.tag}` });
+			if (isDirectiveLine(c.value)) row.addClass("is-directive");
 			row.createSpan({ cls: "mica-diff-gutter", text: sign(c.tag) });
 			renderLine(row.createSpan({ cls: "mica-diff-text" }), c);
 		}
@@ -84,6 +91,7 @@ function renderSideBySide(el: HTMLElement, result: DiffResult): void {
 
 function sideCell(row: HTMLElement, c: DiffChange | undefined, kind: string): void {
 	const cell = row.createDiv({ cls: `mica-diff-cell is-${c ? kind : "empty"}` });
+	if (c && isDirectiveLine(c.value)) cell.addClass("is-directive");
 	if (c) renderLine(cell, c);
 }
 

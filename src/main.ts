@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile } from "obsidian";
+import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
@@ -6,11 +6,11 @@ import { VersionEngine } from "./version/engine";
 import { ensureBlockIds, ensureNoteId } from "./identity/identity";
 import { repair } from "./identity/reconcile";
 import { sidecarDir } from "./storage/sidecar";
-import { DiffModal } from "./diff/diffModal";
+import { VersionsModal } from "./ui/versionsModal";
 import { MicaApi } from "./api/mica";
 import { migrateFile, migrateVault, type MigrateFileReport } from "./migrate/migrate";
 import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings";
-import type { BlockUi } from "./render/layoutEngine";
+import type { BlockUi } from "./ui/blockShell";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, the
@@ -66,6 +66,49 @@ export default class MicaPlugin extends Plugin {
 			id: "diff-versions",
 			name: "Compare block versions",
 			callback: () => void this.diffActiveBlock(),
+		});
+		this.addCommand({
+			id: "insert-block",
+			name: "Insert Mica block (tabs) here",
+			editorCallback: (editor) => {
+				const cur = editor.getCursor();
+				editor.replaceRange("\n```mica\ntab: New tab\n\n```\n", cur);
+				editor.setCursor({ line: cur.line + 3, ch: 0 });
+			},
+		});
+		this.addCommand({
+			id: "wrap-selection",
+			name: "Wrap selection in a Mica block",
+			editorCallback: (editor) => {
+				const sel = editor.getSelection();
+				if (!sel.trim()) {
+					new Notice("Select the markdown to wrap first.");
+					return;
+				}
+				// The fence must out-size any fence inside the selection.
+				let run = 2;
+				for (const m of sel.matchAll(/`+/g)) run = Math.max(run, m[0].length);
+				const fence = "`".repeat(Math.max(3, run + 1));
+				editor.replaceSelection(`${fence}mica\ntab: New tab\n${sel}${sel.endsWith("\n") ? "" : "\n"}${fence}\n`);
+			},
+		});
+		this.addCommand({
+			id: "toggle-collapse",
+			name: "Collapse / expand all Mica blocks in this note",
+			callback: () => {
+				const anyOpen = Array.from(this.micaUi.values()).some((u) => !u.collapsed);
+				for (const u of this.micaUi.values()) u.collapsed = anyOpen;
+				// Nudge the active editor so widgets rebuild with the new state —
+				// re-dispatching the CURRENT selection rebuilds without moving it.
+				const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+				view?.previewMode?.rerender(true);
+				const cm = (
+					view?.editor as unknown as {
+						cm?: { dispatch: (tr: object) => void; state: { selection: { main: unknown } } };
+					}
+				)?.cm;
+				if (cm) cm.dispatch({ selection: cm.state.selection.main });
+			},
 		});
 		this.addCommand({
 			id: "repair",
@@ -181,7 +224,7 @@ export default class MicaPlugin extends Plugin {
 			new Notice("No Mica block with an id in this note. Run “Prepare note for Mica” first.");
 			return;
 		}
-		new DiffModal(this, file, block.id).open();
+		new VersionsModal(this, file, block.id).open();
 	}
 
 	private async followRename(file: TFile, oldPath: string): Promise<void> {

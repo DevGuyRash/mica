@@ -177,30 +177,39 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				),
 			{ timeout: 8000, timeoutMsg: "no editable content region appeared" },
 		);
+		await browser.executeObsidian(() => {
+			(
+				document.querySelector(".mica-lp .mica-tab-panel.is-active .mica-region.is-editable") as HTMLElement | null
+			)?.click();
+		});
+		// The quick editor is CodeMirror now; it mounts on a microtask.
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(
+						document.querySelector(".mica-lp .mica-tab-panel.is-active .mica-region.is-editing .mica-mdeditor"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the quick editor never opened" },
+		);
 		const shown = await browser.executeObsidian(() => {
-			const region = document.querySelector(
-				".mica-lp .mica-tab-panel.is-active .mica-region.is-editable",
-			) as HTMLElement | null;
-			region?.click();
-			const ta = document.querySelector(
-				".mica-lp .mica-tab-panel.is-active .mica-region.is-editing textarea",
-			) as HTMLTextAreaElement | null;
-			return ta ? ta.value : null;
+			const ed = document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor") as unknown as {
+				micaEditor?: { getValue(): string };
+			} | null;
+			return ed?.micaEditor?.getValue() ?? null;
 		});
 		expect(shown).not.toBeNull();
 		expect(shown).toContain("first tab body");
 		expect(shown).not.toContain(":::"); // structural directives are never surfaced
 
 		await browser.executeObsidian(() => {
-			const ta = document.querySelector(
-				".mica-lp .mica-tab-panel.is-active .mica-region.is-editing textarea",
-			) as HTMLTextAreaElement | null;
-			if (!ta) return;
-			ta.value = "edited inline body";
-			const save = document.querySelector(
-				".mica-lp .mica-tab-panel.is-active .mica-region.is-editing .mica-region-actions button.mod-cta",
-			) as HTMLElement | null;
-			save?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			const ed = document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor") as unknown as {
+				micaEditor?: { setValue(v: string): void };
+			} | null;
+			ed?.micaEditor?.setValue("edited inline body");
+			(
+				document.querySelector(".mica-lp .mica-region.is-editing .mica-qe-bar button.mod-cta") as HTMLElement | null
+			)?.click();
 		});
 		await browser.waitUntil(
 			() =>
@@ -213,34 +222,24 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 	});
 
-	it("the auto-save pill toggles Auto ↔ Manual", async function () {
-		await setAutoSave(true); // known state, independent of prior runs' data.json
+	it("the footer is quiet on auto-save and offers Save version on manual", async function () {
+		await setAutoSave(true);
 		await seedAndOpen("Toggle.md", "Intro line.\n\n```mica id=tg-1\ntab: One\nbody\n```\n", "live");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-auto"))),
-			{ timeout: 8000, timeoutMsg: "the auto-save pill never appeared" },
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-footer"))),
+			{ timeout: 8000, timeoutMsg: "the footer never appeared" },
 		);
-		const before = await browser.executeObsidian(() => {
-			const p = document.querySelector(".mica-lp .mica-auto") as HTMLElement | null;
-			return { on: p?.classList.contains("is-on") ?? false, text: p?.textContent ?? "" };
-		});
-		expect(before.on).toBe(true);
-		expect(before.text).toContain("Auto");
-		await browser.executeObsidian(() =>
-			(document.querySelector(".mica-lp .mica-auto") as HTMLElement | null)?.click(),
-		);
+		// Auto mode: no always-on pill, no Save button — just the chip.
+		expect(
+			await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-save-now"))),
+		).toBe(false);
+
+		await setAutoSave(false);
+		await seedAndOpen("Toggle2.md", "Intro line.\n\n```mica id=tg-2\ntab: One\nbody\n```\n", "live");
 		await browser.waitUntil(
-			() =>
-				browser.executeObsidian(
-					() => document.querySelector(".mica-lp .mica-auto")?.classList.contains("is-off") === true,
-				),
-			{ timeout: 5000, timeoutMsg: "the pill did not switch to Manual" },
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-save-now"))),
+			{ timeout: 8000, timeoutMsg: "manual mode did not surface the Save version button" },
 		);
-		const after = await browser.executeObsidian(
-			() => document.querySelector(".mica-lp .mica-auto")?.textContent ?? "",
-		);
-		expect(after).toContain("Manual");
-		// Restore auto-save reliably (awaited), so later tests don't inherit Manual.
 		await setAutoSave(true);
 	});
 
@@ -258,7 +257,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				Array.from(document.querySelectorAll(`.mica-lp ${sel}`)).filter(
 					(r) => !r.closest(".mica-tab-body") && !r.closest(".mica-cell"),
 				).length;
-			return { regions: rootLevel(".mica-region"), inserts: rootLevel(".mica-insert") };
+			return { regions: rootLevel(".mica-region"), inserts: rootLevel(".mica-insert-zone") };
 		});
 		expect(stray.regions).toBe(0);
 		expect(stray.inserts).toBe(0);
@@ -308,25 +307,24 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(await browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length)).toBe(0);
 	});
 
-	it("the interval input opens in place, not at the far end", async function () {
-		await setAutoSave(true); // the interval chip only shows when auto-save is on
+	it("the version chip's context menu carries the auto-save controls", async function () {
+		await setAutoSave(true);
 		await seedAndOpen("Interval.md", "Intro line.\n\n```mica id=in-2\ntab: A\nx\n```\n", "live");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-auto-secs"))),
-			{ timeout: 8000, timeoutMsg: "the interval chip never appeared" },
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-chip"))),
+			{ timeout: 8000, timeoutMsg: "the version chip never appeared" },
 		);
-		await browser.executeObsidian(() =>
-			(document.querySelector(".mica-lp .mica-auto-secs") as HTMLElement | null)?.click(),
-		);
-		const ok = await browser.executeObsidian(() => {
-			const footer = document.querySelector(".mica-lp .mica-footer");
-			if (!footer) return false;
-			const kids = Array.from(footer.children);
-			const inputIdx = kids.findIndex((k) => k.classList.contains("mica-auto-input"));
-			const spacerIdx = kids.findIndex((k) => k.classList.contains("mica-footer-spacer"));
-			return inputIdx >= 0 && spacerIdx >= 0 && inputIdx < spacerIdx; // before the spacer, not at the end
+		const menuText = await browser.executeObsidian(async () => {
+			const chip = document.querySelector(".mica-lp .mica-chip") as HTMLElement | null;
+			chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 200, clientY: 200 }));
+			await new Promise((r) => setTimeout(r, 150));
+			const menu = document.querySelector(".menu");
+			const text = menu?.textContent ?? "";
+			(menu as HTMLElement | null)?.remove();
+			return text;
 		});
-		expect(ok).toBe(true);
+		expect(menuText).toContain("manual"); // switch to manual saving
+		expect(menuText).toContain("Save version now");
 	});
 
 	it("the grid column number is click-editable", async function () {
@@ -336,11 +334,11 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			"live",
 		);
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-stepper-val"))),
-			{ timeout: 8000, timeoutMsg: "the column stepper never appeared" },
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-cols-chip"))),
+			{ timeout: 8000, timeoutMsg: "the column chip never appeared" },
 		);
 		await browser.executeObsidian(() =>
-			(document.querySelector(".mica-lp .mica-stepper-val") as HTMLElement | null)?.click(),
+			(document.querySelector(".mica-lp .mica-cols-chip") as HTMLElement | null)?.click(),
 		);
 		expect(
 			await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-stepper-input"))),
@@ -353,27 +351,27 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-chip").length >= 2),
 			{ timeout: 8000, timeoutMsg: "the tab chips never rendered" },
 		);
-		// Drive HTML5 drag via synthetic events (the impl keys off a module payload
-		// set on dragstart and read on drop, so this exercises the real path).
-		await browser.executeObsidian(() => {
+		// Drive the pointer-based DnD: down on the chip, move past the threshold to
+		// the append slot after the last chip, release.
+		await browser.executeObsidian(async () => {
 			const chips = Array.from(document.querySelectorAll(".mica-lp .mica-tab-chip")) as HTMLElement[];
 			const [src, dst] = chips;
-			const fire = (el: HTMLElement, type: string, x?: number): void => {
-				const r = el.getBoundingClientRect();
-				el.dispatchEvent(
-					new DragEvent(type, {
-						bubbles: true,
-						cancelable: true,
-						clientX: x ?? r.left + r.width / 2,
-						clientY: r.top + r.height / 2,
-					}),
-				);
-			};
+			const rs = src.getBoundingClientRect();
 			const rd = dst.getBoundingClientRect();
-			fire(src, "dragstart");
-			fire(dst, "dragover", rd.left + rd.width * 0.75); // past midpoint → drop AFTER
-			fire(dst, "drop", rd.left + rd.width * 0.75);
-			fire(src, "dragend");
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			src.dispatchEvent(new PointerEvent("pointerdown", opts(rs.left + 4, rs.top + rs.height / 2)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.right - 2, rd.top + rd.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.right + 4, rd.top + rd.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.right + 4, rd.top + rd.height / 2)));
 		});
 		await browser.waitUntil(
 			() =>
@@ -400,20 +398,28 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-cell").length >= 4),
 			{ timeout: 8000, timeoutMsg: "the grid cells never rendered" },
 		);
-		await browser.executeObsidian(() => {
+		await browser.executeObsidian(async () => {
 			const cells = Array.from(document.querySelectorAll(".mica-lp .mica-cell")) as HTMLElement[];
-			const handle = cells[3].querySelector(".mica-cell-drag") as HTMLElement | null; // delta's grip
+			const handle = cells[3].querySelector(".mica-cell-tool") as HTMLElement | null; // delta's grip
 			const dst = cells[0]; // alpha
 			if (!handle) return;
-			const fire = (el: HTMLElement, type: string, x: number, y: number): void =>
-				el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-			const rs = handle.getBoundingClientRect();
 			const rd = dst.getBoundingClientRect();
-			fire(handle, "dragstart", rs.left + rs.width / 2, rs.top + rs.height / 2);
-			// Top-centre of alpha → dominant vertical, above → insert before it.
-			fire(dst, "dragover", rd.left + rd.width / 2, rd.top + rd.height * 0.15);
-			fire(dst, "drop", rd.left + rd.width / 2, rd.top + rd.height * 0.15);
-			fire(handle, "dragend", rs.left + rs.width / 2, rs.top + rs.height / 2);
+			const rs = cells[3].getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			handle.dispatchEvent(new PointerEvent("pointerdown", opts(rs.right - 8, rs.top + 8)));
+			// Aim at alpha's LEFT edge → the "insert before alpha" slot.
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 10, rd.top + rd.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 2, rd.top + rd.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.left + 2, rd.top + rd.height / 2)));
 		});
 		await browser.waitUntil(
 			() =>
@@ -443,17 +449,25 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		// Type text WITHOUT a trailing newline into the first cell — the exact
 		// trigger that used to glue "abc:::" and collapse the column.
 		await browser.executeObsidian(() => {
-			const region = document.querySelector(".mica-lp .mica-cell .mica-region") as HTMLElement | null;
-			region?.click();
-			const ta = document.querySelector(
-				".mica-lp .mica-cell .mica-region.is-editing textarea",
-			) as HTMLTextAreaElement | null;
-			if (!ta) return;
-			ta.value = "abc";
-			const save = document.querySelector(
-				".mica-lp .mica-cell .mica-region.is-editing .mica-region-actions button.mod-cta",
-			) as HTMLElement | null;
-			save?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			(document.querySelector(".mica-lp .mica-cell .mica-region") as HTMLElement | null)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector(".mica-lp .mica-cell .mica-region.is-editing .mica-mdeditor")),
+				),
+			{ timeout: 8000, timeoutMsg: "the cell quick editor never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const ed = document.querySelector(".mica-lp .mica-cell .mica-region.is-editing .mica-mdeditor") as unknown as {
+				micaEditor?: { setValue(v: string): void };
+			} | null;
+			ed?.micaEditor?.setValue("abc"); // no trailing newline on purpose
+			(
+				document.querySelector(
+					".mica-lp .mica-cell .mica-region.is-editing .mica-qe-bar button.mod-cta",
+				) as HTMLElement | null
+			)?.click();
 		});
 		await browser.waitUntil(
 			() =>
