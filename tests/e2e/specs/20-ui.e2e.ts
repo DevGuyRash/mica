@@ -158,7 +158,8 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				),
 			{ timeout: 8000, timeoutMsg: "the new tab was not added to the document" },
 		);
-		// …and it becomes the ACTIVE tab (auditor MAJOR-2: no silent hidden add).
+		// …it becomes the ACTIVE tab (no silent hidden add), and lands BLANK with
+		// the "+ Add…" invitation instead of a surprise editor.
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
@@ -166,6 +167,12 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				),
 			{ timeout: 5000, timeoutMsg: "the new tab did not become active" },
 		);
+		const blank = await browser.executeObsidian(() => ({
+			editorOpen: Boolean(document.querySelector(".mica-lp .mica-region.is-editing")),
+			ghost: Boolean(document.querySelector(".mica-lp .mica-tab-panel.is-active .mica-ghost")),
+		}));
+		expect(blank.editorOpen).toBe(false);
+		expect(blank.ghost).toBe(true);
 	});
 
 	it("inline editor shows clean prose (no ::: ) and commits an edit", async function () {
@@ -255,18 +262,17 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length > 0),
 			{ timeout: 8000, timeoutMsg: "the widget never rendered" },
 		);
-		// A tab with content shows no ghost anywhere, no region at the block root,
-		// and NO root-level insert "+" (the confusing second one) — inserts live only
-		// inside containers once a group exists.
+		// A tab with content shows no ghost anywhere and no WRITE REGION at the
+		// block root (the old duplicate-section bug). Hover-revealed insert
+		// zones between/around sections are a feature, not a stray.
 		const stray = await browser.executeObsidian(() => {
 			const rootLevel = (sel: string): number =>
 				Array.from(document.querySelectorAll(`.mica-lp ${sel}`)).filter(
 					(r) => !r.closest(".mica-tab-body") && !r.closest(".mica-cell"),
 				).length;
-			return { regions: rootLevel(".mica-region"), inserts: rootLevel(".mica-insert-zone") };
+			return { regions: rootLevel(".mica-region") };
 		});
 		expect(stray.regions).toBe(0);
-		expect(stray.inserts).toBe(0);
 	});
 
 	it("an empty tab shows the write invitation with its icon", async function () {
@@ -284,7 +290,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				hasIcon: Boolean(g?.querySelector(".mica-ghost-icon svg")),
 			};
 		});
-		expect(ghost.label).toBe("Click to write…"); // the invitation copy is a product contract
+		expect(ghost.label).toBe("Add…"); // the invitation copy is a product contract
 		expect(ghost.hasIcon).toBe(true); // …and it reads as an affordance, not stray text
 	});
 
@@ -420,12 +426,13 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				pointerId: 1,
 			});
 			handle.dispatchEvent(new PointerEvent("pointerdown", opts(rs.right - 8, rs.top + 8)));
-			// Aim at alpha's LEFT edge → the "insert before alpha" slot.
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 10, rd.top + rd.height / 2)));
+			// Column semantics: aim at alpha's TOP edge → the "before alpha,
+			// same column" gap (its centre would mean "after alpha").
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 12, rd.top + 10)));
 			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 2, rd.top + rd.height / 2)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 12, rd.top + 2)));
 			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.left + 2, rd.top + rd.height / 2)));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.left + 12, rd.top + 2)));
 		});
 		await browser.waitUntil(
 			() =>
@@ -522,11 +529,12 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		const probe = (): Promise<{ accent: string; chrome: string; radius: string }> =>
 			browser.executeObsidian(() => {
 				const nav = document.querySelector(".mica-lp .mica-tab-nav-outer") as HTMLElement | null;
-				const btn = document.querySelector(".mica-lp .mica-tab-btn.is-active") as HTMLElement | null;
 				return {
 					accent: getComputedStyle(document.body).getPropertyValue("--mica-accent").trim(),
 					chrome: nav ? getComputedStyle(nav).backgroundColor : "",
-					radius: btn ? getComputedStyle(btn).borderTopLeftRadius : "",
+					// Button radii belong to whatever theme is active; the honest
+					// signal for the tab-style knob is the body attribute it drives.
+					radius: document.body.getAttribute("data-mica-tabstyle") ?? "",
 				};
 			});
 		await setTheme("default", "connected");

@@ -2212,3 +2212,60 @@ body.mica-dnd-active * {
 .mica-head-btn.clickable-icon {
 	padding: 0;
 }
+
+/* ---------- v2.1 polish: navigator flash, z-order, icon fixes ---------- */
+
+/* Navigator jump target: a breathing accent outline that fades. */
+.mica-flash {
+	animation: mica-flash-kf 1.4s ease;
+	border-radius: calc(var(--mica-radius) * 0.6);
+}
+@keyframes mica-flash-kf {
+	0% {
+		box-shadow: 0 0 0 3px var(--mica-accent);
+	}
+	100% {
+		box-shadow: 0 0 0 3px transparent;
+	}
+}
+
+/* Cell hover tools never sit over an open editor. */
+.mica-cell:has(.mica-region.is-editing) > .mica-cell-bar {
+	display: none !important;
+}
+
+/* Group-variant caret + quick-editor expand: explicit glyph sizing so no
+   theme can collapse them into dots. */
+.mica-tool-caret .svg-icon {
+	width: 11px !important;
+	height: 11px !important;
+	min-width: 11px;
+	color: var(--text-muted);
+}
+.mica-qe-expand .svg-icon {
+	width: 15px !important;
+	height: 15px !important;
+	min-width: 15px;
+}
+.mica-qe-expand {
+	width: 28px;
+	height: 24px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+/* The empty-space invitation reads as a button now. */
+.mica-ghost {
+	border: 1px dashed color-mix(in srgb, var(--mica-accent) 30%, var(--background-modifier-border));
+	border-radius: calc(var(--mica-radius) * 0.6);
+	justify-content: center;
+}
+
+/* Drop indicator: a touch bolder now that it spans real gaps. */
+.mica-drop-indicator {
+	height: 4px;
+	box-shadow:
+		0 0 0 1px color-mix(in srgb, var(--mica-accent) 45%, transparent),
+		0 0 12px color-mix(in srgb, var(--mica-accent) 60%, transparent);
+}

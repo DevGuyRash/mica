@@ -334,9 +334,7 @@ function openNavigator(cst: Cst, root: HTMLElement, e: MouseEvent): void {
 				const label = `${"    ".repeat(depth)}${iconFor(n.name)} ${display || n.name}${words ? `  ·  ${words}w` : ""}`;
 				menu.addItem((item) => {
 					item.setTitle(label);
-					if (n.name === "tab") {
-						item.onClick(() => activateTabByPath(root, p));
-					}
+					item.onClick(() => revealNode(root, p, n.name));
 				});
 			}
 			walk(n.children, p, depth + 1);
@@ -359,13 +357,29 @@ function wordCount(nodes: MicaNode[]): number {
 	return n;
 }
 
-/** Click through the chip chain so the tab at `path` becomes visible. */
-function activateTabByPath(root: HTMLElement, path: number[]): void {
+/**
+ * Take the reader TO a node: activate every ancestor tab, scroll it into
+ * view, and flash its bounds so the eye lands where the click meant.
+ */
+function revealNode(root: HTMLElement, path: number[], kind: string): void {
+	// Activate the ancestor tab chain (chips carry their comma-joined path).
 	for (let depth = 1; depth <= path.length; depth++) {
 		const prefix = path.slice(0, depth);
 		const chip = root.querySelector<HTMLElement>(`.mica-tab-btn[data-mica-tab="${prefix.join(",")}"]`);
 		chip?.click();
 	}
+	const dotted = path.join(".");
+	// Tabs highlight their BODY (the panel content); containers highlight themselves.
+	const target =
+		kind === "tab"
+			? (root.querySelector<HTMLElement>(`[data-mica-container="group"][data-path="${dotted}"]`) ??
+				root.querySelector<HTMLElement>(`[data-mica-node="${dotted}"]`))
+			: (root.querySelector<HTMLElement>(`[data-mica-node="${dotted}"]`) ??
+				root.querySelector<HTMLElement>(`[data-path="${dotted}"]`));
+	if (!target) return;
+	target.scrollIntoView({ block: "center", behavior: "smooth" });
+	target.addClass("mica-flash");
+	window.setTimeout(() => target.removeClass("mica-flash"), 1400);
 }
 
 /** Per-block appearance popover — writes fence attrs via the edit hooks. */
@@ -462,7 +476,8 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 			opened = opened || auto;
 			i = j;
 		} else {
-			if (ctx.editable && rendered > 0) renderInsertZone(el, ctx, path, i);
+			// Insert-between zones — including BEFORE the first section.
+			if (ctx.editable) renderInsertZone(el, ctx, path, i);
 			renderContainer(nodes[i] as Container, el, ctx, [...path, i]);
 			i++;
 		}
@@ -472,6 +487,56 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 		renderRegion(el, ctx, { path, start: 0, end: 0, original: "" }, Boolean(opts.autoOpen) && !opened);
 	}
 	if (ctx.editable && opts.insert) renderInsertZone(el, ctx, path, nodes.length, true);
+}
+
+/**
+ * The one "insert something here" menu: prose, callout, code, tabs, or grid.
+ * `onText` lets empty regions open their editor instead of inserting a stub.
+ */
+function showInsertMenu(ctx: RenderCtx, path: number[], at: number, e: MouseEvent, onText?: () => void): void {
+	const menu = new Menu();
+	menu.addItem((i) =>
+		i
+			.setTitle("Text")
+			.setIcon("text")
+			.onClick(() => {
+				if (onText) onText();
+				else ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\nWrite here…\n" });
+			}),
+	);
+	menu.addItem((i) =>
+		i
+			.setTitle("Callout")
+			.setIcon("megaphone")
+			.onClick(() => ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\n> [!note] Title\n> Body\n" })),
+	);
+	menu.addItem((i) =>
+		i
+			.setTitle("Code block")
+			.setIcon("square-code")
+			.onClick(() =>
+				ctx.editable?.apply({
+					op: "insertLeaf",
+					path,
+					at,
+					text: "\n\u0060\u0060\u0060\ncode\n\u0060\u0060\u0060\n",
+				}),
+			),
+	);
+	menu.addSeparator();
+	menu.addItem((i) =>
+		i
+			.setTitle("Tabs")
+			.setIcon("app-window")
+			.onClick(() => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "tabs" })),
+	);
+	menu.addItem((i) =>
+		i
+			.setTitle("Grid")
+			.setIcon("layout-grid")
+			.onClick(() => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "grid" })),
+	);
+	menu.showAtMouseEvent(e);
 }
 
 // What a region click must NOT hijack. Deliberately `.mica-mdeditor` and not
@@ -489,6 +554,11 @@ function renderRegion(el: HTMLElement, ctx: RenderCtx, target: RegionTarget, aut
 			if (!guard(e) || region.hasClass("is-editing")) return;
 			e.preventDefault();
 			e.stopPropagation();
+			if (!target.original.trim()) {
+				// Empty space offers the full palette (text / callout / code / groups).
+				showInsertMenu(ctx, target.path, target.start, e, () => openQuickEdit(region, ctx, target));
+				return;
+			}
 			if (e.ctrlKey || e.metaKey) openLightboxFor(ctx, target);
 			else openQuickEdit(region, ctx, target);
 		});
@@ -538,8 +608,8 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 		}
 	} else if (ctx.editable) {
 		const ghost = view.createDiv({ cls: "mica-ghost" });
-		setIcon(ghost.createSpan({ cls: "mica-ghost-icon" }), "pencil-line");
-		ghost.createSpan({ cls: "mica-ghost-label", text: "Click to write…" });
+		setIcon(ghost.createSpan({ cls: "mica-ghost-icon" }), "plus");
+		ghost.createSpan({ cls: "mica-ghost-label", text: "Add…" });
 	}
 }
 
@@ -554,41 +624,7 @@ function renderInsertZone(el: HTMLElement, ctx: RenderCtx, path: number[], at: n
 	const btn = iconButton(zone, "mica-insert-plus", "plus", "Insert here…");
 	btn.addEventListener("click", (e) => {
 		e.stopPropagation();
-		const menu = new Menu();
-		menu.addItem((i) =>
-			i
-				.setTitle("Tabs")
-				.setIcon("app-window")
-				.onClick(() => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "tabs" })),
-		);
-		menu.addItem((i) =>
-			i
-				.setTitle("Grid")
-				.setIcon("layout-grid")
-				.onClick(() => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "grid" })),
-		);
-		menu.addSeparator();
-		menu.addItem((i) =>
-			i
-				.setTitle("Text")
-				.setIcon("text")
-				.onClick(() => ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\nWrite here…\n" })),
-		);
-		menu.addItem((i) =>
-			i
-				.setTitle("Callout")
-				.setIcon("megaphone")
-				.onClick(() =>
-					ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\n> [!note] Title\n> Body\n" }),
-				),
-		);
-		menu.addItem((i) =>
-			i
-				.setTitle("Code block")
-				.setIcon("square-code")
-				.onClick(() => ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\n```\ncode\n```\n" })),
-		);
-		menu.showAtMouseEvent(e);
+		showInsertMenu(ctx, path, at, e);
 	});
 }
 
@@ -610,6 +646,7 @@ function renderContainer(node: Container, el: HTMLElement, ctx: RenderCtx, path:
 function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-tabs" });
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
+	wrap.setAttribute("data-mica-node", path.join("."));
 	const navOuter = wrap.createDiv({ cls: "mica-tab-nav-outer" });
 	const nav = navOuter.createDiv({ cls: "mica-tab-nav", attr: { role: "tablist" } });
 	nav.setAttribute("data-mica-container", "tab");
@@ -687,7 +724,9 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		const panel = panels.createDiv({ cls: "mica-tab-panel", attr: { role: "tabpanel" } });
 		const body = panel.createDiv({ cls: "mica-tab-body" });
 		markGroupContainer(body, [...path, x.idx], tab.children.length);
-		renderNodes(tab.children, body, ctx, [...path, x.idx], { insert: true, autoOpen: revealTab === x.idx });
+		// A freshly inserted tab is ACTIVATED but never auto-opens an editor —
+		// its empty body offers the "+ Add…" menu instead.
+		renderNodes(tab.children, body, ctx, [...path, x.idx], { insert: true });
 		btns.push(btn);
 		panelEls.push(panel);
 	});
@@ -819,6 +858,7 @@ function startRename(
 function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-grid-wrap" });
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
+	wrap.setAttribute("data-mica-node", path.join("."));
 	const grid = wrap.createDiv({ cls: "mica-grid" });
 	grid.setAttribute("data-mica-container", "cell");
 	grid.setAttribute("data-path", path.join("."));
@@ -832,12 +872,25 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		const cellPath = [...path, idx];
 		const cell = grid.createDiv({ cls: "mica-cell" });
 		cell.setAttribute("data-mica-idx", String(idx));
+		cell.setAttribute("data-mica-node", cellPath.join("."));
 		markGroupContainer(cell, cellPath, c.children.length);
 		renderNodes(c.children, cell, ctx, cellPath, { autoOpen: takeRegionReveal(ctx, cellPath) });
 		if (ctx.editable) {
 			const bar = cell.createDiv({ cls: "mica-cell-bar" });
 			const drag = iconButton(bar, "mica-cell-tool", "grip-vertical", "Drag to move this cell");
 			makeDraggable(drag, "cell", cellPath, (op) => ctx.editable?.apply(op), cell);
+			iconButton(bar, "mica-cell-tool", "maximize-2", "Edit this cell in the full editor").addEventListener(
+				"click",
+				(e) => {
+					e.stopPropagation();
+					openLightboxFor(ctx, {
+						path: cellPath,
+						start: 0,
+						end: c.children.length,
+						original: serializeCst({ children: c.children }),
+					});
+				},
+			);
 			iconButton(bar, "mica-cell-tool", "x", "Delete cell").addEventListener("click", (e) => {
 				e.stopPropagation();
 				deleteWithUndo(ctx, { op: "deleteCell", path, index: idx }, "Cell deleted");

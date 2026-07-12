@@ -1,0 +1,108 @@
+/* ui-misc.css — devguyrash-general-tweaks remainder (scrollbar/overflow,
+   details/summary + clipboard button, modal textarea, YouTube centering)
+   + scoped override of Cyber Glow's active-page per-block tint. */
+
+/* ============================ YouTube embeds ============================ */
+.markdown-preview-view iframe[src*="youtube.com"],
+.markdown-preview-view iframe[src*="youtu.be"] {
+	display: block;
+	margin: 0 auto;
+	max-width: 100%;
+}
+
+/* ========================= Scrollbar / overflow ========================= */
+/* Code blocks: horizontal scroll only */
+.markdown-rendered pre code {
+	white-space: pre !important;
+	overflow-x: auto !important;
+	overflow-y: hidden !important;
+}
+
+/* Restore scrollbar appearance hidden by the theme */
+::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-track {
+	opacity: 1 !important;
+	display: block !important;
+}
+
+.markdown-preview-view > div:not(.markdown-embed) {
+	overflow: visible !important;
+}
+
+.markdown-preview-view {
+	overflow: auto !important;
+}
+
+/* Ported VERBATIM — narrowing this blanket rule is a separate follow-up
+   commit (overflow is layout-affecting; needs computed-overflow diff). */
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+ul,
+ol,
+li,
+blockquote,
+.callout-content,
+.markdown-preview-section div:not(.block-language-dataview):not(.search-result-container) {
+	overflow: visible !important;
+}
+
+/* Fleeting-notes modal textarea must keep its own scrollbar */
+.modal .setting-item textarea {
+	overflow: auto !important;
+}
+
+/* ========================= Details / Summary ========================= */
+details:not([open]),
+summary {
+	white-space: pre-wrap !important;
+	overflow: hidden !important;
+}
+details[open] {
+	white-space: pre-line !important;
+	overflow: visible !important;
+}
+
+/* .clipboard-copy-btn is injected by CustomJS DetailsClipboardCopy.js —
+   class name and ::before glyphs are load-bearing, keep verbatim. */
+.clipboard-copy-btn {
+	cursor: pointer;
+	background: none;
+	border: none;
+	padding: 0 8px;
+	margin-left: 8px;
+	font-size: 0.8em;
+	color: var(--text-muted);
+	display: inline-flex;
+	align-items: center;
+	vertical-align: middle;
+}
+.clipboard-copy-btn:hover {
+	color: var(--text-normal);
+}
+.clipboard-copy-btn::before {
+	content: "\1F4CB";
+	font-family: "Segoe UI Emoji", sans-serif;
+}
+.clipboard-copy-btn.copied::before {
+	content: "\2714";
+	color: var(--interactive-success);
+}
+
+/* == Active-page highlight: remove per-block tint (keep pane-edge glow) == */
+/* Overrides Cyber Glow theme.css:2736 (inset glow + accent background +
+   0.3s transition on every .node-insert-event in the active leaf).
+   !important beats the theme's higher-specificity non-important rule.
+   The theme's .view-content clause (pane-edge glow) is NOT matched here
+   and must stay intact. */
+.workspace-leaf.mod-active .markdown-preview-view .node-insert-event,
+.workspace-leaf.mod-active .markdown-source-view .node-insert-event,
+.workspace-leaf.mod-active .markdown-reading-view .node-insert-event {
+	box-shadow: none !important;
+	background-color: transparent !important;
+	transition: none !important;
+}

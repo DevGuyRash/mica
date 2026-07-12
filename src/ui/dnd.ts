@@ -29,6 +29,8 @@ interface Slot {
 	/** Distance reference point. */
 	cx: number;
 	cy: number;
+	/** The owning container's bounds (pointer gating) and nesting depth. */
+	container: { left: number; top: number; right: number; bottom: number; depth: number };
 }
 
 interface ActiveDrag {
@@ -158,7 +160,16 @@ function beginDrag(
 	dragMove(e);
 }
 
-/** Insertion slots for the dragged kind, from live DOM geometry. */
+/**
+ * Insertion slots for the dragged kind, from live DOM geometry.
+ *
+ * Slot philosophy (v2): you drop where you POINT. Slots belong to the
+ * container under the pointer only — no cross-container magnetism. Grids get
+ * COLUMN semantics: cells cluster into columns by geometry, and the slots are
+ * the gaps of the column you're hovering, so dragging inside a column
+ * reorders that column and crossing into another column is an explicit,
+ * visible act. Indicators span the full gap they represent.
+ */
 function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Slot[] {
 	const wanted = kind === "group" ? "group" : kind;
 	const slots: Slot[] = [];
@@ -169,27 +180,96 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 		const parentKey = parentPath.join(".");
 		// Never offer slots inside the dragged node's own subtree.
 		if (fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
+		const rect = el.getBoundingClientRect();
+		if (rect.width === 0 || rect.height === 0) continue; // hidden panel
 		const len = Number(el.dataset.len ?? "0");
 		const kids = Array.from(el.querySelectorAll<HTMLElement>(":scope [data-mica-idx]")).filter(
 			(k) => k.closest(`[data-mica-container="${wanted}"]`) === el,
 		);
-		const horizontal = el.dataset.axis === "x";
+		const container = {
+			left: rect.left,
+			top: rect.top,
+			right: rect.right,
+			bottom: rect.bottom,
+			depth: parentPath.length,
+		};
 
 		if (!kids.length) {
 			// Empty container: one "into" slot covering it.
-			const r = el.getBoundingClientRect();
 			slots.push({
 				parentPath,
 				index: len,
-				x: r.left + 4,
-				y: r.top + 4,
-				w: r.width - 8,
-				h: r.height - 8,
-				cx: r.left + r.width / 2,
-				cy: r.top + r.height / 2,
+				x: rect.left + 4,
+				y: rect.top + 4,
+				w: rect.width - 8,
+				h: rect.height - 8,
+				cx: rect.left + rect.width / 2,
+				cy: rect.top + rect.height / 2,
+				container,
 			});
 			continue;
 		}
+
+		if (el.dataset.axis === "x" && kind === "cell") {
+			// GRID: column-band semantics. Cluster cells into columns by x-centre.
+			type K = { el: HTMLElement; idx: number; r: DOMRect };
+			const cells: K[] = kids.map((k) => ({
+				el: k,
+				idx: Number(k.dataset.micaIdx ?? "0"),
+				r: k.getBoundingClientRect(),
+			}));
+			const columns = new Map<number, K[]>();
+			for (const c of cells) {
+				const cx = c.r.left + c.r.width / 2;
+				let key = -1;
+				for (const existing of columns.keys()) {
+					if (Math.abs(existing - cx) < Math.max(40, c.r.width * 0.5)) {
+						key = existing;
+						break;
+					}
+				}
+				if (key < 0) key = cx;
+				const list = columns.get(key) ?? [];
+				list.push(c);
+				columns.set(key, list);
+			}
+			for (const list of columns.values()) {
+				list.sort((a, b) => a.r.top - b.r.top);
+				const colLeft = Math.min(...list.map((c) => c.r.left));
+				const colWidth = Math.max(...list.map((c) => c.r.width));
+				// Before each cell in the column…
+				for (let i = 0; i < list.length; i++) {
+					const gapTop = i === 0 ? list[i].r.top - 5 : (list[i - 1].r.bottom + list[i].r.top) / 2;
+					slots.push({
+						parentPath,
+						index: list[i].idx,
+						x: colLeft,
+						y: gapTop - 1.5,
+						w: colWidth,
+						h: 3,
+						cx: colLeft + colWidth / 2,
+						cy: gapTop,
+						container,
+					});
+				}
+				// …and after the last one.
+				const last = list[list.length - 1];
+				slots.push({
+					parentPath,
+					index: last.idx + 1,
+					x: colLeft,
+					y: last.r.bottom + 3.5,
+					w: colWidth,
+					h: 3,
+					cx: colLeft + colWidth / 2,
+					cy: last.r.bottom + 5,
+					container,
+				});
+			}
+			continue;
+		}
+
+		const horizontal = el.dataset.axis === "x";
 		for (const kid of kids) {
 			const idx = Number(kid.dataset.micaIdx ?? "0");
 			const r = kid.getBoundingClientRect();
@@ -204,16 +284,18 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 							h: r.height,
 							cx: r.left,
 							cy: r.top + r.height / 2,
+							container,
 						}
 					: {
 							parentPath,
 							index: idx,
-							x: r.left,
+							x: rect.left + 4,
 							y: r.top - 2,
-							w: r.width,
+							w: rect.width - 8,
 							h: 3,
-							cx: r.left + r.width / 2,
+							cx: rect.left + rect.width / 2,
 							cy: r.top,
+							container,
 						},
 			);
 		}
@@ -231,16 +313,18 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 						h: r.height,
 						cx: r.right,
 						cy: r.top + r.height / 2,
+						container,
 					}
 				: {
 						parentPath,
 						index: len,
-						x: r.left,
+						x: rect.left + 4,
 						y: r.bottom - 1,
-						w: r.width,
+						w: rect.width - 8,
 						h: 3,
-						cx: r.left + r.width / 2,
+						cx: rect.left + rect.width / 2,
 						cy: r.bottom,
+						container,
 					},
 		);
 	}
@@ -252,10 +336,21 @@ function dragMove(e: PointerEvent): void {
 	if (!d) return;
 	d.ghost.style.transform = `translate(${e.clientX - d.offsetX}px, ${e.clientY - d.offsetY}px)`;
 
-	// Nearest slot within reach.
+	// You drop where you point: only slots of containers the pointer is inside
+	// (12px of forgiveness), and when containers nest, the DEEPEST one wins.
+	const M = 12;
+	const inside = d.slots.filter(
+		(s) =>
+			e.clientX >= s.container.left - M &&
+			e.clientX <= s.container.right + M &&
+			e.clientY >= s.container.top - M &&
+			e.clientY <= s.container.bottom + M,
+	);
+	const maxDepth = inside.reduce((m, s) => Math.max(m, s.container.depth), -1);
+	const candidates = inside.filter((s) => s.container.depth === maxDepth);
 	let best: Slot | null = null;
-	let bestDist = 90;
-	for (const s of d.slots) {
+	let bestDist = Number.POSITIVE_INFINITY;
+	for (const s of candidates) {
 		const dist = Math.hypot(e.clientX - s.cx, e.clientY - s.cy);
 		if (dist < bestDist) {
 			best = s;

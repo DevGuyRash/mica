@@ -1,0 +1,129 @@
+/* === mcl-slim ===
+   Slim replacement for "MCL Multi Column.css" + "MCL Gallery Cards.css"
+   (Modular CSS Layout by efemkay, github.com/efemkay/obsidian-modular-css-layout).
+
+   WHY: the original snippets contain 88 :has() selectors. Obsidian's reading-view
+   virtualization mounts/unmounts DOM while scrolling; every mutation re-evaluates
+   the :has() chains and causes style-recalc storms (measured: 33 frames >25ms per
+   5s scroll vs 0 on a clean baseline). Acknowledged upstream:
+   https://forum.obsidian.md/t/columns-css-columns-plugin-creates-performance-issues/70142
+
+   This file implements ONLY the MCL features this vault actually uses:
+     1. [!multi-column] callout (plain form, no metadata variants)
+     2. #mcl/list-card tagged lists (single "- ### Heading #mcl/list-card" items)
+   Hard rules honored: zero :has(), no body/universal selectors, no transitions or
+   animations on layout properties, everything scoped to the feature roots.
+
+   Accepted cosmetic differences vs original MCL (documented, all minor):
+   - list-card: the card box is painted on the heading + its following siblings
+     instead of the <li> (no :has() ancestor selection), so the list bullet and
+     the native list indent remain visible next to the card.
+   - list-card: no CSS-grid multi-card flow (vault only ever uses one card per list).
+   - passive MCL Gallery Cards globals are dropped (15px img border-radius,
+     image-in-list size caps, mermaid svg max-width scaling, dv-card, banners,
+     floats, zoom) - none of the trigger markers exist in this vault.
+*/
+
+/* ---------------------------------------------------------------- */
+/* 1. Multi Column Callout: > [!multi-column] with callout children */
+/* ---------------------------------------------------------------- */
+
+div[data-callout="multi-column"].callout {
+	--mcl-callout-min-width: 200px;
+	--mcl-callout-gap: 1em;
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--mcl-callout-gap);
+	background: unset;
+	border: unset;
+	box-shadow: unset;
+	margin: unset;
+	padding: unset;
+	clear: both;
+}
+
+/* remove the callout chrome; promote the content's children to flex items */
+div[data-callout="multi-column"].callout > .callout-title {
+	display: none;
+}
+div[data-callout="multi-column"].callout > .callout-content {
+	display: contents;
+}
+
+/* each direct child block becomes a wrapping column */
+div[data-callout="multi-column"].callout > .callout-content > :is(div, ul, blockquote, p) {
+	flex: 1 1 var(--mcl-callout-min-width);
+	margin: 0;
+}
+
+/* sub-callout columns: grow content vertically so card heights match */
+div[data-callout="multi-column"].callout > .callout-content > .callout {
+	display: flex;
+	flex-direction: column;
+}
+div[data-callout="multi-column"].callout > .callout-content > .callout > .callout-content {
+	flex-grow: 1;
+}
+
+/* collapsed sub-callouts should not stretch to row height */
+@media (min-width: 500px) {
+	div[data-callout="multi-column"].callout > .callout-content > .callout.is-collapsed {
+		box-shadow: unset;
+		height: min-content;
+	}
+}
+
+/* ---------------------------------------------------------------- */
+/* 2. List Card: "- ### Heading #mcl/list-card" (reading view)      */
+/*    Card box is assembled from the heading + its following        */
+/*    siblings inside the <li> - no ancestor (:has) selection.      */
+/* ---------------------------------------------------------------- */
+
+.markdown-rendered li > :is(h1, h2, h3, h4, h5, h6)[data-heading*="#mcl/list-card"] {
+	--mcl-card-bg-color: var(--background-secondary);
+	--mcl-card-border-color: var(--background-modifier-border);
+	background-color: var(--mcl-card-bg-color);
+	border: 1px solid var(--mcl-card-border-color);
+	border-radius: 0.5em 0.5em 0 0;
+	margin: 0;
+	padding: 0.3em 0.5em 0.2em;
+}
+
+/* card body: everything after the tagged heading inside the same li */
+.markdown-rendered li > [data-heading*="#mcl/list-card"] ~ :is(p, div, ul, ol, pre, blockquote, table) {
+	background-color: var(--background-secondary);
+	border-inline: 1px solid var(--background-modifier-border);
+	margin: 0;
+	padding: 0.2em 0.5em;
+}
+
+/* close the card bottom */
+.markdown-rendered li > [data-heading*="#mcl/list-card"] ~ :is(p, div, ul, ol, pre, blockquote, table):last-child {
+	border-bottom: 1px solid var(--background-modifier-border);
+	border-radius: 0 0 0.5em 0.5em;
+	padding-bottom: 0.4em;
+}
+
+/* heading-only card (no body): close the box on the heading itself */
+.markdown-rendered li > [data-heading*="#mcl/list-card"]:last-child {
+	border-bottom: 1px solid var(--background-modifier-border);
+	border-radius: 0.5em;
+}
+
+/* hide the #mcl/* marker tag in reading view (same behavior as MCL) */
+.markdown-rendered a.tag[href^="#mcl"] {
+	display: none;
+}
+
+/* dim the #mcl/* marker tag in editing view (same behavior as MCL).
+   CM strips "/" from tag classes: #mcl/list-card -> cm-tag-mcllist-card
+   (exact class beats a [class*=] substring scan on every keystroke). */
+.cm-s-obsidian .HyperMD-list-line span.cm-tag-mcllist-card {
+	background-color: var(--background-primary) !important;
+	color: var(--text-faint);
+	font-size: 0.9rem;
+}
+
+/* NOTE: "cards-align-top" (added via dataviewjs in one note) is defined by no
+   snippet or theme in this vault - it was already a no-op under MCL, so there
+   is intentionally nothing to implement for it. */

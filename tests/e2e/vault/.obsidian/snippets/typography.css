@@ -1,0 +1,169 @@
+/* typography.css — port of devguyrash-general-tweaks typography sections.
+   Pixel-identical cascade; dead tokens/blocks removed; [alt*=] -> [alt~=]. */
+
+:root {
+	--border-color: rgba(122, 122, 122, 0.2);
+	--border-style: solid;
+	--border-width-medium: 2px;
+	--border-radius-small: 6px;
+	--border-radius-medium: 12px;
+	--font-family-mono: "JetBrainsMono Nerd Font Mono", monospace;
+	--header-text-transform: uppercase;
+	--header-font-variant: small-caps;
+	/* Vertical gap the retired heading ::after spacer inserted (its margin-top).
+     em resolves per-heading font-size at the usage site, exactly as the
+     ::after's inherited font-size did. embeds.css must reuse this token for
+     marker-remapped heading padding-bottom: calc(3px + var(--header-spacer)). */
+	--header-spacer: 0.35em;
+}
+
+/* ===== Headings: centered, uppercase, small-caps (verbatim) ===== */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.HyperMD-header.HyperMD-header-1,
+.HyperMD-header.HyperMD-header-2,
+.HyperMD-header.HyperMD-header-3,
+.HyperMD-header.HyperMD-header-4,
+.HyperMD-header.HyperMD-header-5,
+.HyperMD-header.HyperMD-header-6 {
+	text-align: center;
+	text-transform: var(--header-text-transform);
+	font-variant: var(--header-font-variant);
+	position: relative;
+	margin-top: 1.25rem;
+}
+
+/* ===== Heading spacer — padding/margin variant (replaces the ::after box) =====
+   The retired empty ::after block carried margin: 0.35em auto 0. Its effect
+   depends on whether each heading has a bottom margin-collapse barrier:
+   - barrier present  -> 0.35em of real space between text and the barrier
+   - no barrier       -> the margin escaped and collapsed away (no-op when the
+                         collapse partner margin is >= 0.35em)
+   Each rule below reproduces exactly one verified context. If the geometry
+   assertion fails, delete ALL FOUR rules in this section and enable the
+   FALLBACK block at the end of the file. */
+
+/* Reading/rendered h2-h6. MUST mirror Cyber Glow theme.css:3338's exact
+   selector list ("...h2, h2, ..."), which sets padding-bottom: 3px — identical
+   per-branch specificity + later order means this wins exactly where the theme
+   value wins today (and still loses to app.css .vertical-tab-content h2, as
+   the theme does). 3px is the theme's barrier value, absorbed into the calc. */
+.markdown-preview-view h2,
+h2,
+.markdown-preview-view h3,
+h3,
+.markdown-preview-view h4,
+h4,
+.markdown-preview-view h5,
+h5,
+.markdown-preview-view h6,
+h6 {
+	padding-bottom: calc(3px + var(--header-spacer));
+}
+
+/* Live-preview/source h2-h6 lines: theme sets padding: 15px 0 0 0 !important
+   and border-bottom: 2px solid at equal (0,2,0) specificity — !important +
+   later order required to restore the spacer above the border. */
+.HyperMD-header.HyperMD-header-2,
+.HyperMD-header.HyperMD-header-3,
+.HyperMD-header.HyperMD-header-4,
+.HyperMD-header.HyperMD-header-5,
+.HyperMD-header.HyperMD-header-6 {
+	padding-bottom: var(--header-spacer) !important;
+}
+
+/* H1 line has no bottom border/padding, so the old ::after margin collapsed
+   OUT of the cm-line (verified: contain none, overflow visible). margin-bottom
+   reproduces that exactly; padding would wrongly extend active-line/selection
+   background paint into the gap. */
+.HyperMD-header.HyperMD-header-1 {
+	margin-bottom: var(--header-spacer);
+}
+
+/* App chrome: these h1s carry border-bottom: 2px !important (app.css), so the
+   old ::after spacer was visible above the underline. */
+.vertical-tab-content h1,
+.community-modal-info .markdown-rendered h1 {
+	padding-bottom: var(--header-spacer);
+}
+
+/* Reading-view/bare h1 gets NO rule on purpose: it has no bottom barrier, so
+   the old spacer (0.35 x font-size, 11.9px at the current 34px --h1-size)
+   collapsed into h1's 16px (--p-spacing) margin-bottom — a no-op. Holds while
+   0.35 x h1 font-size <= --p-spacing, i.e. --h1-size <= ~45px. */
+
+/* ===== Horizontal rules ===== */
+hr {
+	margin: 0.625rem 0;
+}
+
+/* ===== Images ===== */
+/* Alt-text alignment markers — word match ([alt~=]); vault alt-texts are
+   space-separated words, so this is a drop-in for the old substring match. */
+img[alt~="center"] {
+	display: block;
+	margin: 0 auto;
+}
+
+img[alt~="left"] {
+	float: left;
+	margin-right: 1rem;
+	margin-bottom: 1rem;
+}
+
+img[alt~="right"] {
+	float: right;
+	margin-left: 1rem;
+	margin-bottom: 1rem;
+}
+
+img {
+	max-width: 100%;
+	border-radius: var(--border-radius-small);
+}
+
+/* ===== Callouts ===== */
+.callout {
+	border: var(--border-width-medium) var(--border-style) var(--border-color);
+	border-radius: var(--border-radius-medium);
+}
+
+/* ===== Task list checkboxes ===== */
+.task-list-item-checkbox {
+	border: var(--border-width-medium) var(--border-style) var(--border-color);
+}
+
+/* ===== Code ===== */
+code {
+	font-family: var(--font-family-mono);
+}
+
+/* =============================================================================
+   FALLBACK (original ::after spacer) — enable if geometry assertion fails.
+   When enabling: DELETE the four rules in the "Heading spacer" section above
+   (they would double-add the gap), then uncomment this block.
+   Changes vs the original source rule: --header-line-margin inlined to its
+   only value (0.35em auto 0); the source's commented-out width/height/
+   background-color lines were dead and are omitted (CSS comments don't nest).
+
+h1::after,
+h2::after,
+h3::after,
+h4::after,
+h5::after,
+h6::after,
+.HyperMD-header.HyperMD-header-1::after,
+.HyperMD-header.HyperMD-header-2::after,
+.HyperMD-header.HyperMD-header-3::after,
+.HyperMD-header.HyperMD-header-4::after,
+.HyperMD-header.HyperMD-header-5::after,
+.HyperMD-header.HyperMD-header-6::after {
+  content: "";
+  display: block;
+  margin: 0.35em auto 0;
+}
+============================================================================= */
