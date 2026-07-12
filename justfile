@@ -27,11 +27,11 @@ check:
 # Autoformat TypeScript/JSON/Markdown and Rust.
 fmt:
     pnpm run format
-    cargo fmt --manifest-path crates/mica-core/Cargo.toml
+    cargo fmt --all
 
-# Run the Rust test suite.
+# Run the Rust test suite (core + CLI).
 test:
-    cargo test --manifest-path crates/mica-core/Cargo.toml
+    cargo test --workspace
 
 # End-to-end tests in a real (sandboxed, downloaded) Obsidian under Xvfb.
 e2e:
@@ -48,7 +48,11 @@ link:
     ln -sfn "$(pwd)" "$HOME/kingdom/.obsidian/plugins/mica"
     @echo "Linked -> $HOME/kingdom/.obsidian/plugins/mica"
 
+# Build the standalone `mica` CLI (target/release/mica).
+cli:
+    cargo build --release -p mica-cli
+
 # Remove build artifacts.
 clean:
     rm -rf main.js main.js.map src/wasm/pkg
-    cargo clean --manifest-path crates/mica-core/Cargo.toml
+    cargo clean

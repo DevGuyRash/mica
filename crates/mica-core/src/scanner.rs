@@ -38,7 +38,10 @@ pub struct BlockSpan {
 impl BlockSpan {
     /// Value of header attribute `key`, if present.
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// The block's stable `id`, if it carries a non-empty one.
@@ -95,19 +98,26 @@ pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
                         attrs,
                     });
                 } else if let Some((fence_char, fence_len)) = parse_any_fence_open(text) {
-                    ctx = Ctx::Foreign { fence_char, fence_len };
+                    ctx = Ctx::Foreign {
+                        fence_char,
+                        fence_len,
+                    };
                 }
             }
-            Ctx::Foreign { fence_char, fence_len } => {
+            Ctx::Foreign {
+                fence_char,
+                fence_len,
+            } => {
                 if is_close_fence(text, *fence_char, *fence_len) {
                     ctx = Ctx::None;
                 }
             }
             Ctx::Target(o) => {
                 if is_close_fence(text, o.fence_char, o.fence_len) {
-                    let o = match std::mem::replace(&mut ctx, Ctx::None) {
-                        Ctx::Target(o) => o,
-                        _ => unreachable!(),
+                    // We are inside the Target arm, so the replace always yields
+                    // Target — the if-let simply avoids a panic path.
+                    let Ctx::Target(o) = std::mem::replace(&mut ctx, Ctx::None) else {
+                        continue;
                     };
                     blocks.push(BlockSpan {
                         start: o.start,
@@ -163,8 +173,11 @@ fn parse_any_fence_open(text: &str) -> Option<(u8, usize)> {
     Some((fence_char, fence_len))
 }
 
+/// `(fence_char, fence_len, attrs)` of a matching opener.
+type OpenFence = (u8, usize, Vec<(String, String)>);
+
 /// If `text` opens a ` ```mica ` fence, return `(fence_char, fence_len, attrs)`.
-fn parse_open_fence(text: &str, tag: &str) -> Option<(u8, usize, Vec<(String, String)>)> {
+fn parse_open_fence(text: &str, tag: &str) -> Option<OpenFence> {
     let indent = leading_spaces(text);
     if indent > 3 {
         return None;
@@ -182,7 +195,9 @@ fn parse_open_fence(text: &str, tag: &str) -> Option<(u8, usize, Vec<(String, St
     if fence_char == b'`' && info.contains('`') {
         return None;
     }
-    let (found, attr_str) = info.split_once(|c: char| c.is_whitespace()).unwrap_or((info, ""));
+    let (found, attr_str) = info
+        .split_once(|c: char| c.is_whitespace())
+        .unwrap_or((info, ""));
     if found != tag {
         return None;
     }
@@ -260,13 +275,21 @@ fn trim_eol(line: &str) -> &str {
 /// (CodeMirror positions) and the id/name hoisted out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockView {
+    /// Offset of the opening fence line (UTF-16).
     pub start: usize,
+    /// One past the closing fence line, or EOF (UTF-16).
     pub end: usize,
+    /// First content offset (UTF-16).
     pub content_start: usize,
+    /// One past the last content offset (UTF-16).
     pub content_end: usize,
+    /// Opening-fence character count.
     pub fence_len: usize,
+    /// Whether the closing fence exists.
     pub closed: bool,
+    /// The `id=` header attribute, when present and non-empty.
     pub id: Option<String>,
+    /// The `name=` header attribute, when present.
     pub name: Option<String>,
 }
 
@@ -304,6 +327,7 @@ pub fn scan_view_impl(src: &str) -> Vec<BlockView> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
 
     #[test]
@@ -324,7 +348,10 @@ mod tests {
         let b = scan_impl(src);
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].fence_len, 4);
-        assert_eq!(&src[b[0].content_start..b[0].content_end], "```js\ncode\n```\n");
+        assert_eq!(
+            &src[b[0].content_start..b[0].content_end],
+            "```js\ncode\n```\n"
+        );
         assert!(b[0].closed);
     }
 

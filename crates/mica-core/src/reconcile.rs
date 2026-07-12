@@ -9,14 +9,18 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A block id occurrence inside a note.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ContentRef {
+    /// Block id found in a note.
     pub block: String,
+    /// Vault-relative note path.
     pub note: String,
 }
 
 /// A block id tracked by a sidecar's ledger.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SidecarRef {
+    /// Block id found in a sidecar ledger.
     pub block: String,
+    /// Vault-relative sidecar path.
     pub sidecar: String,
 }
 
@@ -25,11 +29,26 @@ pub struct SidecarRef {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ReconcileAction {
     /// History exists but no live block carries the id (note/block deleted).
-    OrphanSidecar { block: String, sidecar: String },
+    OrphanSidecar {
+        /// The orphaned block id.
+        block: String,
+        /// The sidecar holding its history.
+        sidecar: String,
+    },
     /// A live block has no stored history yet.
-    OrphanBlock { block: String, note: String },
+    OrphanBlock {
+        /// The unversioned block id.
+        block: String,
+        /// The note carrying it.
+        note: String,
+    },
     /// The same id appears in more than one note (copy-paste).
-    DuplicateBlock { block: String, notes: Vec<String> },
+    DuplicateBlock {
+        /// The duplicated block id.
+        block: String,
+        /// Every note carrying it.
+        notes: Vec<String>,
+    },
 }
 
 /// Classify the content vs sidecar indexes into actions.
@@ -70,13 +89,20 @@ pub fn reconcile_impl(content: &[ContentRef], sidecar: &[SidecarRef]) -> Vec<Rec
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
 
     fn c(b: &str, n: &str) -> ContentRef {
-        ContentRef { block: b.into(), note: n.into() }
+        ContentRef {
+            block: b.into(),
+            note: n.into(),
+        }
     }
     fn s(b: &str, sc: &str) -> SidecarRef {
-        SidecarRef { block: b.into(), sidecar: sc.into() }
+        SidecarRef {
+            block: b.into(),
+            sidecar: sc.into(),
+        }
     }
 
     #[test]
@@ -88,7 +114,10 @@ mod tests {
     fn orphan_block_when_no_history() {
         assert_eq!(
             reconcile_impl(&[c("b", "n.md")], &[]),
-            vec![ReconcileAction::OrphanBlock { block: "b".into(), note: "n.md".into() }]
+            vec![ReconcileAction::OrphanBlock {
+                block: "b".into(),
+                note: "n.md".into()
+            }]
         );
     }
 
@@ -96,7 +125,10 @@ mod tests {
     fn orphan_sidecar_when_block_gone() {
         assert_eq!(
             reconcile_impl(&[], &[s("b", "n.mica")]),
-            vec![ReconcileAction::OrphanSidecar { block: "b".into(), sidecar: "n.mica".into() }]
+            vec![ReconcileAction::OrphanSidecar {
+                block: "b".into(),
+                sidecar: "n.mica".into()
+            }]
         );
     }
 
@@ -104,7 +136,10 @@ mod tests {
     fn duplicate_block_across_notes_sorted() {
         assert_eq!(
             reconcile_impl(&[c("b", "b.md"), c("b", "a.md")], &[s("b", "x.mica")]),
-            vec![ReconcileAction::DuplicateBlock { block: "b".into(), notes: vec!["a.md".into(), "b.md".into()] }]
+            vec![ReconcileAction::DuplicateBlock {
+                block: "b".into(),
+                notes: vec!["a.md".into(), "b.md".into()]
+            }]
         );
     }
 }

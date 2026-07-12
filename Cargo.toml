@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/mica-core", "crates/mica-cli"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "allow" # the CLI prints to stdout by design; core has no stdout
+all = { level = "warn", priority = -1 }
+
+# Speed-first per project goals; wasm-opt (run by wasm-pack) trims size afterward.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

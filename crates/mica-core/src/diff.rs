@@ -9,28 +9,36 @@ use similar::{ChangeTag, TextDiff};
 /// A run within a changed line: `same` text or `emph` (the actual changed span).
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Span {
+    /// `same` or `emph`.
     pub tag: String,
+    /// The run's text.
     pub text: String,
 }
 
 /// One change: an `equal`, `delete`, or `insert`, with intra-line emphasis.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct DiffChange {
+    /// `equal`, `delete`, or `insert`.
     pub tag: String,
+    /// The changed text (one line at line granularity).
     pub value: String,
+    /// Intra-line emphasis runs (empty for `equal` changes).
     pub inline: Vec<Span>,
 }
 
 /// A context-bounded group of changes.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Hunk {
+    /// The hunk's changes, in document order.
     pub changes: Vec<DiffChange>,
 }
 
 /// The result of a pairwise diff.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct DiffResult {
+    /// Context-bounded change groups.
     pub hunks: Vec<Hunk>,
+    /// 0.0–1.0 similarity ratio between the inputs.
     pub similarity: f64,
 }
 
@@ -85,10 +93,14 @@ pub fn make_patch_impl(base: &str, other: &str, context: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
 
     fn tags(d: &DiffResult) -> Vec<String> {
-        d.hunks.iter().flat_map(|h| h.changes.iter().map(|c| c.tag.clone())).collect()
+        d.hunks
+            .iter()
+            .flat_map(|h| h.changes.iter().map(|c| c.tag.clone()))
+            .collect()
     }
 
     #[test]
@@ -105,13 +117,20 @@ mod tests {
     fn identical_inputs_are_all_equal() {
         let d = diff_impl("x\ny\n", "x\ny\n", "line", 3);
         assert_eq!(d.similarity, 1.0);
-        assert!(d.hunks.iter().all(|h| h.changes.iter().all(|c| c.tag == "equal")));
+        assert!(d
+            .hunks
+            .iter()
+            .all(|h| h.changes.iter().all(|c| c.tag == "equal")));
     }
 
     #[test]
     fn inline_emphasis_marks_the_changed_span() {
         let d = diff_impl("hello world\n", "hello there\n", "line", 3);
-        let has_emph = d.hunks.iter().flat_map(|h| &h.changes).any(|c| c.inline.iter().any(|s| s.tag == "emph"));
+        let has_emph = d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.changes)
+            .any(|c| c.inline.iter().any(|s| s.tag == "emph"));
         assert!(has_emph, "changed line should carry emphasized spans");
     }
 

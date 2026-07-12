@@ -20,19 +20,26 @@ pub struct MigratedVersion {
     pub content: String,
 }
 
+/// One converted legacy block and the history extracted from it.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct MigratedBlock {
+    /// The freshly minted block id.
     pub id: String,
+    /// Display name (the first tab's title).
     pub name: Option<String>,
     /// Extracted historical versions, in document order (oldest intent first
     /// is the vault's own ordering; the migrated head is snapshotted last).
     pub versions: Vec<MigratedVersion>,
 }
 
+/// The outcome of migrating one document.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct MigrationResult {
+    /// The converted document (identical to the input when `changed` is false).
     pub doc: String,
+    /// Per-block conversion details.
     pub blocks: Vec<MigratedBlock>,
+    /// Whether anything was converted.
     pub changed: bool,
 }
 
@@ -53,7 +60,11 @@ pub fn migrate_tabs_impl(doc: &str, callout_types: &str) -> MigrationResult {
         .collect();
     let spans = scan_tag_impl(doc, "tabs");
     if spans.is_empty() {
-        return MigrationResult { doc: doc.to_string(), blocks: Vec::new(), changed: false };
+        return MigrationResult {
+            doc: doc.to_string(),
+            blocks: Vec::new(),
+            changed: false,
+        };
     }
     let mut blocks = Vec::new();
     let mut out = String::with_capacity(doc.len() + spans.len() * 48);
@@ -74,7 +85,11 @@ pub fn migrate_tabs_impl(doc: &str, callout_types: &str) -> MigrationResult {
     }
     out.push_str(&doc[cursor..]);
     let changed = !blocks.is_empty();
-    MigrationResult { doc: out, blocks, changed }
+    MigrationResult {
+        doc: out,
+        blocks,
+        changed,
+    }
 }
 
 fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock) {
@@ -101,7 +116,10 @@ fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock
 
     let id = new_id_impl();
     let block_name = tabs.first().map(|(n, _)| n.clone());
-    let versions = tabs.iter().flat_map(|(_, b)| extract_versions(b, allowed_callouts)).collect();
+    let versions = tabs
+        .iter()
+        .flat_map(|(_, b)| extract_versions(b, allowed_callouts))
+        .collect();
 
     // Emit the friendly, closer-free `tab:` form — the obsidian-tabs feel.
     let mut inner = preamble;
@@ -122,7 +140,11 @@ fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock
     let fence = "`".repeat(if run == 0 { 3 } else { run + 1 });
     (
         format!("{fence}mica id={id}\n{inner}{fence}\n"),
-        MigratedBlock { id, name: block_name, versions },
+        MigratedBlock {
+            id,
+            name: block_name,
+            versions,
+        },
     )
 }
 
@@ -185,7 +207,11 @@ fn parse_version_label(title: &str) -> String {
     if let Some(open) = title.rfind("(V") {
         if let Some(len) = title[open + 1..].find(')') {
             let candidate = &title[open + 1..open + 1 + len];
-            if candidate[1..].chars().all(|c| c.is_ascii_digit() || c == '.') && candidate.len() > 1 {
+            if candidate[1..]
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.')
+                && candidate.len() > 1
+            {
                 return candidate.to_string();
             }
         }
@@ -200,12 +226,13 @@ fn parse_version_label(title: &str) -> String {
 /// When the dequoted body is exactly one fenced block, return its inside;
 /// otherwise return the body joined as-is.
 fn strip_wrapping_fence(lines: &[String]) -> String {
-    let significant: Vec<usize> = (0..lines.len()).filter(|&i| !lines[i].trim().is_empty()).collect();
+    let significant: Vec<usize> = (0..lines.len())
+        .filter(|&i| !lines[i].trim().is_empty())
+        .collect();
     if let (Some(&first), Some(&last)) = (significant.first(), significant.last()) {
         let open = lines[first].trim_start();
         let fc = open.as_bytes().first().copied();
-        if (fc == Some(b'`') || fc == Some(b'~')) && first != last {
-            let ch = fc.unwrap();
+        if let (Some(ch @ (b'`' | b'~')), true) = (fc, first != last) {
             let run = open.bytes().take_while(|&b| b == ch).count();
             let close = lines[last].trim_start();
             let close_run = close.bytes().take_while(|&b| b == ch).count();
@@ -234,6 +261,7 @@ fn max_fence_run(content: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
     use crate::scanner::scan_impl;
 
@@ -247,7 +275,10 @@ mod tests {
         assert_eq!(scan_impl(&r.doc).len(), 1);
         assert!(r.doc.contains("tab: A"));
         assert!(r.doc.contains("tab: B"));
-        assert!(!r.doc.contains(":::"), "friendly output uses no colon fences");
+        assert!(
+            !r.doc.contains(":::"),
+            "friendly output uses no colon fences"
+        );
         assert!(r.doc.contains("hello") && r.doc.contains("world"));
         assert!(r.doc.starts_with("before\n"));
         assert!(r.doc.trim_end().ends_with("after"));
@@ -258,7 +289,10 @@ mod tests {
         // Realistic: a 5-backtick tabs block with an inner 3-backtick code sample.
         let doc = "`````tabs\ntab: A\n```js\nx\n```\n`````\n";
         let r = migrate_tabs_impl(doc, "success, bug, todo");
-        assert!(r.doc.contains("````mica"), "mica fence must out-length inner code");
+        assert!(
+            r.doc.contains("````mica"),
+            "mica fence must out-length inner code"
+        );
         assert_eq!(scan_impl(&r.doc).len(), 1);
     }
 
@@ -274,7 +308,11 @@ mod tests {
         let doc = "```tabs\nPREAMBLE KEEP ME\n\ntab: A\nbody\n```\n";
         let r = migrate_tabs_impl(doc, "success, bug, todo");
         assert!(r.changed);
-        assert!(r.doc.contains("PREAMBLE KEEP ME"), "preamble must survive: {}", r.doc);
+        assert!(
+            r.doc.contains("PREAMBLE KEEP ME"),
+            "preamble must survive: {}",
+            r.doc
+        );
         // Preamble sits before the first tab, inside the mica block.
         let pre = r.doc.find("PREAMBLE").unwrap();
         let first_tab = r.doc.find("tab: A").unwrap();
@@ -285,7 +323,11 @@ mod tests {
     fn tab_bodies_are_copied_verbatim_including_blank_runs() {
         let doc = "```tabs\ntab: A\nline\n\n\n%% divider %%\n\ntab: B\nx\n```\n";
         let r = migrate_tabs_impl(doc, "success, bug, todo");
-        assert!(r.doc.contains("line\n\n\n%% divider %%\n\n"), "blank runs preserved: {}", r.doc);
+        assert!(
+            r.doc.contains("line\n\n\n%% divider %%\n\n"),
+            "blank runs preserved: {}",
+            r.doc
+        );
     }
 
     #[test]

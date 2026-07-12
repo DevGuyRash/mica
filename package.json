@@ -15,7 +15,7 @@
 		"lint:fix": "eslint . --fix",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
-		"test:rust": "cargo test --manifest-path crates/mica-core/Cargo.toml",
+		"test:rust": "cargo test --workspace",
 		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:rust"
 	},
 	"keywords": [

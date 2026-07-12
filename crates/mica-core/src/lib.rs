@@ -14,18 +14,26 @@ use wasm_bindgen::prelude::*;
 mod diff;
 mod edit;
 mod migrate;
+pub mod ops;
 mod parser;
 mod reconcile;
 mod scanner;
 mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
+pub use edit::{
+    block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, set_block_attr_impl,
+    BlockEdit,
+};
 pub use migrate::{migrate_tabs_impl, MigratedBlock, MigratedVersion, MigrationResult};
-pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
-pub use edit::{block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, BlockEdit};
+pub use ops::{apply_op_impl, GroupKind, StructOp};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
-pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
-pub use versions::{fold_ledger_impl, BlockState, Event, VersionMeta};
+pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
+pub use scanner::{scan_impl, scan_tag_impl, scan_view_impl, BlockSpan, BlockView};
+pub use versions::{
+    content_signature_impl, fold_ledger_impl, has_content_impl, should_snapshot_impl, BlockState,
+    Event, HeadRef, VersionMeta,
+};
 
 // --- Pure core (unit-tested natively) ------------------------------------
 
@@ -52,16 +60,19 @@ pub fn new_id_impl() -> String {
 
 // --- WASM boundary (thin wrappers) ---------------------------------------
 
+/// Crate version, for a plugin/core version handshake at load time.
 #[wasm_bindgen]
 pub fn mica_version() -> String {
     mica_version_impl()
 }
 
+/// Content address of `text` (`b3:` + 16-hex-char BLAKE3 prefix).
 #[wasm_bindgen]
 pub fn hash_content(text: &str) -> String {
     hash_content_impl(text)
 }
 
+/// Mint a new time-ordered UUIDv7.
 #[wasm_bindgen]
 pub fn new_id() -> String {
     new_id_impl()
@@ -76,19 +87,22 @@ pub fn scan(src: &str) -> Result<JsValue, JsValue> {
 /// Locate blocks with UTF-16 offsets + id/name, for CodeMirror decorations.
 #[wasm_bindgen]
 pub fn scan_view(src: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&scan_view_impl(src)).map_err(|e| JsValue::from_str(&e.to_string()))
+    serde_wasm_bindgen::to_value(&scan_view_impl(src))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Parse one block's content into a `Cst`.
 #[wasm_bindgen]
 pub fn parse_block(content: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&parse_block_impl(content)).map_err(|e| JsValue::from_str(&e.to_string()))
+    serde_wasm_bindgen::to_value(&parse_block_impl(content))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Serialize a `Cst` back to source (byte-exact for unedited trees).
 #[wasm_bindgen]
 pub fn serialize(cst: JsValue) -> Result<String, JsValue> {
-    let cst: Cst = serde_wasm_bindgen::from_value(cst).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let cst: Cst =
+        serde_wasm_bindgen::from_value(cst).map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(serialize_impl(&cst))
 }
 
@@ -123,14 +137,22 @@ pub fn ensure_ids(doc: &str) -> String {
 #[wasm_bindgen]
 pub fn fold_ledger(events: JsValue) -> Result<JsValue, JsValue> {
     use serde::Serialize;
-    let events: Vec<Event> = serde_wasm_bindgen::from_value(events).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let events: Vec<Event> =
+        serde_wasm_bindgen::from_value(events).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-    fold_ledger_impl(&events).serialize(&ser).map_err(|e| JsValue::from_str(&e.to_string()))
+    fold_ledger_impl(&events)
+        .serialize(&ser)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Diff `base` vs `other` (`granularity` = line|word|char) with `context` lines.
 #[wasm_bindgen]
-pub fn diff(base: &str, other: &str, granularity: &str, context: usize) -> Result<JsValue, JsValue> {
+pub fn diff(
+    base: &str,
+    other: &str,
+    granularity: &str,
+    context: usize,
+) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&diff_impl(base, other, granularity, context))
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -144,9 +166,12 @@ pub fn make_patch(base: &str, other: &str, context: usize) -> String {
 /// Classify content vs sidecar block-id indexes into reconciliation actions.
 #[wasm_bindgen]
 pub fn reconcile(content: JsValue, sidecar: JsValue) -> Result<JsValue, JsValue> {
-    let content: Vec<ContentRef> = serde_wasm_bindgen::from_value(content).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let sidecar: Vec<SidecarRef> = serde_wasm_bindgen::from_value(sidecar).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    serde_wasm_bindgen::to_value(&reconcile_impl(&content, &sidecar)).map_err(|e| JsValue::from_str(&e.to_string()))
+    let content: Vec<ContentRef> =
+        serde_wasm_bindgen::from_value(content).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let sidecar: Vec<SidecarRef> =
+        serde_wasm_bindgen::from_value(sidecar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&reconcile_impl(&content, &sidecar))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Convert every legacy ```tabs block in `doc` into a ```mica block.
@@ -154,11 +179,60 @@ pub fn reconcile(content: JsValue, sidecar: JsValue) -> Result<JsValue, JsValue>
 /// version history (empty = every type).
 #[wasm_bindgen]
 pub fn migrate_tabs(doc: &str, callout_types: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&migrate_tabs_impl(doc, callout_types)).map_err(|e| JsValue::from_str(&e.to_string()))
+    serde_wasm_bindgen::to_value(&migrate_tabs_impl(doc, callout_types))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Apply one structural op (JSON, tagged `op`) to a block CST (JSON).
+/// Returns `{ changed: bool, cst: Cst }`; on `changed == false` the tree is
+/// returned unmodified (the op was rejected as a no-op).
+#[wasm_bindgen]
+pub fn apply_op(cst: JsValue, op: JsValue) -> Result<JsValue, JsValue> {
+    #[derive(serde::Serialize)]
+    struct Applied {
+        changed: bool,
+        cst: Cst,
+    }
+    let mut cst: Cst =
+        serde_wasm_bindgen::from_value(cst).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let op: StructOp =
+        serde_wasm_bindgen::from_value(op).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let changed = apply_op_impl(&mut cst, &op);
+    serde_wasm_bindgen::to_value(&Applied { changed, cst })
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// A hash of the block's *content* only (trimmed leaf texts, sorted) — the
+/// key auto-versioning gates on.
+#[wasm_bindgen]
+pub fn content_signature(content: &str) -> String {
+    content_signature_impl(content)
+}
+
+/// Whether a block carries any non-empty prose.
+#[wasm_bindgen]
+pub fn has_content(content: &str) -> bool {
+    has_content_impl(content)
+}
+
+/// Set / replace / remove one fence-header attribute on block `id`.
+/// `value = None` removes the attribute. Returns the new document or null.
+#[wasm_bindgen]
+pub fn set_block_attr(
+    doc: &str,
+    id: &str,
+    key: &str,
+    value: Option<String>,
+) -> Result<JsValue, JsValue> {
+    match set_block_attr_impl(doc, id, key, value.as_deref()) {
+        Some(s) => Ok(JsValue::from_str(&s)),
+        None => Ok(JsValue::NULL),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
 
     #[test]

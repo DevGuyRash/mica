@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Parsed content of one block: an ordered list of top-level nodes.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Cst {
+    /// Top-level nodes in document order.
     pub children: Vec<Node>,
 }
 
@@ -22,6 +23,8 @@ pub struct Cst {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Node {
+    /// A colon-fence directive (`:::tabs`, `:::tab`, `:::grid`, `:::cell`, …)
+    /// or a synthetic friendly-form tabs/tab wrapper.
     Container {
         /// Directive name: `tabs`, `tab`, `grid`, `cell`, …
         name: String,
@@ -31,10 +34,12 @@ pub enum Node {
         colons: usize,
         /// Exact opening line, including its trailing newline.
         open_line: String,
+        /// Child nodes in source order.
         children: Vec<Node>,
         /// Exact closing line (incl. newline), or empty if unterminated.
         close_line: String,
     },
+    /// Opaque content handed verbatim to the markdown renderer.
     Leaf {
         /// Exact source text, including newlines.
         text: String,
@@ -54,8 +59,14 @@ pub fn parse_block_impl(content: &str) -> Cst {
 /// Serialize a [`Cst`] back to source. Concatenates the exact stored strings,
 /// guaranteeing a byte-exact round-trip for unedited trees.
 pub fn serialize_impl(cst: &Cst) -> String {
+    serialize_nodes(&cst.children)
+}
+
+/// Serialize a slice of nodes (used by the ops reducer to check a region's
+/// current text without cloning the nodes).
+pub(crate) fn serialize_nodes(nodes: &[Node]) -> String {
     let mut out = String::new();
-    for node in &cst.children {
+    for node in nodes {
         write_node(node, &mut out);
     }
     out
@@ -95,7 +106,12 @@ enum Stop {
 /// the friendly, closer-free `tab: Title` delimiters (which auto-close at the
 /// next `tab:`, an enclosing `:::`, or end of block) and the explicit `:::`
 /// colon-fence directives used for nesting. Code fences are opaque.
-fn parse_children(lines: &[&str], pos: &mut usize, close_colons: Option<usize>, in_tab_body: bool) -> (Vec<Node>, Stop) {
+fn parse_children(
+    lines: &[&str],
+    pos: &mut usize,
+    close_colons: Option<usize>,
+    in_tab_body: bool,
+) -> (Vec<Node>, Stop) {
     let mut children = Vec::new();
     let mut md = String::new();
 
@@ -133,8 +149,19 @@ fn parse_children(lines: &[&str], pos: &mut usize, close_colons: Option<usize>, 
             let open_line = line.to_string();
             *pos += 1;
             let (kids, stop) = parse_children(lines, pos, Some(colons), false);
-            let close_line = if let Stop::Closed(l) = stop { l } else { String::new() };
-            children.push(Node::Container { name, title, colons, open_line, children: kids, close_line });
+            let close_line = if let Stop::Closed(l) = stop {
+                l
+            } else {
+                String::new()
+            };
+            children.push(Node::Container {
+                name,
+                title,
+                colons,
+                open_line,
+                children: kids,
+                close_line,
+            });
             continue;
         }
 
@@ -151,7 +178,10 @@ fn parse_children(lines: &[&str], pos: &mut usize, close_colons: Option<usize>, 
                     break;
                 }
             }
-            children.push(Node::Leaf { text: code, is_code: true });
+            children.push(Node::Leaf {
+                text: code,
+                is_code: true,
+            });
             continue;
         }
 
@@ -291,10 +321,15 @@ fn is_code_close(text: &str, fence_char: u8, fence_len: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
 
     fn roundtrips(src: &str) {
-        assert_eq!(serialize_impl(&parse_block_impl(src)), src, "round-trip mismatch");
+        assert_eq!(
+            serialize_impl(&parse_block_impl(src)),
+            src,
+            "round-trip mismatch"
+        );
     }
 
     #[test]
@@ -323,12 +358,22 @@ mod tests {
         let cst = parse_block_impl("::::tabs\n:::tab Kernel\nhi\n:::\n::::\n");
         assert_eq!(cst.children.len(), 1);
         match &cst.children[0] {
-            Node::Container { name, colons, children, .. } => {
+            Node::Container {
+                name,
+                colons,
+                children,
+                ..
+            } => {
                 assert_eq!(name, "tabs");
                 assert_eq!(*colons, 4);
                 assert_eq!(children.len(), 1);
                 match &children[0] {
-                    Node::Container { name, title, children, .. } => {
+                    Node::Container {
+                        name,
+                        title,
+                        children,
+                        ..
+                    } => {
                         assert_eq!(name, "tab");
                         assert_eq!(title, "Kernel");
                         assert_eq!(children.len(), 1);
@@ -369,7 +414,10 @@ mod tests {
         roundtrips(src);
         let cst = parse_block_impl(src);
         assert!(matches!(&cst.children[0], Node::Leaf { .. }));
-        assert_eq!(tab_titles(as_container(&cst.children[1], "tabs")), vec!["A"]);
+        assert_eq!(
+            tab_titles(as_container(&cst.children[1], "tabs")),
+            vec!["A"]
+        );
     }
 
     #[test]
@@ -382,7 +430,9 @@ mod tests {
         let outer = tabs
             .iter()
             .find_map(|n| match n {
-                Node::Container { name, children, .. } if name == "tab" => Some(children.as_slice()),
+                Node::Container { name, children, .. } if name == "tab" => {
+                    Some(children.as_slice())
+                }
                 _ => None,
             })
             .expect("outer tab");
@@ -436,7 +486,12 @@ mod tests {
         let tab_b = tabs
             .iter()
             .find_map(|n| match n {
-                Node::Container { name, title, children, .. } if name == "tab" && title == "B" => Some(children.as_slice()),
+                Node::Container {
+                    name,
+                    title,
+                    children,
+                    ..
+                } if name == "tab" && title == "B" => Some(children.as_slice()),
                 _ => None,
             })
             .expect("tab B");
@@ -447,7 +502,9 @@ mod tests {
     // Helpers for the nesting test.
     fn as_container<'a>(node: &'a Node, name: &str) -> &'a [Node] {
         match node {
-            Node::Container { name: n, children, .. } if n == name => children,
+            Node::Container {
+                name: n, children, ..
+            } if n == name => children,
             other => panic!("expected {name} container, got {other:?}"),
         }
     }
@@ -455,7 +512,9 @@ mod tests {
         children
             .iter()
             .find_map(|n| match n {
-                Node::Container { name: cn, children, .. } if cn == name => Some(children.as_slice()),
+                Node::Container {
+                    name: cn, children, ..
+                } if cn == name => Some(children.as_slice()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no {name} child"))
