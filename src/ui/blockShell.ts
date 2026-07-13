@@ -462,17 +462,16 @@ function revealNode(root: HTMLElement, path: number[], kind: string): void {
 function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 	el.querySelector(".mica-appearance")?.remove();
 	const pop = el.createDiv({ cls: "mica-appearance" });
-	const done = (): void => pop.remove();
-	document.addEventListener(
-		"pointerdown",
-		function onOut(ev) {
-			if (!pop.contains(ev.target as Node)) {
-				pop.remove();
-				document.removeEventListener("pointerdown", onOut, true);
-			}
-		},
-		true,
-	);
+	// Every close path releases the document listener — a segment click must
+	// not leave it armed until the next stray pointerdown.
+	const done = (): void => {
+		pop.remove();
+		document.removeEventListener("pointerdown", onOut, true);
+	};
+	function onOut(ev: PointerEvent): void {
+		if (!pop.contains(ev.target as Node)) done();
+	}
+	document.addEventListener("pointerdown", onOut, true);
 
 	pop.createDiv({ cls: "mica-appearance-title", text: "This block's appearance" });
 
@@ -1085,13 +1084,18 @@ function mountColResizers(
 	widths: number[],
 ): void {
 	const strips: HTMLElement[] = [];
+	// The direct cells are fixed for this mount — any structural change
+	// re-renders the whole block — so query once, not per layout pass.
+	const cells = Array.from(grid.querySelectorAll<HTMLElement>(":scope > .mica-cell"));
 	const layout = (): void => {
-		const cells = Array.from(grid.querySelectorAll<HTMLElement>(":scope > .mica-cell"));
+		if (!grid.isConnected) return;
 		const g = grid.getBoundingClientRect();
+		// Roll the rect reads: boundary b shares cells[b] with boundary b+1.
+		let right = cells[0]?.getBoundingClientRect();
 		for (let b = 1; b < cols; b++) {
 			const strip = strips[b - 1];
-			const left = cells[b - 1]?.getBoundingClientRect();
-			const right = cells[b]?.getBoundingClientRect();
+			const left = right;
+			right = cells[b]?.getBoundingClientRect();
 			if (!left || !right || right.left <= left.right - 1) {
 				strip.style.display = "none"; // boundary has no cells yet
 				continue;
@@ -1148,6 +1152,7 @@ function mountColResizers(
 			const up = (e: PointerEvent): void => {
 				window.removeEventListener("pointermove", move, true);
 				window.removeEventListener("pointerup", up, true);
+				window.removeEventListener("pointercancel", up, true);
 				if (e.type !== "pointerup" || Math.abs(e.clientX - startX) < 3) return;
 				widths.splice(0, widths.length, ...lastW);
 				const rounded = lastW.map((x) => Math.round(x * 100) / 100);
@@ -1167,6 +1172,9 @@ function mountColResizers(
 	// Track layout: cells resize as content changes; keep dividers glued.
 	const ro = new ResizeObserver(() => layout());
 	ro.observe(grid);
+	// Every edit rebuilds the block into a fresh element; disconnect with the
+	// component or each repaint stacks a live observer on a detached grid.
+	ctx.component.register(() => ro.disconnect());
 	window.requestAnimationFrame(layout);
 }
 

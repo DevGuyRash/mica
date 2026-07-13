@@ -41,14 +41,25 @@ interface Slot {
 	container: { left: number; top: number; right: number; bottom: number; depth: number };
 }
 
+/** A drop container captured once per drag. Structure (elements, indices,
+ *  lengths) cannot change mid-drag — ops apply only on drop and spring-loading
+ *  merely toggles classes — so only rects are re-read per recompute. */
+interface SlotContainer {
+	el: HTMLElement;
+	parentPath: number[];
+	len: number;
+	horizontal: boolean;
+	depth: number;
+	kids: { el: HTMLElement; idx: number }[];
+}
+
 interface ActiveDrag {
-	kind: DragKind;
-	fromPath: number[];
-	region?: { start: number; end: number };
+	spec: DragSpec;
 	source: HTMLElement;
 	ghost: HTMLElement;
 	indicator: HTMLElement;
-	root: HTMLElement;
+	scroller: HTMLElement | null;
+	containers: SlotContainer[];
 	slots: Slot[];
 	current: Slot | null;
 	offsetX: number;
@@ -120,7 +131,6 @@ function swallowClick(e: MouseEvent): void {
 }
 
 function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (op: StructOp) => void): void {
-	const { kind, fromPath } = spec;
 	const root = item.closest(".mica") as HTMLElement | null;
 	if (!root) return;
 
@@ -143,15 +153,15 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 	};
 	window.addEventListener("keydown", onKey, true);
 
+	const containers = collectContainers(root, spec);
 	active = {
-		kind,
-		fromPath,
-		region: spec.region,
+		spec,
 		source: item,
 		ghost,
 		indicator,
-		root,
-		slots: computeSlots(root, spec),
+		scroller: root.closest(".cm-scroller, .markdown-preview-view") as HTMLElement | null,
+		containers,
+		slots: computeSlots(containers, spec),
 		current: null,
 		offsetX: e.clientX - rect.left,
 		offsetY: e.clientY - rect.top,
@@ -172,6 +182,39 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 }
 
 /**
+ * Capture the drop containers (and their orderable children) for a drag,
+ * excluding the dragged node's own subtree. Queried ONCE per drag: the
+ * auto-scroll loop recomputes slots every frame, and re-walking the DOM there
+ * (querySelectorAll + a closest() per child) is pure waste when only the
+ * geometry moves.
+ */
+function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
+	const { kind, fromPath } = spec;
+	const wanted = kind === "group" || kind === "region" ? "group" : kind;
+	const fromKey = fromPath.join(".");
+	const containers: SlotContainer[] = [];
+	for (const el of Array.from(root.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
+		const parentPath = parsePath(el.dataset.path);
+		const parentKey = parentPath.join(".");
+		// Never offer slots inside the dragged node's own subtree (regions are
+		// leaves — they have no subtree to exclude).
+		if (!spec.region && fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
+		const kids = Array.from(el.querySelectorAll<HTMLElement>(":scope [data-mica-idx]"))
+			.filter((k) => k.closest(`[data-mica-container="${wanted}"]`) === el)
+			.map((k) => ({ el: k, idx: Number(k.dataset.micaIdx ?? "0") }));
+		containers.push({
+			el,
+			parentPath,
+			len: Number(el.dataset.len ?? "0"),
+			horizontal: el.dataset.axis === "x",
+			depth: parentPath.length,
+			kids,
+		});
+	}
+	return containers;
+}
+
+/**
  * Insertion slots for the dragged kind, from live DOM geometry.
  *
  * Slot philosophy (v2): you drop where you POINT. Slots belong to the
@@ -181,9 +224,8 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
  * reorders that column and crossing into another column is an explicit,
  * visible act. Indicators span the full gap they represent.
  */
-function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
+function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 	const { kind, fromPath } = spec;
-	const wanted = kind === "group" || kind === "region" ? "group" : kind;
 	const slots: Slot[] = [];
 	const fromKey = fromPath.join(".");
 	const fromParentKey = fromPath.slice(0, -1).join(".");
@@ -199,24 +241,16 @@ function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
 		return pk === fromParentKey && (index === fromIdx || index === fromIdx + 1);
 	};
 
-	for (const el of Array.from(root.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
-		const parentPath = parsePath(el.dataset.path);
-		const parentKey = parentPath.join(".");
-		// Never offer slots inside the dragged node's own subtree (regions are
-		// leaves — they have no subtree to exclude).
-		if (!spec.region && fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
-		const rect = el.getBoundingClientRect();
+	for (const entry of cached) {
+		const { parentPath, len, kids } = entry;
+		const rect = entry.el.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) continue; // hidden panel
-		const len = Number(el.dataset.len ?? "0");
-		const kids = Array.from(el.querySelectorAll<HTMLElement>(":scope [data-mica-idx]")).filter(
-			(k) => k.closest(`[data-mica-container="${wanted}"]`) === el,
-		);
 		const container = {
 			left: rect.left,
 			top: rect.top,
 			right: rect.right,
 			bottom: rect.bottom,
-			depth: parentPath.length,
+			depth: entry.depth,
 		};
 
 		if (!kids.length) {
@@ -235,13 +269,13 @@ function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
 			continue;
 		}
 
-		if (el.dataset.axis === "x" && kind === "cell") {
+		if (entry.horizontal && kind === "cell") {
 			// GRID: column-band semantics. Cluster cells into columns by x-centre.
 			type K = { el: HTMLElement; idx: number; r: DOMRect };
 			const cells: K[] = kids.map((k) => ({
-				el: k,
-				idx: Number(k.dataset.micaIdx ?? "0"),
-				r: k.getBoundingClientRect(),
+				el: k.el,
+				idx: k.idx,
+				r: k.el.getBoundingClientRect(),
 			}));
 			const columns = new Map<number, K[]>();
 			for (const c of cells) {
@@ -294,11 +328,11 @@ function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
 			continue;
 		}
 
-		const horizontal = el.dataset.axis === "x";
+		const horizontal = entry.horizontal;
 		let prevEdge: number | null = null;
 		for (const kid of kids) {
-			const idx = Number(kid.dataset.micaIdx ?? "0");
-			const r = kid.getBoundingClientRect();
+			const idx = kid.idx;
+			const r = kid.el.getBoundingClientRect();
 			if (horizontal) {
 				// Centre the line in the gap between siblings, so it reads as
 				// "between A and B" — never as pointing at either one.
@@ -333,7 +367,7 @@ function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
 		}
 		// Append slot after the last child.
 		const last = kids[kids.length - 1];
-		const r = last.getBoundingClientRect();
+		const r = last.el.getBoundingClientRect();
 		slots.push(
 			horizontal
 				? {
@@ -376,19 +410,22 @@ function dragMove(e: PointerEvent): void {
 
 	// You drop where you point: only slots of containers the pointer is inside
 	// (12px of forgiveness), and when containers nest, the DEEPEST one wins.
+	// One pass: a deeper hit resets the running best (this fires per
+	// pointermove — no throwaway candidate arrays).
 	const M = 12;
-	const inside = d.slots.filter(
-		(s) =>
-			e.clientX >= s.container.left - M &&
-			e.clientX <= s.container.right + M &&
-			e.clientY >= s.container.top - M &&
-			e.clientY <= s.container.bottom + M,
-	);
-	const maxDepth = inside.reduce((m, s) => Math.max(m, s.container.depth), -1);
-	const candidates = inside.filter((s) => s.container.depth === maxDepth);
 	let best: Slot | null = null;
 	let bestDist = Number.POSITIVE_INFINITY;
-	for (const s of candidates) {
+	let bestDepth = -1;
+	for (const s of d.slots) {
+		const c = s.container;
+		if (e.clientX < c.left - M || e.clientX > c.right + M || e.clientY < c.top - M || e.clientY > c.bottom + M)
+			continue;
+		if (c.depth < bestDepth) continue;
+		if (c.depth > bestDepth) {
+			bestDepth = c.depth;
+			best = null;
+			bestDist = Number.POSITIVE_INFINITY;
+		}
 		const dist = Math.hypot(e.clientX - s.cx, e.clientY - s.cy);
 		if (dist < bestDist) {
 			best = s;
@@ -427,7 +464,7 @@ function springLoad(e: PointerEvent): void {
 		if (!active || active.springEl !== chip) return;
 		chip.click();
 		// The panel switch re-lays-out the block — recompute geometry.
-		active.slots = computeSlots(active.root, { kind: active.kind, fromPath: active.fromPath, region: active.region });
+		active.slots = computeSlots(active.containers, active.spec);
 	}, 450);
 }
 
@@ -435,7 +472,7 @@ function springLoad(e: PointerEvent): void {
 function autoScroll(e: PointerEvent): void {
 	const d = active;
 	if (!d) return;
-	const scroller = d.root.closest(".cm-scroller, .markdown-preview-view") as HTMLElement | null;
+	const scroller = d.scroller;
 	if (!scroller) return;
 	const margin = 48;
 	const speed = (edgeDist: number): number => Math.ceil(((margin - edgeDist) / margin) * 14);
@@ -447,8 +484,10 @@ function autoScroll(e: PointerEvent): void {
 	if (dy !== 0) {
 		const step = (): void => {
 			if (!active) return;
+			const before = scroller.scrollTop;
 			scroller.scrollTop += dy;
-			active.slots = computeSlots(active.root, { kind: active.kind, fromPath: active.fromPath, region: active.region });
+			// Pinned at an edge: nothing moved, so the slots are already right.
+			if (scroller.scrollTop !== before) active.slots = computeSlots(active.containers, active.spec);
 			active.scrollRaf = window.requestAnimationFrame(step);
 		};
 		d.scrollRaf = window.requestAnimationFrame(step);
@@ -464,12 +503,12 @@ function finishDrag(commit: boolean): void {
 	d.cleanup();
 	if (!commit || !d.current) return;
 	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => void }).apply;
-	if (d.region) {
+	if (d.spec.region) {
 		apply?.({
 			op: "moveRegion",
-			path: d.fromPath,
-			start: d.region.start,
-			end: d.region.end,
+			path: d.spec.fromPath,
+			start: d.spec.region.start,
+			end: d.spec.region.end,
 			toParent: d.current.parentPath,
 			toIndex: d.current.index,
 		});
@@ -477,7 +516,7 @@ function finishDrag(commit: boolean): void {
 	}
 	apply?.({
 		op: "moveNode",
-		from: d.fromPath,
+		from: d.spec.fromPath,
 		toParent: d.current.parentPath,
 		toIndex: d.current.index,
 	});

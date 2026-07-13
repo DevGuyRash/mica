@@ -48,7 +48,12 @@ pub fn mica_version_impl() -> String {
 /// A 64-bit prefix keeps fence headers and object filenames short while giving
 /// ample collision resistance for per-note dedup.
 pub fn hash_content_impl(text: &str) -> String {
-    let hex = blake3::hash(text.as_bytes()).to_hex();
+    b3_tag(&blake3::hash(text.as_bytes()))
+}
+
+/// Format a BLAKE3 digest as the `b3:` + 16-hex-char content address.
+pub(crate) fn b3_tag(hash: &blake3::Hash) -> String {
+    let hex = hash.to_hex();
     format!("b3:{}", &hex[..16])
 }
 
@@ -227,6 +232,91 @@ pub fn set_block_attr(
     match set_block_attr_impl(doc, id, key, value.as_deref()) {
         Some(s) => Ok(JsValue::from_str(&s)),
         None => Ok(JsValue::NULL),
+    }
+}
+
+#[cfg(test)]
+mod large_input {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
+    use super::*;
+
+    /// Large synthetic block content: prose, callouts, code fences, friendly
+    /// tabs, and nested directives — shaped like a heavy real note.
+    fn synthetic_content(sections: usize) -> String {
+        let mut s = String::new();
+        for i in 0..sections {
+            s.push_str(&format!("tab: Section {i}\n"));
+            for j in 0..8 {
+                s.push_str(&format!(
+                    "paragraph {i}.{j} with some **markdown** text, emoji \u{1F600} and links\n\n"
+                ));
+            }
+            s.push_str("> [!note] A callout\n> with a body line\n> and another\n\n");
+            s.push_str("```js\nconst x = 1;\nfunction f() { return x; }\n```\n\n");
+            s.push_str(":::grid {cols=2}\n:::cell\ncell text\n:::\n:::cell\nmore\n:::\n:::\n");
+        }
+        s
+    }
+
+    /// Guards the hot paths at realistic scale (~85 KB of block content,
+    /// multi-block doc): byte-exact round-trip, scan/edit consistency, and a
+    /// SaveRegion whose `expected` is the full serialized region.
+    #[test]
+    fn large_doc_hot_paths_stay_consistent() {
+        let content = synthetic_content(60);
+        let mut doc = String::new();
+        for i in 0..4 {
+            doc.push_str("intro prose between blocks\n\n");
+            doc.push_str(&format!("````mica id=blk-{i} name=\"Block {i}\"\n"));
+            doc.push_str(&content);
+            doc.push_str("````\n\n");
+        }
+
+        // Parse/serialize round-trip is byte-exact at scale.
+        let cst = parse_block_impl(&content);
+        assert_eq!(serialize_impl(&cst), content);
+
+        // The scanner finds every block; content slices match the parser input.
+        let blocks = scan_impl(&doc);
+        assert_eq!(blocks.len(), 4);
+        assert!(blocks
+            .iter()
+            .all(|b| doc[b.content_start..b.content_end] == content));
+
+        // UTF-16 views agree with the char-by-char reference at scale.
+        let views = scan_view_impl(&doc);
+        let reference: usize = doc[..blocks[3].content_start]
+            .chars()
+            .map(char::len_utf16)
+            .sum();
+        assert_eq!(views[3].content_start, reference);
+        let edit = block_content_edit_impl(&doc, "blk-3", "x\n");
+        assert_eq!(edit.map(|e| (e.from, e.to)), {
+            let len: usize = content.chars().map(char::len_utf16).sum();
+            Some((reference, reference + len))
+        });
+
+        // SaveRegion accepts a full-region `expected` and applies cleanly.
+        let mut work = cst.clone();
+        let end = work.children.len();
+        let expected = serialize_impl(&cst);
+        assert!(apply_op_impl(
+            &mut work,
+            &StructOp::SaveRegion {
+                path: vec![],
+                start: 0,
+                end,
+                expected,
+                text: "replaced\n".into(),
+            }
+        ));
+        assert_eq!(serialize_impl(&work), "replaced\n");
+
+        // Signature is insensitive to the doc wrapper and stable across calls.
+        assert_eq!(
+            content_signature_impl(&content),
+            content_signature_impl(&content)
+        );
     }
 }
 

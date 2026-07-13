@@ -1,10 +1,10 @@
 import { editorInfoField, editorLivePreviewField, MarkdownRenderChild } from "obsidian";
 import { Prec, StateField } from "@codemirror/state";
-import type { EditorState, Extension } from "@codemirror/state";
+import type { EditorState, Extension, Text, Transaction } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { parseBlock, scanBlocks, scanBlocksView, serializeCst, setBlockAttr, type BlockView } from "../wasm/bridge";
+import { parseBlock, scanBlocksView, serializeCst, setBlockAttr, type BlockView } from "../wasm/bridge";
 import { renderCst, type BlockUi } from "../ui/blockShell";
 import { applyOp, revealFor, type StructOp } from "../cst/ops";
 
@@ -68,10 +68,23 @@ class MicaWidget extends WidgetType {
 	/** Per-block UI state, kept on the plugin so it survives widget rebuilds. */
 	private blockUi(): BlockUi {
 		const key = this.id ?? `@${this.start}`;
-		let ui = this.plugin.micaUi.get(key);
-		if (!ui) {
-			ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
-			this.plugin.micaUi.set(key, ui);
+		const store = this.plugin.micaUi;
+		let ui = store.get(key);
+		if (ui) {
+			// Refresh recency (Map preserves insertion order → cheap LRU).
+			store.delete(key);
+			store.set(key, ui);
+			return ui;
+		}
+		ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
+		store.set(key, ui);
+		// The store is otherwise unbounded and pins draft strings for every
+		// block ever rendered — evict the stalest draft-free entries.
+		if (store.size > 128) {
+			for (const [k, v] of store) {
+				if (store.size <= 128) break;
+				if (k !== key && !v.draft) store.delete(k);
+			}
 		}
 		return ui;
 	}
@@ -138,20 +151,42 @@ class MicaWidget extends WidgetType {
 }
 
 function sameAttrs(a: Record<string, string>, b: Record<string, string>): boolean {
+	if (a === b) return true;
 	const ka = Object.keys(a);
 	const kb = Object.keys(b);
 	return ka.length === kb.length && ka.every((k) => a[k] === b[k]);
 }
 
 // Cache the last scan so pure cursor moves (selection-only transactions) skip
-// the WASM scan; a re-scan happens only when the document text changes.
-let scanCache: { doc: string; blocks: BlockView[]; attrs: Record<string, string>[] } | null = null;
-function scanCached(doc: string): { blocks: BlockView[]; attrs: Record<string, string>[] } {
-	if (scanCache && scanCache.doc === doc) return scanCache;
+// the WASM scan — and, via the Text identity fast path, the O(doc) string
+// round-trip; a re-scan happens only when the document text changes.
+interface ScanCache {
+	/** Text instances known to equal `doc` (split panes share one entry). */
+	texts: WeakSet<Text>;
+	doc: string;
+	blocks: BlockView[];
+	attrs: Record<string, string>[];
+	/** Per-block replace-range end (the closing fence line's end). */
+	tos: number[];
+	/** Per-block content slices — shared instances make widget `eq` O(1). */
+	contents: string[];
+}
+let scanCache: ScanCache | null = null;
+function scanCached(state: EditorState): ScanCache {
+	if (scanCache?.texts.has(state.doc)) return scanCache;
+	const doc = state.doc.toString();
+	if (scanCache && scanCache.doc === doc) {
+		scanCache.texts.add(state.doc);
+		return scanCache;
+	}
 	const blocks = scanBlocksView(doc);
-	// Byte-offset scan runs once for the header attrs (appearance, name).
-	const attrs = scanBlocks(doc).map((b) => Object.fromEntries(b.attrs));
-	scanCache = { doc, blocks, attrs };
+	// One scan serves geometry AND appearance — BlockView carries the attrs.
+	const attrs = blocks.map((b) => Object.fromEntries(b.attrs));
+	// End at the closing fence line's end, not past its newline: block replace
+	// decorations must cover whole lines exactly.
+	const tos = blocks.map((b) => (doc.charCodeAt(b.end - 1) === 10 ? b.end - 1 : b.end));
+	const contents = blocks.map((b) => doc.slice(b.content_start, b.content_end));
+	scanCache = { texts: new WeakSet([state.doc]), doc, blocks, attrs, tos, contents };
 	return scanCache;
 }
 
@@ -162,28 +197,42 @@ function scanCached(doc: string): { blocks: BlockView[]; attrs: Record<string, s
  */
 function build(plugin: MicaPlugin, state: EditorState): DecorationSet {
 	if (!state.field(editorLivePreviewField, false)) return Decoration.none;
-	const doc = state.doc.toString();
 	const sel = state.selection.main;
 	const ranges = [];
-	const { blocks, attrs } = scanCached(doc);
+	const { blocks, attrs, tos, contents } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
 		const b = blocks[i];
 		if (!b.closed) continue;
-		// End at the closing fence line's end, not past its newline: block replace
-		// decorations must cover whole lines exactly.
-		const to = doc.charCodeAt(b.end - 1) === 10 ? b.end - 1 : b.end;
+		const to = tos[i];
 		// Reveal the raw source while the caret/selection is inside the block
 		// (arrow-keying in, or an explicit click on the revealed source).
 		if (sel.from <= to && sel.to >= b.start) continue;
-		const content = doc.slice(b.content_start, b.content_end);
 		ranges.push(
 			Decoration.replace({
-				widget: new MicaWidget(plugin, b.id, b.start, content, attrs[i] ?? {}),
+				widget: new MicaWidget(plugin, b.id, b.start, contents[i], attrs[i] ?? {}),
 				block: true,
 			}).range(b.start, to),
 		);
 	}
 	return Decoration.set(ranges, true);
+}
+
+/**
+ * True when a selection-only transaction leaves every block's reveal state
+ * (caret inside ⇒ raw source shown) as it was — the current decoration set is
+ * then still exact and a rebuild would only churn identical widgets.
+ */
+function revealUnchanged(tr: Transaction): boolean {
+	const { blocks, tos } = scanCached(tr.state);
+	const a = tr.startState.selection.main;
+	const b = tr.state.selection.main;
+	for (let i = 0; i < blocks.length; i++) {
+		const blk = blocks[i];
+		if (!blk.closed) continue;
+		const to = tos[i];
+		if ((a.from <= to && a.to >= blk.start) !== (b.from <= to && b.to >= blk.start)) return false;
+	}
+	return true;
 }
 
 /** The Live Preview editor extension. Registered via `registerEditorExtension`. */
@@ -195,8 +244,13 @@ export function micaLivePreview(plugin: MicaPlugin): Extension {
 		update(deco, tr) {
 			const modeFlipped =
 				tr.state.field(editorLivePreviewField, false) !== tr.startState.field(editorLivePreviewField, false);
-			if (tr.docChanged || tr.selection || modeFlipped) return build(plugin, tr.state);
-			return deco;
+			if (tr.docChanged || modeFlipped) return build(plugin, tr.state);
+			if (!tr.selection) return deco;
+			// Outside Live Preview `deco` is already Decoration.none (mode flips
+			// always rebuild), which is exactly what build() would return.
+			if (!tr.state.field(editorLivePreviewField, false)) return deco;
+			// Cursor-only transaction: rebuild only if a block's reveal flipped.
+			return revealUnchanged(tr) ? deco : build(plugin, tr.state);
 		},
 		provide: (f) => EditorView.decorations.from(f),
 	});

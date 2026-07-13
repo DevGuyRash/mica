@@ -95,25 +95,26 @@ fn refine_hunk_charwise(hunk: Hunk) -> Hunk {
     let mut out: Vec<DiffChange> = Vec::new();
     let mut dels: Vec<DiffChange> = Vec::new();
     let mut inss: Vec<DiffChange> = Vec::new();
-    let flush = |out: &mut Vec<DiffChange>, dels: &mut Vec<DiffChange>, inss: &mut Vec<DiffChange>| {
-        let d = std::mem::take(dels);
-        let mut i = std::mem::take(inss);
-        let pairs = d.len().min(i.len());
-        let mut d = d;
-        for k in 0..pairs {
-            let (sa, sb) = char_spans(&d[k].value, &i[k].value);
-            d[k].inline = sa;
-            i[k].inline = sb;
-        }
-        for c in d.iter_mut().skip(pairs) {
-            c.inline.clear();
-        }
-        for c in i.iter_mut().skip(pairs) {
-            c.inline.clear();
-        }
-        out.append(&mut d);
-        out.append(&mut i);
-    };
+    let flush =
+        |out: &mut Vec<DiffChange>, dels: &mut Vec<DiffChange>, inss: &mut Vec<DiffChange>| {
+            let d = std::mem::take(dels);
+            let mut i = std::mem::take(inss);
+            let pairs = d.len().min(i.len());
+            let mut d = d;
+            for k in 0..pairs {
+                let (sa, sb) = char_spans(&d[k].value, &i[k].value);
+                d[k].inline = sa;
+                i[k].inline = sb;
+            }
+            for c in d.iter_mut().skip(pairs) {
+                c.inline.clear();
+            }
+            for c in i.iter_mut().skip(pairs) {
+                c.inline.clear();
+            }
+            out.append(&mut d);
+            out.append(&mut i);
+        };
     for c in hunk.changes {
         match c.tag.as_str() {
             "delete" => dels.push(c),

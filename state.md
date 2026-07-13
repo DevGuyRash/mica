@@ -7,7 +7,7 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - **Daily-driver validation of the v0.2 rebuild** in the real vault: live with the
   quick editor / lightbox / pointer DnD (now incl. per-callout region drags) /
   versions timeline / block header for a few sessions. The automated gate
-  (170 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
+  (174 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
   37 e2e tests incl. DnD stress + feature suites in a real Obsidian) is green;
   lived-in feel is the remaining unknown.
 - **Callout-split signature churn (one-time)**: the parser now gives callouts
@@ -37,6 +37,13 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
   a shared grid row) — section/group folds only.
 - **Versions modal**: n-up compare view exists in diffView but has no UI entry
   point; consider a "compare many" affordance if timeline use demands it.
+- **Bundle diet (deferred decisions)**: ~188 KB of main.js is the
+  lang-markdown → lang-html → lezer JS/CSS chain (code-block highlighting in
+  the editors) — dropping nested-language highlighting would tree-shake most
+  of it; `wasm-opt = ["-Oz"]` in mica-core Cargo.toml buys another ~0.9%.
+- **engine.ts `debouncers` map**: one entry per file path ever modified,
+  cleared only on settings change — small, but prune on file rename/delete
+  when touching that area next.
 - **Navigator drag**: the block navigator lists/jumps; dragging rows to reorder
   from the tree is designed but not wired.
 - **Storage efficiency (COW without a delta chain)**: zstd-compress sidecar

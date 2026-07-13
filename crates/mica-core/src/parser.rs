@@ -50,10 +50,48 @@ pub enum Node {
 
 /// Parse block content into a [`Cst`].
 pub fn parse_block_impl(content: &str) -> Cst {
-    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let src = Src::new(content);
     let mut pos = 0;
-    let (children, _stop) = parse_children(&lines, &mut pos, None, false);
+    let (children, _stop) = parse_children(&src, &mut pos, None, false);
     Cst { children }
+}
+
+/// The source text plus a line-start offset table: line `i` spans
+/// `starts[i]..starts[i + 1]` (newline included). Because every leaf — a prose
+/// run, a code fence, a callout — is a CONTIGUOUS span of the source, its text
+/// is built with one exact-size copy of `slice(a, b)` instead of per-line
+/// `push_str` accumulation.
+struct Src<'a> {
+    text: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> Src<'a> {
+    fn new(text: &'a str) -> Self {
+        let mut starts = Vec::with_capacity(text.len() / 32 + 2);
+        starts.push(0);
+        // match_indices uses std's SIMD-accelerated byte search.
+        starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+        if starts.last() != Some(&text.len()) {
+            starts.push(text.len()); // final line without a trailing newline
+        }
+        Self { text, starts }
+    }
+
+    /// Number of lines.
+    fn line_count(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    /// Line `i`, including its newline (when present).
+    fn line(&self, i: usize) -> &'a str {
+        &self.text[self.starts[i]..self.starts[i + 1]]
+    }
+
+    /// The exact source of lines `a..b`.
+    fn slice(&self, a: usize, b: usize) -> &'a str {
+        &self.text[self.starts[a]..self.starts[b]]
+    }
 }
 
 /// Serialize a [`Cst`] back to source. Concatenates the exact stored strings,
@@ -62,14 +100,27 @@ pub fn serialize_impl(cst: &Cst) -> String {
     serialize_nodes(&cst.children)
 }
 
-/// Serialize a slice of nodes (used by the ops reducer to check a region's
-/// current text without cloning the nodes).
+/// Serialize a slice of nodes (also used by the ops reducer). Preallocates the
+/// exact output length (a cheap walk) so the buffer never reallocates.
 pub(crate) fn serialize_nodes(nodes: &[Node]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(nodes.iter().map(node_len).sum());
     for node in nodes {
         write_node(node, &mut out);
     }
     out
+}
+
+/// Exact serialized length of one node, for preallocation.
+fn node_len(node: &Node) -> usize {
+    match node {
+        Node::Leaf { text, .. } => text.len(),
+        Node::Container {
+            open_line,
+            children,
+            close_line,
+            ..
+        } => open_line.len() + children.iter().map(node_len).sum::<usize>() + close_line.len(),
+    }
 }
 
 fn write_node(node: &Node, out: &mut String) {
@@ -107,23 +158,24 @@ enum Stop {
 /// next `tab:`, an enclosing `:::`, or end of block) and the explicit `:::`
 /// colon-fence directives used for nesting. Code fences are opaque.
 fn parse_children(
-    lines: &[&str],
+    src: &Src<'_>,
     pos: &mut usize,
     close_colons: Option<usize>,
     in_tab_body: bool,
 ) -> (Vec<Node>, Stop) {
     let mut children = Vec::new();
-    let mut md = String::new();
+    // First line of the currently open prose run, if any.
+    let mut md_start: Option<usize> = None;
 
-    while *pos < lines.len() {
-        let line = lines[*pos];
+    while *pos < src.line_count() {
+        let line = src.line(*pos);
         let text = trim_eol(line);
 
         // 1. A closing fence for the current (or, in a tab body, an ancestor) container?
         if let Some(cc) = close_colons {
             if let Some(n) = colon_close_len(text) {
                 if n >= cc {
-                    flush_md(&mut children, &mut md);
+                    flush_md(&mut children, src, &mut md_start, *pos);
                     if in_tab_body {
                         return (children, Stop::AncestorClose); // belongs to an ancestor
                     }
@@ -135,20 +187,20 @@ fn parse_children(
 
         // 2. A `tab:` delimiter — the friendly, closer-free tab syntax.
         if tab_delim(text).is_some() {
-            flush_md(&mut children, &mut md);
+            flush_md(&mut children, src, &mut md_start, *pos);
             if in_tab_body {
                 return (children, Stop::NextTab); // end this tab; leave the delimiter
             }
-            children.push(collect_delim_tabs(lines, pos, close_colons));
+            children.push(collect_delim_tabs(src, pos, close_colons));
             continue;
         }
 
         // 3. A colon-fence directive opens a nested container (explicit nesting).
         if let Some((colons, name, title)) = colon_open(text) {
-            flush_md(&mut children, &mut md);
+            flush_md(&mut children, src, &mut md_start, *pos);
             let open_line = line.to_string();
             *pos += 1;
-            let (kids, stop) = parse_children(lines, pos, Some(colons), false);
+            let (kids, stop) = parse_children(src, pos, Some(colons), false);
             let close_line = if let Stop::Closed(l) = stop {
                 l
             } else {
@@ -167,19 +219,18 @@ fn parse_children(
 
         // 4. A code fence opens an opaque code leaf (colons/tabs inside are inert).
         if let Some((fc, fl)) = code_open(text) {
-            flush_md(&mut children, &mut md);
-            let mut code = String::from(line);
+            flush_md(&mut children, src, &mut md_start, *pos);
+            let start = *pos;
             *pos += 1;
-            while *pos < lines.len() {
-                let l = lines[*pos];
-                code.push_str(l);
+            while *pos < src.line_count() {
+                let l = src.line(*pos);
                 *pos += 1;
                 if is_code_close(trim_eol(l), fc, fl) {
                     break;
                 }
             }
             children.push(Node::Leaf {
-                text: code,
+                text: src.slice(start, *pos).to_string(),
                 is_code: true,
             });
             continue;
@@ -190,30 +241,31 @@ fn parse_children(
         //    Quoted continuations stay inside; a NEW top-level callout header
         //    or any unquoted line ends it.
         if callout_open(text) {
-            flush_md(&mut children, &mut md);
-            let mut callout = String::from(line);
+            flush_md(&mut children, src, &mut md_start, *pos);
+            let start = *pos;
             *pos += 1;
-            while *pos < lines.len() {
-                let t = trim_eol(lines[*pos]);
+            while *pos < src.line_count() {
+                let t = trim_eol(src.line(*pos));
                 if !quoted_line(t) || callout_open(t) {
                     break;
                 }
-                callout.push_str(lines[*pos]);
                 *pos += 1;
             }
             children.push(Node::Leaf {
-                text: callout,
+                text: src.slice(start, *pos).to_string(),
                 is_code: false,
             });
             continue;
         }
 
-        // 6. Ordinary markdown content.
-        md.push_str(line);
+        // 6. Ordinary markdown content — extend the open prose run.
+        if md_start.is_none() {
+            md_start = Some(*pos);
+        }
         *pos += 1;
     }
 
-    flush_md(&mut children, &mut md);
+    flush_md(&mut children, src, &mut md_start, src.line_count());
     (children, Stop::Eof)
 }
 
@@ -222,18 +274,19 @@ fn parse_children(
 /// closer, or at end of block — no closing fence required. The `tabs` group
 /// and each `tab` are synthetic (empty open/close lines), so serialization
 /// reproduces exactly the original `tab:` lines and bodies.
-fn collect_delim_tabs(lines: &[&str], pos: &mut usize, close_colons: Option<usize>) -> Node {
+fn collect_delim_tabs(src: &Src<'_>, pos: &mut usize, close_colons: Option<usize>) -> Node {
     let mut tabs = Vec::new();
-    while *pos < lines.len() {
-        let Some(name) = tab_delim(trim_eol(lines[*pos])) else {
+    while *pos < src.line_count() {
+        let line = src.line(*pos);
+        let Some(name) = tab_delim(trim_eol(line)) else {
             break;
         };
-        let open_line = lines[*pos].to_string();
+        let open_line = line.to_string();
         *pos += 1;
-        let (body, stop) = parse_children(lines, pos, close_colons, true);
+        let (body, stop) = parse_children(src, pos, close_colons, true);
         tabs.push(Node::Container {
             name: "tab".to_string(),
-            title: name,
+            title: name.to_string(),
             colons: 0,
             open_line,
             children: body,
@@ -254,16 +307,20 @@ fn collect_delim_tabs(lines: &[&str], pos: &mut usize, close_colons: Option<usiz
 }
 
 /// `tab: Title` at column 0 → `Title` — the friendly, closer-free delimiter.
-fn tab_delim(text: &str) -> Option<String> {
-    Some(text.strip_prefix("tab:")?.trim().to_string())
+/// Borrows so a "is this a delimiter?" probe allocates nothing.
+fn tab_delim(text: &str) -> Option<&str> {
+    Some(text.strip_prefix("tab:")?.trim())
 }
 
-fn flush_md(children: &mut Vec<Node>, md: &mut String) {
-    if !md.is_empty() {
-        children.push(Node::Leaf {
-            text: std::mem::take(md),
-            is_code: false,
-        });
+/// Close the open prose run (lines `md_start..end`) into one leaf.
+fn flush_md(children: &mut Vec<Node>, src: &Src<'_>, md_start: &mut Option<usize>, end: usize) {
+    if let Some(start) = md_start.take() {
+        if end > start {
+            children.push(Node::Leaf {
+                text: src.slice(start, end).to_string(),
+                is_code: false,
+            });
+        }
     }
 }
 
@@ -373,6 +430,13 @@ mod tests {
     #[test]
     fn roundtrip_markdown_only() {
         roundtrips("just some **markdown**\n\nwith a blank line\n");
+    }
+
+    #[test]
+    fn roundtrip_empty_and_crlf() {
+        roundtrips("");
+        roundtrips("tab: A\r\nbody line\r\n\r\ntab: B\r\nmore\r\n");
+        roundtrips(":::tabs\r\n:::tab X\r\nhi\r\n:::\r\n:::\r\n");
     }
 
     #[test]
@@ -588,7 +652,10 @@ mod tests {
                 _ => "",
             })
             .collect();
-        assert_eq!(texts, vec!["intro\n\n", "> [!note] Hi\n> body\n", "\nafter\n"]);
+        assert_eq!(
+            texts,
+            vec!["intro\n\n", "> [!note] Hi\n> body\n", "\nafter\n"]
+        );
         assert_eq!(
             serialize_impl(&cst),
             "intro\n\n> [!note] Hi\n> body\n\nafter\n"

@@ -19,7 +19,7 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 		// live on the fence header line, recovered via the section info (read
 		// fresh — never cached).
 		const info = ctx.getSectionInfo(el);
-		const header = info?.text.split("\n")[info.lineStart] ?? "";
+		const header = info ? lineAt(info.text, info.lineStart) : "";
 		const id = header.match(/\bid=([^\s`"]+)/)?.[1];
 		const attrs: Record<string, string> = {};
 		for (const m of header.matchAll(/(\w[\w-]*)=(?:"([^"]*)"|(\S+))/g)) {
@@ -63,4 +63,20 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 			});
 		}
 	});
+}
+
+/**
+ * The `line`-th line of `text` (0-based; "" past the end). `section.text` is
+ * the WHOLE note and this runs once per block, so splitting the full note
+ * into a line array each time is O(note × blocks) allocation for one line.
+ */
+function lineAt(text: string, line: number): string {
+	let pos = 0;
+	for (let i = 0; i < line; i++) {
+		const nl = text.indexOf("\n", pos);
+		if (nl < 0) return "";
+		pos = nl + 1;
+	}
+	const end = text.indexOf("\n", pos);
+	return end < 0 ? text.slice(pos) : text.slice(pos, end);
 }

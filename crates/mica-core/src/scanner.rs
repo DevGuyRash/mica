@@ -89,19 +89,25 @@ pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
 
         match &ctx {
             Ctx::None => {
-                if let Some((fence_char, fence_len, attrs)) = parse_open_fence(text, tag) {
-                    ctx = Ctx::Target(Open {
-                        start: line_start,
-                        fence_char,
-                        fence_len,
-                        content_start: offset,
-                        attrs,
-                    });
-                } else if let Some((fence_char, fence_len)) = parse_any_fence_open(text) {
-                    ctx = Ctx::Foreign {
-                        fence_char,
-                        fence_len,
-                    };
+                if let Some((fence_char, fence_len, info)) = fence_open(text) {
+                    let info = info.trim();
+                    let (found, attr_str) = info
+                        .split_once(|c: char| c.is_whitespace())
+                        .unwrap_or((info, ""));
+                    if found == tag {
+                        ctx = Ctx::Target(Open {
+                            start: line_start,
+                            fence_char,
+                            fence_len,
+                            content_start: offset,
+                            attrs: parse_attrs(attr_str.trim()),
+                        });
+                    } else {
+                        ctx = Ctx::Foreign {
+                            fence_char,
+                            fence_len,
+                        };
+                    }
                 }
             }
             Ctx::Foreign {
@@ -150,10 +156,11 @@ pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
     blocks
 }
 
-/// Any fenced-code opener (regardless of info string): a run of >= 3 backticks
-/// or tildes at <= 3 spaces of indent. Backtick fences may not carry a backtick
-/// in the info string.
-fn parse_any_fence_open(text: &str) -> Option<(u8, usize)> {
+/// Any fenced-code opener: a run of >= 3 backticks or tildes at <= 3 spaces of
+/// indent → `(fence_char, fence_len, info string)`. Backtick fences may not
+/// carry a backtick in the info string (CommonMark) — such lines are not
+/// fences at all. One classification serves both target and foreign fences.
+fn fence_open(text: &str) -> Option<(u8, usize, &str)> {
     let indent = leading_spaces(text);
     if indent > 3 {
         return None;
@@ -167,41 +174,11 @@ fn parse_any_fence_open(text: &str) -> Option<(u8, usize)> {
     if fence_len < 3 {
         return None;
     }
-    if fence_char == b'`' && rest[fence_len..].contains('`') {
-        return None;
-    }
-    Some((fence_char, fence_len))
-}
-
-/// `(fence_char, fence_len, attrs)` of a matching opener.
-type OpenFence = (u8, usize, Vec<(String, String)>);
-
-/// If `text` opens a ` ```mica ` fence, return `(fence_char, fence_len, attrs)`.
-fn parse_open_fence(text: &str, tag: &str) -> Option<OpenFence> {
-    let indent = leading_spaces(text);
-    if indent > 3 {
-        return None;
-    }
-    let rest = &text[indent..];
-    let fence_char = rest.as_bytes().first().copied()?;
-    if fence_char != b'`' && fence_char != b'~' {
-        return None;
-    }
-    let fence_len = rest.bytes().take_while(|&b| b == fence_char).count();
-    if fence_len < 3 {
-        return None;
-    }
-    let info = rest[fence_len..].trim();
+    let info = &rest[fence_len..];
     if fence_char == b'`' && info.contains('`') {
         return None;
     }
-    let (found, attr_str) = info
-        .split_once(|c: char| c.is_whitespace())
-        .unwrap_or((info, ""));
-    if found != tag {
-        return None;
-    }
-    Some((fence_char, fence_len, parse_attrs(attr_str.trim())))
+    Some((fence_char, fence_len, info))
 }
 
 /// Parse a header attribute list: `key=value`, `key="quoted value"`, or a bare
@@ -291,6 +268,8 @@ pub struct BlockView {
     pub id: Option<String>,
     /// The `name=` header attribute, when present.
     pub name: Option<String>,
+    /// All fence-header attributes, in header order.
+    pub attrs: Vec<(String, String)>,
 }
 
 /// Scan for blocks with UTF-16 offsets, ready for CodeMirror decorations.
@@ -320,6 +299,7 @@ pub fn scan_view_impl(src: &str) -> Vec<BlockView> {
                 closed: b.closed,
                 id: b.id().map(str::to_string),
                 name: b.get("name").map(str::to_string),
+                attrs: b.attrs,
             }
         })
         .collect()
@@ -329,6 +309,27 @@ pub fn scan_view_impl(src: &str) -> Vec<BlockView> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
+
+    #[test]
+    fn scan_view_carries_header_attrs() {
+        // One scan serves the live preview's geometry AND appearance needs —
+        // requiring a second scan for attrs doubled the hottest editor path.
+        let v = scan_view_impl(
+            "```mica id=x accent=#f00 wrap=off
+content
+```
+",
+        );
+        assert_eq!(v.len(), 1);
+        assert_eq!(
+            v[0].attrs,
+            vec![
+                ("id".to_string(), "x".to_string()),
+                ("accent".to_string(), "#f00".to_string()),
+                ("wrap".to_string(), "off".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn finds_a_simple_block() {

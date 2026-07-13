@@ -106,7 +106,18 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 			more.style.display = hidden.length ? "" : "none";
 		});
 	};
-	const ro = new ResizeObserver(relayout);
+	// Editors open and close constantly, and nothing ever tears a toolbar down
+	// explicitly — so the observer must release itself. Removing the bar from
+	// the DOM collapses its box, which fires one final observation; seeing the
+	// bar disconnected, we disconnect, so the observer never pins the toolbar
+	// subtree (or the EditorView its closures reach) after the host is gone.
+	const ro = new ResizeObserver(() => {
+		if (!bar.isConnected) {
+			ro.disconnect();
+			return;
+		}
+		relayout();
+	});
 	ro.observe(bar);
 	relayout();
 }
@@ -210,6 +221,9 @@ function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item:
 
 /** A dismissable popover anchored inside the toolbar. */
 function openPopover(bar: HTMLElement, build: (panel: HTMLElement, close: () => void) => void): void {
+	// A hover timer can fire after its toolbar was destroyed; never build a
+	// panel (and register a document listener) on a disconnected bar.
+	if (!bar.isConnected) return;
 	bar.querySelector(".mica-popover")?.remove();
 	const panel = bar.createDiv({ cls: "mica-popover" });
 	const close = (): void => {

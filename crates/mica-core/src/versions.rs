@@ -3,7 +3,7 @@
 //! everything here is a deterministic, idempotent function of the event list.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// One ledger event.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -81,17 +81,22 @@ pub struct BlockState {
 /// Events are folded in (ts, eid) order — NOT file order — so a line-union
 /// merge from Obsidian Sync / git folds to the same state on every device.
 pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
-    let mut events: Vec<Event> = events.to_vec();
-    events.sort_by(|a, b| {
-        let key = |e: &Event| match e {
+    /// Fold order key, by reference — sorting must not clone event strings.
+    fn key(e: &Event) -> (u64, &str) {
+        match e {
             Event::AddVersion { ts, eid, .. }
             | Event::SetHead { ts, eid, .. }
-            | Event::Label { ts, eid, .. } => (*ts, eid.clone()),
-        };
-        key(a).cmp(&key(b))
-    });
-    let mut state: BTreeMap<String, BlockState> = BTreeMap::new();
-    for e in &events {
+            | Event::Label { ts, eid, .. } => (*ts, eid.as_str()),
+        }
+    }
+    let mut ordered: Vec<&Event> = events.iter().collect();
+    ordered.sort_by(|a, b| key(a).cmp(&key(b)));
+    // Working state under borrowed ids; `slot` maps (block, hash) to its
+    // position in that block's `versions`, so dedup and labeling are O(1)
+    // per event instead of a scan of the block's whole history.
+    let mut state: HashMap<&str, BlockState> = HashMap::new();
+    let mut slot: HashMap<(&str, &str), usize> = HashMap::new();
+    for e in ordered {
         match e {
             Event::AddVersion {
                 block,
@@ -100,8 +105,9 @@ pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
                 label,
                 ..
             } => {
-                let bs = state.entry(block.clone()).or_default();
-                if !bs.versions.iter().any(|v| &v.hash == hash) {
+                let bs = state.entry(block).or_default();
+                if !slot.contains_key(&(block.as_str(), hash.as_str())) {
+                    slot.insert((block, hash), bs.versions.len());
                     bs.versions.push(VersionMeta {
                         hash: hash.clone(),
                         ts: *ts,
@@ -110,19 +116,24 @@ pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
                 }
             }
             Event::SetHead { block, hash, .. } => {
-                state.entry(block.clone()).or_default().head = Some(hash.clone());
+                state.entry(block).or_default().head = Some(hash.clone());
             }
             Event::Label {
                 block, hash, label, ..
             } => {
-                let bs = state.entry(block.clone()).or_default();
-                if let Some(v) = bs.versions.iter_mut().find(|v| &v.hash == hash) {
+                // entry() (not get_mut) so a label for an unknown block still
+                // creates its empty state, exactly as the fold always has.
+                let bs = state.entry(block).or_default();
+                if let Some(v) = slot
+                    .get(&(block.as_str(), hash.as_str()))
+                    .and_then(|&i| bs.versions.get_mut(i))
+                {
                     v.label = label.clone();
                 }
             }
         }
     }
-    state
+    state.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 /// Concatenated, trimmed, sorted leaf prose of block `content` — the identity
@@ -146,28 +157,44 @@ pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
 /// assert_eq!(a, b, "renames don't change the signature");
 /// ```
 pub fn content_signature_impl(content: &str) -> String {
+    let cst = crate::parser::parse_block_impl(content);
     let mut texts = Vec::new();
-    collect_leaf_text(
-        &crate::parser::parse_block_impl(content).children,
-        &mut texts,
-    );
+    collect_leaf_text(&cst.children, &mut texts);
     texts.sort_unstable();
-    crate::hash_content_impl(&texts.join(" "))
+    // Stream the exact bytes of `texts.join(" ")` into the hasher — same
+    // digest as hashing the joined string, without materializing it.
+    let mut hasher = blake3::Hasher::new();
+    for (i, t) in texts.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b" ");
+        }
+        hasher.update(t.as_bytes());
+    }
+    crate::b3_tag(&hasher.finalize())
 }
 
-/// Depth-first trimmed non-empty leaf texts (code leaves included — code IS content).
-fn collect_leaf_text(nodes: &[crate::parser::Node], out: &mut Vec<String>) {
+/// Depth-first trimmed non-empty leaf texts (code leaves included — code IS
+/// content). Borrows from the CST — no per-leaf copies.
+fn collect_leaf_text<'a>(nodes: &'a [crate::parser::Node], out: &mut Vec<&'a str>) {
     for n in nodes {
         match n {
             crate::parser::Node::Leaf { text, .. } => {
                 let t = text.trim();
                 if !t.is_empty() {
-                    out.push(t.to_string());
+                    out.push(t);
                 }
             }
             crate::parser::Node::Container { children, .. } => collect_leaf_text(children, out),
         }
     }
+}
+
+/// Whether any leaf under `nodes` carries non-whitespace text (early-out).
+fn has_leaf_text(nodes: &[crate::parser::Node]) -> bool {
+    nodes.iter().any(|n| match n {
+        crate::parser::Node::Leaf { text, .. } => !text.trim().is_empty(),
+        crate::parser::Node::Container { children, .. } => has_leaf_text(children),
+    })
 }
 
 /// Whether a block has any non-empty prose (used to skip versioning empty scaffolds).
@@ -189,12 +216,7 @@ fn collect_leaf_text(nodes: &[crate::parser::Node], out: &mut Vec<String>) {
 /// assert!(mica_core::has_content_impl("tab: A\nhi\n"));
 /// ```
 pub fn has_content_impl(content: &str) -> bool {
-    let mut texts = Vec::new();
-    collect_leaf_text(
-        &crate::parser::parse_block_impl(content).children,
-        &mut texts,
-    );
-    !texts.is_empty()
+    has_leaf_text(&crate::parser::parse_block_impl(content).children)
 }
 
 /// The stored head a snapshot decision compares against.
@@ -379,6 +401,17 @@ mod tests {
         let st = fold_ledger_impl(&ev);
         assert_eq!(st["b"].versions.len(), 1);
         assert_eq!(st["b"].versions[0].label, None);
+    }
+
+    #[test]
+    fn signature_value_is_pinned() {
+        // The signature is persisted in sidecars and gates versioning — its
+        // exact VALUE must never drift across refactors.
+        assert_eq!(
+            content_signature_impl("tab: A\nhello\n\n```js\nx\n```\n> [!note] Hi\n> body\n"),
+            "b3:175ea6573a0d78c4"
+        );
+        assert_eq!(content_signature_impl(""), crate::hash_content_impl(""));
     }
 
     #[test]

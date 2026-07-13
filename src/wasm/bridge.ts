@@ -64,6 +64,13 @@ export async function initCore(): Promise<void> {
 	if (ready) return;
 	await init({ module_or_path: wasmBinary });
 	ready = true;
+	// After instantiation the inlined bytes are dead weight (the engine keeps
+	// its own compiled module), yet the bundle's module-scope binding would pin
+	// all ~450 KB for the session. Detach the buffer to release it now, where
+	// supported; nothing reads `wasmBinary` again once `ready` is set, and on
+	// an init failure we never detach, so a retry still has the bytes.
+	const buf = wasmBinary.buffer as { transfer?: (newByteLength?: number) => ArrayBufferLike };
+	if (typeof buf.transfer === "function") buf.transfer(0);
 }
 
 export function coreVersion(): string {
@@ -119,11 +126,24 @@ export interface BlockView {
 	closed: boolean;
 	id: string | null;
 	name: string | null;
+	/** All fence-header attributes, in header order. */
+	attrs: [string, string][];
 }
+
+// scan_view is a pure function of the document, and independent subsystems
+// (Live Preview, widget ops, the version engine, the versions modal, the
+// public API) re-scan the same text within one interaction. A single
+// latest-doc slot dedupes those WASM round-trips while retaining at most one
+// document string — usually the editor's own live copy, so ~zero extra memory.
+// Hits alias the same array: callers treat scan results as immutable.
+let lastScan: { doc: string; blocks: BlockView[] } | null = null;
 
 /** Locate all ` ```mica ` blocks with CodeMirror (UTF-16) offsets. */
 export function scanBlocksView(src: string): BlockView[] {
-	return scan_view(src) as BlockView[];
+	if (lastScan && lastScan.doc === src) return lastScan.blocks;
+	const blocks = scan_view(src) as BlockView[];
+	lastScan = { doc: src, blocks };
+	return blocks;
 }
 
 /** A position-mapped edit (UTF-16 offsets) — mirrors Rust `BlockEdit`. */

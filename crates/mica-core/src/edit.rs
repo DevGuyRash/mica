@@ -39,9 +39,11 @@ pub fn replace_block_content_impl(doc: &str, id: &str, new_content: &str) -> Opt
 /// The CodeMirror change (UTF-16 offsets) that replaces block `id`'s content.
 pub fn block_content_edit_impl(doc: &str, id: &str, new_content: &str) -> Option<BlockEdit> {
     let b = scan_impl(doc).into_iter().find(|b| b.id() == Some(id))?;
+    // `to` continues from `from` so the prefix is only walked once.
+    let from = utf16_len(&doc[..b.content_start]);
     Some(BlockEdit {
-        from: utf16_len(&doc[..b.content_start]),
-        to: utf16_len(&doc[..b.content_end]),
+        from,
+        to: from + utf16_len(&doc[b.content_start..b.content_end]),
         insert: new_content.to_string(),
     })
 }

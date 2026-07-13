@@ -217,8 +217,7 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             if *end > children.len() || start > end {
                 return false;
             }
-            let run = crate::parser::serialize_nodes(&children[*start..*end]);
-            if &run != expected {
+            if !region_matches(&children[*start..*end], expected) {
                 return false; // structure changed underneath the editor — abort
             }
             // Terminate the replacement's last line so serializing INSIDE a
@@ -341,7 +340,9 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             *open_line = format!("{c}grid {{{attrs}}}\n");
             true
         }
-        StructOp::SetGroupAttr { path, key, value } => set_group_attr(cst, path, key, value.as_deref()),
+        StructOp::SetGroupAttr { path, key, value } => {
+            set_group_attr(cst, path, key, value.as_deref())
+        }
         StructOp::InsertGroup { path, at, kind } => {
             let Some(children) = children_at_mut(cst, path) else {
                 return false;
@@ -554,8 +555,10 @@ fn set_group_attr(cst: &mut Cst, path: &[usize], key: &str, value: Option<&str>)
     let attrs = set_attr_token(&attrs, key, value);
     *title = format!("{{{attrs}}}");
     let c = ":".repeat((*colons).max(3));
-    *open_line = format!("{c}{name} {{{attrs}}}
-");
+    *open_line = format!(
+        "{c}{name} {{{attrs}}}
+"
+    );
     true
 }
 
@@ -598,13 +601,47 @@ fn set_tab_title(tab: &mut Node, full_title: &str) {
     }
 }
 
+/// Whether `nodes`' serialization equals `expected` byte-for-byte, WITHOUT
+/// building the string: each stored segment is matched against the front of
+/// `expected`, failing fast on the first divergence.
+fn region_matches(nodes: &[Node], expected: &str) -> bool {
+    /// Strip `seg` off the front of `rest`; `false` on mismatch.
+    fn eat(rest: &mut &str, seg: &str) -> bool {
+        match rest.strip_prefix(seg) {
+            Some(r) => {
+                *rest = r;
+                true
+            }
+            None => false,
+        }
+    }
+    fn eat_node(rest: &mut &str, node: &Node) -> bool {
+        match node {
+            Node::Leaf { text, .. } => eat(rest, text),
+            Node::Container {
+                open_line,
+                children,
+                close_line,
+                ..
+            } => {
+                eat(rest, open_line)
+                    && children.iter().all(|c| eat_node(rest, c))
+                    && eat(rest, close_line)
+            }
+        }
+    }
+    let mut rest = expected;
+    nodes.iter().all(|n| eat_node(&mut rest, n)) && rest.is_empty()
+}
+
 /// Terminate `text` with a newline (empty stays empty) so a serialized region
-/// can never glue onto a following `:::` / fence line.
-fn terminated(text: &str) -> String {
+/// can never glue onto a following `:::` / fence line. Borrows when already
+/// terminated — the common editor case.
+fn terminated(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.is_empty() && !text.ends_with('\n') {
-        format!("{text}\n")
+        std::borrow::Cow::Owned(format!("{text}\n"))
     } else {
-        text.to_string()
+        std::borrow::Cow::Borrowed(text)
     }
 }
 
@@ -816,7 +853,11 @@ fn move_region(
         let Some(children) = children_at_mut(cst, path) else {
             return false;
         };
-        if end > children.len() || !children[start..end].iter().all(|n| matches!(n, Node::Leaf { .. })) {
+        if end > children.len()
+            || !children[start..end]
+                .iter()
+                .all(|n| matches!(n, Node::Leaf { .. }))
+        {
             return false;
         }
     }
@@ -830,7 +871,9 @@ fn move_region(
     let Some(src_children) = children_at_mut(cst, path) else {
         return false;
     };
-    let run: Vec<Node> = src_children.splice(start..end, std::iter::empty()).collect();
+    let run: Vec<Node> = src_children
+        .splice(start..end, std::iter::empty())
+        .collect();
 
     // Re-index the destination for the removal.
     let mut at = to_index;
@@ -1230,6 +1273,27 @@ mod tests {
     }
 
     #[test]
+    fn save_region_rejects_expected_prefix_and_superset() {
+        // `expected` must equal the region's serialization EXACTLY — a strict
+        // prefix of it, or a superset carrying extra trailing text, is stale.
+        let src = "tab: A\nalpha\n";
+        for expected in ["alpha", "alpha\nextra\n"] {
+            let (ok, out) = apply(
+                src,
+                StructOp::SaveRegion {
+                    path: vec![0, 0],
+                    start: 0,
+                    end: 1,
+                    expected: expected.into(),
+                    text: "clobber\n".into(),
+                },
+            );
+            assert!(!ok, "expected {expected:?} must be rejected");
+            assert_eq!(out, src);
+        }
+    }
+
+    #[test]
     fn save_region_rejects_stale_expected() {
         let src = "tab: A\nreal\n";
         let (ok, out) = apply(
@@ -1380,11 +1444,14 @@ mod tests {
         assert!(ok);
         assert_eq!(out, ":::grid {cols=2 colw=1.3,0.7}\n:::cell\na\n:::\n:::\n");
         // …and remove it again.
-        let (ok2, out2) = apply(&out, StructOp::SetGroupAttr {
-            path: vec![0],
-            key: "colw".into(),
-            value: None,
-        });
+        let (ok2, out2) = apply(
+            &out,
+            StructOp::SetGroupAttr {
+                path: vec![0],
+                key: "colw".into(),
+                value: None,
+            },
+        );
         assert!(ok2);
         assert_eq!(out2, ":::grid {cols=2}\n:::cell\na\n:::\n:::\n");
     }
@@ -1613,7 +1680,13 @@ mod tests {
         let src = "tab: A\nalpha\n\n> [!note] Hi\ntab: B\nbeta\n";
         let (ok, out) = apply(
             src,
-            StructOp::MoveRegion { path: vec![0, 0], start: 1, end: 2, to_parent: vec![0, 1], to_index: 1 },
+            StructOp::MoveRegion {
+                path: vec![0, 0],
+                start: 1,
+                end: 2,
+                to_parent: vec![0, 1],
+                to_index: 1,
+            },
         );
         assert!(ok);
         assert_eq!(out, "tab: A\nalpha\n\ntab: B\nbeta\n> [!note] Hi\n");
@@ -1625,10 +1698,19 @@ mod tests {
         let src = "intro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\noutro\n";
         let (ok, out) = apply(
             src,
-            StructOp::MoveRegion { path: vec![], start: 2, end: 3, to_parent: vec![], to_index: 1 },
+            StructOp::MoveRegion {
+                path: vec![],
+                start: 2,
+                end: 3,
+                to_parent: vec![],
+                to_index: 1,
+            },
         );
         assert!(ok);
-        assert_eq!(out, "intro\noutro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\n");
+        assert_eq!(
+            out,
+            "intro\noutro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\n"
+        );
     }
 
     #[test]
@@ -1637,7 +1719,13 @@ mod tests {
         for to_index in [2usize, 3usize] {
             let (ok, out) = apply(
                 src,
-                StructOp::MoveRegion { path: vec![], start: 2, end: 3, to_parent: vec![], to_index },
+                StructOp::MoveRegion {
+                    path: vec![],
+                    start: 2,
+                    end: 3,
+                    to_parent: vec![],
+                    to_index,
+                },
             );
             assert!(!ok, "to_index {to_index} is the run's own position");
             assert_eq!(out, src);
@@ -1650,14 +1738,26 @@ mod tests {
         // Into the tabs STRIP (children of tabs) — leaves are invisible there.
         let (ok, out) = apply(
             src,
-            StructOp::MoveRegion { path: vec![0, 0], start: 0, end: 1, to_parent: vec![0], to_index: 1 },
+            StructOp::MoveRegion {
+                path: vec![0, 0],
+                start: 0,
+                end: 1,
+                to_parent: vec![0],
+                to_index: 1,
+            },
         );
         assert!(!ok);
         assert_eq!(out, src);
         // Out-of-range run.
         let (ok2, _) = apply(
             src,
-            StructOp::MoveRegion { path: vec![0, 0], start: 5, end: 6, to_parent: vec![0, 1], to_index: 0 },
+            StructOp::MoveRegion {
+                path: vec![0, 0],
+                start: 5,
+                end: 6,
+                to_parent: vec![0, 1],
+                to_index: 0,
+            },
         );
         assert!(!ok2);
     }
