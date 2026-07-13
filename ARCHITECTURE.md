@@ -50,7 +50,11 @@ Every gesture becomes a `StructOp` applied by the **shared Rust reducer**
 (`ops.rs::apply_op_impl`) — insertTab, renameTab, saveRegion, moveNode (tabs,
 cells, and whole groups, with subtree-cycle rejection and automatic
 friendly⇄directive form conformance so a move can never reparse into a
-different structure), insertLeaf, duplicateNode, setTabAttr, setCols. The host
+different structure), moveRegion (leaf runs — prose sections, callouts, code
+blocks — relocated between group containers with same-parent re-indexing),
+insertLeaf, duplicateNode, setTabAttr, setCols. The parser gives callouts
+their own leaf (like code fences), so each is an independently draggable,
+editable section. The host
 re-scans the **live** document, applies the op to a fresh parse, and dispatches
 one `{from,to,insert}` change whose bounds were recomputed at that instant.
 `saveRegion` carries the region's expected text and is refused if the block
