@@ -104,6 +104,17 @@ pub enum StructOp {
         /// New column count.
         cols: usize,
     },
+    /// Write or clear a `{key=value}` header token on the GROUP container
+    /// (grid or directive tabs) at `path` — e.g. `colw` fractions.
+    #[serde(rename_all = "camelCase")]
+    SetGroupAttr {
+        /// Path of the grid / tabs container.
+        path: Vec<usize>,
+        /// Token key (ascii alphanumeric / dash).
+        key: String,
+        /// New value, or `None` to remove the token.
+        value: Option<String>,
+    },
     /// Insert a new empty group into the container at `path`, at index `at`.
     InsertGroup {
         /// Target container (`[]` = block root).
@@ -330,6 +341,7 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             *open_line = format!("{c}grid {{{attrs}}}\n");
             true
         }
+        StructOp::SetGroupAttr { path, key, value } => set_group_attr(cst, path, key, value.as_deref()),
         StructOp::InsertGroup { path, at, kind } => {
             let Some(children) = children_at_mut(cst, path) else {
                 return false;
@@ -511,6 +523,42 @@ fn compose_title(display: &str, attrs: &str) -> String {
 }
 
 /// Set / replace / remove a `key=value` token in an attrs string.
+/// Write/remove one `{key=value}` token on a grid or directive-tabs header.
+/// Friendly tab groups have no header line to carry attrs — rejected.
+fn set_group_attr(cst: &mut Cst, path: &[usize], key: &str, value: Option<&str>) -> bool {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return false;
+    }
+    if let Some(v) = value {
+        if v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == '{' || c == '}') {
+            return false;
+        }
+    }
+    let Some(node) = node_at_mut(cst, path) else {
+        return false;
+    };
+    let Node::Container {
+        name,
+        title,
+        colons,
+        open_line,
+        ..
+    } = node
+    else {
+        return false;
+    };
+    if (name != "grid" && name != "tabs") || !open_line.starts_with(':') {
+        return false;
+    }
+    let (_, attrs) = split_title_attrs(title);
+    let attrs = set_attr_token(&attrs, key, value);
+    *title = format!("{{{attrs}}}");
+    let c = ":".repeat((*colons).max(3));
+    *open_line = format!("{c}{name} {{{attrs}}}
+");
+    true
+}
+
 fn set_attr_token(attrs: &str, key: &str, value: Option<&str>) -> String {
     let mut tokens: Vec<String> = attrs
         .split_whitespace()
@@ -1298,6 +1346,53 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(out, "", "grid with no cells left is scaffolding");
+    }
+
+    #[test]
+    fn set_group_attr_writes_and_removes_tokens() {
+        // Write colw next to cols…
+        let (ok, out) = apply(
+            ":::grid {cols=2}\n:::cell\na\n:::\n:::\n",
+            StructOp::SetGroupAttr {
+                path: vec![0],
+                key: "colw".into(),
+                value: Some("1.3,0.7".into()),
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, ":::grid {cols=2 colw=1.3,0.7}\n:::cell\na\n:::\n:::\n");
+        // …and remove it again.
+        let (ok2, out2) = apply(&out, StructOp::SetGroupAttr {
+            path: vec![0],
+            key: "colw".into(),
+            value: None,
+        });
+        assert!(ok2);
+        assert_eq!(out2, ":::grid {cols=2}\n:::cell\na\n:::\n:::\n");
+    }
+
+    #[test]
+    fn set_group_attr_rejects_bad_targets_and_values() {
+        // A cell is not a group.
+        let (ok, _) = apply(
+            ":::grid {cols=2}\n:::cell\na\n:::\n:::\n",
+            StructOp::SetGroupAttr {
+                path: vec![0, 0],
+                key: "colw".into(),
+                value: Some("1".into()),
+            },
+        );
+        assert!(!ok);
+        // Values with whitespace or braces would corrupt the header line.
+        let (ok2, _) = apply(
+            ":::grid {cols=2}\n:::cell\na\n:::\n:::\n",
+            StructOp::SetGroupAttr {
+                path: vec![0],
+                key: "colw".into(),
+                value: Some("1 2}".into()),
+            },
+        );
+        assert!(!ok2);
     }
 
     #[test]

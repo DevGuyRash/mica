@@ -42,8 +42,11 @@ pub struct DiffResult {
     pub similarity: f64,
 }
 
-/// Diff `base` vs `other` at the given granularity (`line` | `word` | `char`),
-/// grouping changes into hunks with `context` lines of surrounding equality.
+/// Diff `base` vs `other` at the given granularity, grouping changes into
+/// hunks with `context` lines of surrounding equality. Granularities:
+/// `line` (line rows, word-level intra-line emphasis), `line-char` (line
+/// rows, CHARACTER-level intra-line emphasis), and the whole-document
+/// `word` / `char` modes kept for the CLI.
 pub fn diff_impl(base: &str, other: &str, granularity: &str, context: usize) -> DiffResult {
     let diff = match granularity {
         "char" => TextDiff::from_chars(base, other),
@@ -79,7 +82,83 @@ pub fn diff_impl(base: &str, other: &str, granularity: &str, context: usize) -> 
         }
         hunks.push(Hunk { changes });
     }
+    if granularity == "line-char" {
+        hunks = hunks.into_iter().map(refine_hunk_charwise).collect();
+    }
     DiffResult { hunks, similarity }
+}
+
+/// Re-emphasize a hunk's changed lines at CHARACTER level: pair the i-th
+/// deleted line with the i-th inserted line of each replace run and char-diff
+/// the pair. Unpaired lines keep no emphasis (the row itself is colored).
+fn refine_hunk_charwise(hunk: Hunk) -> Hunk {
+    let mut out: Vec<DiffChange> = Vec::new();
+    let mut dels: Vec<DiffChange> = Vec::new();
+    let mut inss: Vec<DiffChange> = Vec::new();
+    let flush = |out: &mut Vec<DiffChange>, dels: &mut Vec<DiffChange>, inss: &mut Vec<DiffChange>| {
+        let d = std::mem::take(dels);
+        let mut i = std::mem::take(inss);
+        let pairs = d.len().min(i.len());
+        let mut d = d;
+        for k in 0..pairs {
+            let (sa, sb) = char_spans(&d[k].value, &i[k].value);
+            d[k].inline = sa;
+            i[k].inline = sb;
+        }
+        for c in d.iter_mut().skip(pairs) {
+            c.inline.clear();
+        }
+        for c in i.iter_mut().skip(pairs) {
+            c.inline.clear();
+        }
+        out.append(&mut d);
+        out.append(&mut i);
+    };
+    for c in hunk.changes {
+        match c.tag.as_str() {
+            "delete" => dels.push(c),
+            "insert" => inss.push(c),
+            _ => {
+                flush(&mut out, &mut dels, &mut inss);
+                let mut eq = c;
+                eq.inline.clear();
+                out.push(eq);
+            }
+        }
+    }
+    flush(&mut out, &mut dels, &mut inss);
+    Hunk { changes: out }
+}
+
+/// Character-level spans for one old/new line pair (adjacent runs merged).
+fn char_spans(a: &str, b: &str) -> (Vec<Span>, Vec<Span>) {
+    fn push(v: &mut Vec<Span>, tag: &str, text: &str) {
+        if let Some(last) = v.last_mut() {
+            if last.tag == tag {
+                last.text.push_str(text);
+                return;
+            }
+        }
+        v.push(Span {
+            tag: tag.into(),
+            text: text.into(),
+        });
+    }
+    let diff = TextDiff::from_chars(a, b);
+    let mut sa = Vec::new();
+    let mut sb = Vec::new();
+    for ch in diff.iter_all_changes() {
+        let text = ch.to_string_lossy();
+        match ch.tag() {
+            ChangeTag::Equal => {
+                push(&mut sa, "same", &text);
+                push(&mut sb, "same", &text);
+            }
+            ChangeTag::Delete => push(&mut sa, "emph", &text),
+            ChangeTag::Insert => push(&mut sb, "emph", &text),
+        }
+    }
+    (sa, sb)
 }
 
 /// A unified-diff patch (line granularity) with `context` lines of context.
@@ -132,6 +211,38 @@ mod tests {
             .flat_map(|h| &h.changes)
             .any(|c| c.inline.iter().any(|s| s.tag == "emph"));
         assert!(has_emph, "changed line should carry emphasized spans");
+    }
+
+    #[test]
+    fn line_char_refines_emphasis_to_characters() {
+        // "hello" -> "hallo": word refinement emphasizes the whole word;
+        // char refinement must narrow it to the single differing letter.
+        let d = diff_impl("hello world\n", "hallo world\n", "line-char", 3);
+        let emph: Vec<String> = d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.changes)
+            .filter(|c| c.tag == "delete" || c.tag == "insert")
+            .flat_map(|c| c.inline.iter())
+            .filter(|s| s.tag == "emph")
+            .map(|s| s.text.clone())
+            .collect();
+        assert_eq!(emph, vec!["e", "a"], "emphasis should be per-character");
+    }
+
+    #[test]
+    fn line_char_leaves_unpaired_lines_whole() {
+        // A pure insertion has no partner to refine against: no emph spans,
+        // the renderer paints the whole line.
+        let d = diff_impl("a\n", "a\nnew line\n", "line-char", 3);
+        let ins: Vec<&DiffChange> = d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.changes)
+            .filter(|c| c.tag == "insert")
+            .collect();
+        assert_eq!(ins.len(), 1);
+        assert!(ins[0].inline.iter().all(|s| s.tag != "emph"));
     }
 
     #[test]

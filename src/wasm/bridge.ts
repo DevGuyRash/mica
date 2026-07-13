@@ -209,7 +209,9 @@ export function foldLedger(events: LedgerEvent[]): Record<string, BlockState> {
 
 // --- Diff (mirrors the Rust diff types) ----------------------------------
 
-export type DiffGranularity = "line" | "word" | "char";
+/** `line`/`line-char` = line rows with word- or char-level intra-line
+ *  emphasis; whole-document `word`/`char` modes remain for the CLI. */
+export type DiffGranularity = "line" | "word" | "char" | "line-char";
 
 export interface DiffSpan {
 	tag: "same" | "emph";

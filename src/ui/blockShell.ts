@@ -157,6 +157,7 @@ function applyBlockAttrs(el: HTMLElement, attrs: Record<string, string>): void {
 	if (attrs["radius"]) el.style.setProperty("--mica-radius", `${Number(attrs["radius"]) || 0}px`);
 	if (attrs["density"]) el.setAttribute("data-mica-density", attrs["density"]);
 	if (attrs["tabstyle"]) el.setAttribute("data-mica-tabstyle", attrs["tabstyle"]);
+	el.setAttribute("data-mica-wrap", attrs["wrap"] === "off" ? "off" : "on");
 }
 
 function markGroupContainer(el: HTMLElement, path: number[], len: number): void {
@@ -238,6 +239,20 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 		attr: { "aria-label": ctx.editable ? "Editable (Live Preview)" : "Read-only view" },
 	});
 	setIcon(modeIco, ctx.editable ? "pencil" : "book-open");
+
+	// Wrap toggle: wrap long lines everywhere in the block, or let regions
+	// scroll horizontally. Persisted as a fence attr, travels with the note.
+	if (ctx.editable) {
+		const wrapped = (ctx.blockAttrs?.["wrap"] ?? "on") !== "off";
+		const wrapBtn = iconButton(
+			head,
+			"mica-head-btn",
+			wrapped ? "wrap-text" : "arrow-right-from-line",
+			wrapped ? "Long lines wrap (click: scroll instead)" : "Long lines scroll (click: wrap instead)",
+		);
+		wrapBtn.setAttribute("aria-pressed", String(wrapped));
+		wrapBtn.addEventListener("click", () => ctx.editable?.setAttr("wrap", wrapped ? "off" : null));
+	}
 
 	// Navigator.
 	iconButton(head, "mica-head-btn", "list-tree", "Block navigator").addEventListener("click", (e) => {
@@ -481,7 +496,7 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 				for (let k = i; k < j; k++) md += (nodes[k] as Leaf).text;
 				if (ctx.editable && i > 0) renderInsertZone(el, ctx, path, i);
 				const auto: boolean = Boolean(opts.autoOpen) && !opened;
-				renderRegion(el, ctx, { path, start: i, end: j, original: md }, auto);
+				renderRegion(el, ctx, { path, start: i, end: j, original: md }, auto, i === 0 && j === nodes.length);
 				opened = opened || auto;
 				i = j;
 			}
@@ -620,8 +635,14 @@ function showCellTypeMenu(
 // .cm-editor, so matching that would swallow every region click.
 const INTERACTIVE = "a, button, input, textarea, .internal-link, .mica-mdeditor";
 
-function renderRegion(el: HTMLElement, ctx: RenderCtx, target: RegionTarget, autoOpen: boolean): void {
-	const region = el.createDiv({ cls: "mica-region" });
+function renderRegion(
+	el: HTMLElement,
+	ctx: RenderCtx,
+	target: RegionTarget,
+	autoOpen: boolean,
+	sole = false,
+): void {
+	const region = el.createDiv({ cls: `mica-region ${sole ? "is-sole" : ""}` });
 	if (target.start < target.end) region.setAttribute("data-mica-idx", String(target.start));
 	paintRegionView(region, ctx, target);
 
@@ -676,9 +697,10 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 	if (target.original.trim()) {
 		renderMarkdown(target.original, view, ctx);
 		if (ctx.editable) {
-			// Hover tools live together at the region's corner: grip then pencil.
+			// One hover tool: the grip. Clicking the text edits; the pencil was
+			// a redundant second path to the same action.
 			const tools = region.createDiv({ cls: "mica-region-tools" });
-			const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move this section");
+			const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move · click text to edit");
 			grip.addEventListener("click", (e) => e.stopPropagation());
 			makeDraggable(
 				grip,
@@ -687,12 +709,6 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 				(op) => ctx.editable?.apply(op),
 				region,
 			);
-			const pencil = iconButton(tools, "mica-region-pencil", "pencil", "Edit (Ctrl+click for the full editor)");
-			pencil.addEventListener("click", (e) => {
-				e.stopPropagation();
-				if (e.ctrlKey || e.metaKey) openLightboxFor(ctx, target);
-				else openQuickEdit(region, ctx, target);
-			});
 		}
 	} else if (ctx.editable) {
 		const ghost = view.createDiv({ cls: "mica-ghost" });
@@ -943,6 +959,91 @@ function startRename(
 	input.addEventListener("blur", commit);
 }
 
+/**
+ * Draggable dividers between grid columns. Dragging rebalances the two
+ * adjacent columns' fr fractions live; release persists `colw` into the
+ * grid's header via the shared reducer (double-click resets to equal).
+ */
+function mountColResizers(
+	grid: HTMLElement,
+	ctx: RenderCtx,
+	path: number[],
+	cols: number,
+	widths: number[],
+): void {
+	const strips: HTMLElement[] = [];
+	const layout = (): void => {
+		const cells = Array.from(grid.querySelectorAll<HTMLElement>(":scope > .mica-cell"));
+		const g = grid.getBoundingClientRect();
+		for (let b = 1; b < cols; b++) {
+			const strip = strips[b - 1];
+			const left = cells[b - 1]?.getBoundingClientRect();
+			const right = cells[b]?.getBoundingClientRect();
+			if (!left || !right || right.left <= left.right - 1) {
+				strip.style.display = "none"; // boundary has no cells yet
+				continue;
+			}
+			strip.style.display = "";
+			strip.style.left = `${(left.right + right.left) / 2 - g.left - 4}px`;
+		}
+	};
+	const live = (w: number[]): void => {
+		grid.style.gridTemplateColumns = w.map((x) => `minmax(0, ${x.toFixed(3)}fr)`).join(" ");
+	};
+
+	for (let b = 1; b < cols; b++) {
+		const strip = grid.createDiv({ cls: "mica-col-resizer" });
+		strip.createDiv({ cls: "mica-col-resizer-line" });
+		strips.push(strip);
+		strip.addEventListener("dblclick", (e) => {
+			e.stopPropagation();
+			ctx.editable?.apply({ op: "setGroupAttr", path, key: "colw", value: null });
+		});
+		strip.addEventListener("pointerdown", (down) => {
+			if (down.button !== 0) return;
+			down.preventDefault();
+			down.stopPropagation();
+			const startX = down.clientX;
+			const startW = [...widths];
+			const total = startW.reduce((a, x) => a + x, 0);
+			const frPerPx = total / Math.max(1, grid.clientWidth);
+			let lastW = startW;
+			const move = (e: PointerEvent): void => {
+				// Clamp so neither neighbour shrinks below 0.15fr.
+				const raw = (e.clientX - startX) * frPerPx;
+				const dFr = Math.max(-(startW[b - 1] - 0.15), Math.min(startW[b] - 0.15, raw));
+				const w = [...startW];
+				w[b - 1] = startW[b - 1] + dFr;
+				w[b] = startW[b] - dFr;
+				lastW = w;
+				live(w);
+				layout();
+			};
+			const up = (e: PointerEvent): void => {
+				window.removeEventListener("pointermove", move, true);
+				window.removeEventListener("pointerup", up, true);
+				if (e.type !== "pointerup" || Math.abs(e.clientX - startX) < 3) return;
+				widths.splice(0, widths.length, ...lastW);
+				const rounded = lastW.map((x) => Math.round(x * 100) / 100);
+				const uniform = rounded.every((x) => Math.abs(x - rounded[0]) < 0.03);
+				ctx.editable?.apply({
+					op: "setGroupAttr",
+					path,
+					key: "colw",
+					value: uniform ? null : rounded.join(","),
+				});
+			};
+			window.addEventListener("pointermove", move, true);
+			window.addEventListener("pointerup", up, true);
+			window.addEventListener("pointercancel", up, true);
+		});
+	}
+	// Track layout: cells resize as content changes; keep dividers glued.
+	const ro = new ResizeObserver(() => layout());
+	ro.observe(grid);
+	window.requestAnimationFrame(layout);
+}
+
 function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-grid-wrap" });
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
@@ -954,6 +1055,15 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	grid.setAttribute("data-axis", "x");
 	const cols = Number(titleAttr(node.title, "cols") ?? "2") || 2;
 	grid.style.setProperty("--mica-cols", String(cols));
+	// Per-column fractions (fence-persisted via the shared reducer).
+	const colwRaw = (titleAttr(node.title, "colw") ?? "")
+		.split(",")
+		.map(Number)
+		.filter((n) => Number.isFinite(n) && n > 0);
+	const widths = colwRaw.length === cols ? colwRaw : new Array<number>(cols).fill(1);
+	if (colwRaw.length === cols) {
+		grid.style.gridTemplateColumns = widths.map((w) => `minmax(0, ${w}fr)`).join(" ");
+	}
 
 	node.children.forEach((c, idx) => {
 		if (c.kind !== "container" || c.name !== "cell") return;
@@ -996,6 +1106,14 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	});
 
 	if (ctx.editable) {
+		const tools = wrap.createDiv({ cls: "mica-grid-tools" });
+		const topGrip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move this grid");
+		topGrip.addEventListener("click", (e) => e.stopPropagation());
+		makeDraggable(topGrip, "group", path, (op) => ctx.editable?.apply(op), wrap);
+
+		// Column resizers: one draggable divider per interior column boundary.
+		if (cols > 1) mountColResizers(grid, ctx, path, cols, widths);
+
 		// Ghost tile: add a cell where the next one would land.
 		const ghost = grid.createEl("button", {
 			cls: "clickable-icon mica-cell-ghost",
@@ -1061,8 +1179,6 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			input.addEventListener("blur", commit);
 		});
 		bar.createDiv({ cls: "mica-nav-spacer" });
-		const grip = iconButton(bar, "mica-group-grip", "grip-vertical", "Drag to move this grid");
-		makeDraggable(grip, "group", path, (op) => ctx.editable?.apply(op), wrap);
 		iconButton(bar, "mica-group-x", "trash-2", "Delete grid").addEventListener("click", (e) => {
 			e.stopPropagation();
 			deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted");

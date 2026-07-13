@@ -6,7 +6,6 @@ import {
 	makePatch,
 	newId,
 	scanBlocksView,
-	type DiffGranularity,
 	type VersionMeta,
 } from "../wasm/bridge";
 import { appendEvents, readObject } from "../storage/sidecar";
@@ -34,7 +33,9 @@ export class VersionsModal extends Modal {
 	private working = "";
 	private selected: string = WORKING; // hash or WORKING
 	private baseMode: "previous" | "head" | string = "previous"; // or a hash
-	private granularity: DiffGranularity;
+	private refine: "none" | "word" | "char";
+	private hideSyntax: boolean;
+	private ignoreWs: boolean;
 	private layout: "inline" | "side-by-side" | "patch";
 	private surface: HTMLElement | null = null;
 	private listEl: HTMLElement | null = null;
@@ -46,14 +47,58 @@ export class VersionsModal extends Modal {
 		private readonly blockId: string,
 	) {
 		super(plugin.app);
-		this.granularity = plugin.settings.defaultGranularity;
+		this.refine = plugin.settings.diffRefine;
+		this.hideSyntax = plugin.settings.diffHideSyntax;
+		this.ignoreWs = plugin.settings.diffIgnoreWs;
 		this.layout = plugin.settings.defaultDiffMode;
+	}
+
+	/** Persist a diff preference (they survive across sessions). */
+	private remember(patch: Partial<typeof this.plugin.settings>): void {
+		Object.assign(this.plugin.settings, patch);
+		void this.plugin.saveSettings();
+	}
+
+	/** Apply the active noise filters before any diff/patch computation. */
+	private prep(text: string): string {
+		let lines = text.split("\n");
+		if (this.hideSyntax) {
+			lines = lines.filter((l) => {
+				const t = l.trim();
+				return !t.startsWith(":::") && !/^tab:(\s|$)/.test(t);
+			});
+		}
+		if (this.ignoreWs) lines = lines.map((l) => l.replace(/[ \t]+/g, " ").trimEnd());
+		return lines.join("\n");
 	}
 
 	async onOpen(): Promise<void> {
 		this.modalEl.addClass("mica-versions-modal");
 		this.titleEl.setText("Version history");
+		// Walk the timeline from the keyboard.
+		this.scope.register([], "ArrowUp", () => {
+			this.step(-1);
+			return false;
+		});
+		this.scope.register([], "ArrowDown", () => {
+			this.step(1);
+			return false;
+		});
 		await this.reload();
+	}
+
+	/** Move the selection up/down the timeline (working copy included). */
+	private step(delta: number): void {
+		const keys: string[] = [];
+		if (this.isDirty() || this.selected === WORKING) keys.push(WORKING);
+		keys.push(...this.rows.map((r) => r.meta.hash));
+		const at = keys.indexOf(this.selected);
+		const next = keys[Math.min(keys.length - 1, Math.max(0, at + delta))];
+		if (next && next !== this.selected) {
+			this.selected = next;
+			this.renderList();
+			this.renderDiffSurface();
+		}
 	}
 
 	private async reload(): Promise<void> {
@@ -265,40 +310,72 @@ export class VersionsModal extends Modal {
 			}
 		};
 
-		const baseLabel =
-			this.baseMode === "previous" ? "previous" : this.baseMode === "head" ? "head" : this.nameOf(this.baseMode);
+		// The base is always shown RESOLVED — "previous" names the version
+		// stored just before the SELECTED one, never relative to head.
+		const bk = this.baseKey();
+		const resolved = bk === WORKING ? "working copy" : this.nameOf(bk);
+		const suffix =
+			this.baseMode === "previous" ? " · auto: before selected" : this.baseMode === "head" ? " · head" : " · pinned";
 		const baseBtn = bar.createEl("button", {
 			cls: "mica-base-pick",
-			text: `Base: ${baseLabel}`,
-			attr: { type: "button", "aria-label": "Choose what to compare against" },
+			text: `Base: ${resolved}${suffix}`,
+			attr: { type: "button", "aria-label": "Choose what the selected version is compared against" },
 		});
 		baseBtn.addEventListener("click", (e) => {
 			const menu = new Menu();
-			menu.addItem((i) => i.setTitle("Previous version").onClick(() => this.setBase("previous")));
-			menu.addItem((i) => i.setTitle("Head").onClick(() => this.setBase("head")));
+			menu.addItem((i) =>
+				i
+					.setTitle("Auto — the version before the selected one")
+					.setChecked(this.baseMode === "previous")
+					.onClick(() => this.setBase("previous")),
+			);
+			menu.addItem((i) =>
+				i
+					.setTitle("Head — the current version")
+					.setChecked(this.baseMode === "head")
+					.onClick(() => this.setBase("head")),
+			);
 			menu.addSeparator();
 			for (const r of this.rows) {
 				menu.addItem((i) =>
 					i
-						.setTitle(`v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`)
+						.setTitle(`Pin v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`)
+						.setChecked(this.baseMode === r.meta.hash)
 						.onClick(() => this.setBase(r.meta.hash)),
 				);
 			}
 			menu.showAtMouseEvent(e);
 		});
 
-		seg(
-			[
-				["line", "Line"],
-				["word", "Word"],
-				["char", "Char"],
-			],
-			this.granularity,
-			(v) => {
-				this.granularity = v;
-				this.render();
-			},
-		);
+		// Meld-style refinement: word/char highlights are exclusive checkboxes;
+		// both off = plain line colors.
+		const check = (label: string, tip: string, on: boolean, flip: (next: boolean) => void): void => {
+			const lab = bar.createEl("label", { cls: "mica-diff-check", attr: { "aria-label": tip } });
+			const box = lab.createEl("input", { attr: { type: "checkbox" } });
+			box.checked = on;
+			lab.createSpan({ text: label });
+			box.addEventListener("change", () => flip(box.checked));
+		};
+		check("Word", "Highlight changed words inside changed lines", this.refine === "word", (next) => {
+			this.refine = next ? "word" : "none";
+			this.remember({ diffRefine: this.refine });
+			this.render();
+		});
+		check("Char", "Highlight changed characters inside changed lines", this.refine === "char", (next) => {
+			this.refine = next ? "char" : "none";
+			this.remember({ diffRefine: this.refine });
+			this.render();
+		});
+		check("Hide syntax", "Ignore mica layout lines (:::, tab:) entirely", this.hideSyntax, (next) => {
+			this.hideSyntax = next;
+			this.remember({ diffHideSyntax: next });
+			this.render();
+		});
+		check("Ignore whitespace", "Collapse runs of spaces/tabs before comparing", this.ignoreWs, (next) => {
+			this.ignoreWs = next;
+			this.remember({ diffIgnoreWs: next });
+			this.render();
+		});
 		seg(
 			[
 				["inline", "Inline"],
@@ -335,22 +412,29 @@ export class VersionsModal extends Modal {
 		const surface = this.surface;
 		if (!surface) return;
 		surface.empty();
-		const base = this.text(this.baseKey());
-		const to = this.text(this.selected);
+		const bk = this.baseKey();
+		const base = this.prep(this.text(bk));
+		const to = this.prep(this.text(this.selected));
 		const caption = surface.createDiv({ cls: "mica-diff-caption" });
-		caption.setText(
-			`${this.nameOf(this.baseKey())} → ${this.selected === WORKING ? "working copy" : this.nameOf(this.selected)}`,
-		);
+		const names = `${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${
+			this.selected === WORKING ? "working copy" : this.nameOf(this.selected)
+		}`;
 		const body = surface.createDiv();
 		if (this.layout === "patch") {
+			caption.setText(names);
 			renderPatch(body, makePatch(base, to, 3));
 			return;
 		}
-		renderDiff(body, diffText(base, to, this.granularity, 3), this.layout);
+		const result = diffText(base, to, this.refine === "char" ? "line-char" : "line", 3);
+		if (this.refine === "none") {
+			for (const h of result.hunks) for (const c of h.changes) c.inline = [];
+		}
+		caption.setText(`${names} · ${Math.round(result.similarity * 100)}% similar`);
+		renderDiff(body, result, this.layout);
 	}
 
 	private async copyPatch(): Promise<void> {
-		const patch = makePatch(this.text(this.baseKey()), this.text(this.selected), 3);
+		const patch = makePatch(this.prep(this.text(this.baseKey())), this.prep(this.text(this.selected)), 3);
 		if (!patch.trim()) {
 			new Notice("No differences to copy.");
 			return;

@@ -196,7 +196,7 @@ function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item:
 	};
 	caret.addEventListener("click", openVariants);
 	group.addEventListener("pointerenter", () => {
-		hoverTimer = window.setTimeout(openVariants, 350);
+		hoverTimer = window.setTimeout(openVariants, 300);
 	});
 	group.addEventListener("pointerleave", () => {
 		if (hoverTimer !== null) window.clearTimeout(hoverTimer);

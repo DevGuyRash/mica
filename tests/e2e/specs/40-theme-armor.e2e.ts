@@ -62,6 +62,17 @@ describe("embedded editor under a hostile theme", function () {
 		expect(m.cssTheme).toBe("Cyber Glow"); // the hostile theme is genuinely active
 		expect(m.lineOffset).toBeGreaterThanOrEqual(0); // no negative-margin bleed
 		expect(m.scrollLeft).toBe(0);
+
+		// The quick-edit toolbar's MAIN glyphs must hold their size too — the
+		// theme once collapsed them to dots while carets survived.
+		const glyph = await browser.executeObsidian(() => {
+			const icon = document.querySelector(".mica-lp .mica-toolbar .mica-tool .svg-icon");
+			if (!icon) return { w: -1, h: -1 };
+			const r = icon.getBoundingClientRect();
+			return { w: Math.round(r.width), h: Math.round(r.height) };
+		});
+		expect(glyph.w).toBeGreaterThanOrEqual(12);
+		expect(glyph.h).toBeGreaterThanOrEqual(12);
 	});
 
 	it("keeps line starts inside GRID-CELL editors too", async function () {

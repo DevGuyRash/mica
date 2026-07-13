@@ -57,6 +57,7 @@ export class EditorLightbox extends Modal {
 				this.refreshStats(v);
 				this.schedulePreview();
 			},
+			onSelection: () => this.refreshStats(this.editor?.getValue() ?? ""),
 		});
 
 		buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
@@ -126,10 +127,24 @@ export class EditorLightbox extends Modal {
 		this.cancelBtn?.setText("Cancel");
 	}
 
+	/** Real words (letter/number runs; "don't" is one, "##" is none). */
+	private static words(text: string): number {
+		return (text.match(/[\p{L}\p{N}]+(?:['\u2019-][\p{L}\p{N}]+)*/gu) ?? []).length;
+	}
+
 	private refreshStats(value: string): void {
 		if (!this.statsEl) return;
-		const words = (value.match(/\S+/g) ?? []).length;
-		this.statsEl.setText(`${words} word${words === 1 ? "" : "s"} · ${value.length} chars`);
+		const words = EditorLightbox.words(value);
+		const lines = value.length ? value.split("\n").length : 0;
+		const sel = this.editor?.view.state.selection.main;
+		if (sel && !sel.empty) {
+			const chosen = this.editor?.view.state.sliceDoc(sel.from, sel.to) ?? "";
+			this.statsEl.setText(
+				`${EditorLightbox.words(chosen)} / ${words} words · ${chosen.length} / ${value.length} chars · ${lines} lines`,
+			);
+			return;
+		}
+		this.statsEl.setText(`${words} words · ${value.length} chars · ${lines} lines`);
 	}
 
 	private schedulePreview(): void {

@@ -1,7 +1,7 @@
 import { Modal, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { builtinTools, DEFAULT_TOOLBAR_LAYOUT, type CustomTool } from "./ui/toolSpec";
 import type MicaPlugin from "./main";
-import { OBSIDIAN_CALLOUT_TYPES, type DiffGranularity } from "./wasm/bridge";
+import { OBSIDIAN_CALLOUT_TYPES } from "./wasm/bridge";
 
 export type MicaTabStyle = "underline" | "connected" | "pill";
 export type MicaDensity = "comfortable" | "compact";
@@ -26,7 +26,12 @@ export interface MicaSettings {
 	autoSnapshotEnabled: boolean;
 	/** Idle time before an auto-snapshot fires after an edit. */
 	snapshotDebounceMs: number;
-	defaultGranularity: DiffGranularity;
+	/** Intra-line highlight refinement in diffs. */
+	diffRefine: "none" | "word" | "char";
+	/** Exclude mica layout lines (`:::`, `tab:`) from diffs. */
+	diffHideSyntax: boolean;
+	/** Collapse runs of spaces/tabs before diffing. */
+	diffIgnoreWs: boolean;
 	defaultDiffMode: "inline" | "side-by-side" | "patch";
 	showVersionChip: boolean;
 	reconcileOnLoad: boolean;
@@ -69,7 +74,9 @@ export interface MicaSettings {
 export const DEFAULT_SETTINGS: MicaSettings = {
 	autoSnapshotEnabled: true,
 	snapshotDebounceMs: 5000,
-	defaultGranularity: "line",
+	diffRefine: "word",
+	diffHideSyntax: false,
+	diffIgnoreWs: false,
 	defaultDiffMode: "inline",
 	showVersionChip: true,
 	reconcileOnLoad: true,
@@ -183,16 +190,16 @@ export class MicaSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setHeading().setName("Comparing");
 
 		new Setting(containerEl)
-			.setName("Default granularity")
-			.setDesc("How the compare view first splits changes.")
+			.setName("Highlight changes within lines")
+			.setDesc("Meld-style sub-line emphasis on changed lines: by word, by character, or off.")
 			.addDropdown((d) =>
 				d
-					.addOption("line", "Line")
 					.addOption("word", "Word")
 					.addOption("char", "Character")
-					.setValue(s.defaultGranularity)
+					.addOption("none", "Off")
+					.setValue(s.diffRefine)
 					.onChange(async (v) => {
-						s.defaultGranularity = v as DiffGranularity;
+						s.diffRefine = v as MicaSettings["diffRefine"];
 						await save();
 					}),
 			);

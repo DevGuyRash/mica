@@ -347,17 +347,23 @@ function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
 						cy: r.top + r.height / 2,
 						container,
 					}
-				: {
-						parentPath,
-						index: len,
-						x: rect.left + 4,
-						y: r.bottom - 1,
-						w: rect.width - 8,
-						h: 3,
-						cx: rect.left + rect.width / 2,
-						cy: r.bottom,
-						container,
-					},
+				: (() => {
+						// A stretched container (grid cell) can be much taller than
+						// its content; a line hugging the content reads as "cutting
+						// into the cell". Sit at the container's bottom edge instead.
+						const gy = r.bottom < rect.bottom - 16 ? rect.bottom - 8 : r.bottom - 1;
+						return {
+							parentPath,
+							index: len,
+							x: rect.left + 4,
+							y: gy,
+							w: rect.width - 8,
+							h: 3,
+							cx: rect.left + rect.width / 2,
+							cy: gy + 1.5,
+							container,
+						};
+					})(),
 		);
 	}
 	return slots.filter((s) => !isNoop(s.parentPath, s.index));

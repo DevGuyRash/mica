@@ -13,6 +13,8 @@ export interface MdEditorOpts {
 	/** Escape (the host decides whether to confirm when dirty). */
 	onCancel: () => void;
 	onChange?: (value: string) => void;
+	/** Fires on selection movement too (cheap consumers only, e.g. stats). */
+	onSelection?: () => void;
 	autofocus?: boolean;
 }
 
@@ -140,6 +142,7 @@ export class MdEditor {
 					cmPlaceholder(opts.placeholder ?? "Write markdown…"),
 					EditorView.updateListener.of((u) => {
 						if (u.docChanged) opts.onChange?.(u.state.doc.toString());
+						if (u.selectionSet || u.docChanged) opts.onSelection?.();
 					}),
 				],
 			}),

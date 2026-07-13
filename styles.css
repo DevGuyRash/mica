@@ -887,6 +887,24 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 	background: color-mix(in srgb, var(--mica-diff-add) 20%, transparent);
 }
 
+/* Diff option checkboxes (word/char refinement + noise filters). */
+.mica-diff-check {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+}
+.mica-diff-check input[type="checkbox"] {
+	margin: 0;
+}
+.mica-diff-check:hover {
+	color: var(--text-normal);
+}
+
 /* Intra-line (char / word) emphasis. */
 .mica-diff-emph {
 	border-radius: 3px;
@@ -1152,7 +1170,9 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-region.is-editing > .mica-region-tools {
 	display: none;
 }
-.mica-region-pencil,
+.mica-cell > .mica-region.is-sole > .mica-region-tools {
+	display: none !important;
+}
 .mica-region-grip {
 	width: 22px;
 	height: 22px;
@@ -1172,12 +1192,10 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-region-grip:active {
 	cursor: grabbing;
 }
-.mica-region-pencil:hover,
 .mica-region-grip:hover {
 	color: var(--mica-accent);
 	background: var(--background-modifier-hover);
 }
-.mica-region-pencil .svg-icon,
 .mica-region-grip .svg-icon {
 	width: 13px;
 	height: 13px;
@@ -1318,16 +1336,18 @@ body[data-mica-grip="left"] .mica-region-tools {
 	color: var(--mica-accent);
 }
 .mica-tool .svg-icon {
-	width: 15px;
-	height: 15px;
+	width: 15px !important;
+	height: 15px !important;
+	min-width: 15px;
 }
 .mica-toolbar.is-compact .mica-tool {
 	width: 22px;
 	height: 22px;
 }
 .mica-toolbar.is-compact .mica-tool .svg-icon {
-	width: 13px;
-	height: 13px;
+	width: 13px !important;
+	height: 13px !important;
+	min-width: 13px;
 }
 .mica-tool-sep {
 	width: 1px;
@@ -1553,6 +1573,20 @@ body[data-mica-grip="left"] .mica-region-tools {
 body.mica-dnd-active {
 	user-select: none;
 	cursor: grabbing;
+}
+/* Mid-drag, the ONLY affordance is the drop indicator — insert zones, hover
+ * tool clusters, and column strips would pop under the pointer and read as
+ * competing targets. */
+body.mica-dnd-active .mica-insert-zone,
+body.mica-dnd-active .mica-region-tools,
+body.mica-dnd-active .mica-cell-bar,
+body.mica-dnd-active .mica-cell-colzone,
+body.mica-dnd-active .mica-grid-tools,
+body.mica-dnd-active .mica-col-resizer,
+body.mica-dnd-active .mica-grid-colzone-end {
+	opacity: 0 !important;
+	pointer-events: none !important;
+	visibility: hidden !important;
 }
 body.mica-dnd-active * {
 	cursor: grabbing !important;
@@ -1946,11 +1980,34 @@ body[data-mica-grip="left"] .mica-cell-bar {
 
 /* Group-variant caret + quick-editor expand: explicit glyph sizing so no
    theme can collapse them into dots. */
+.mica-tool-group {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+}
+.mica-tool-caret {
+	position: absolute;
+	bottom: -1px;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 16px;
+	height: 9px;
+	padding: 0;
+	border: none;
+	background: transparent;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+.mica-tool-group:hover .mica-tool-caret {
+	color: var(--mica-accent);
+}
 .mica-tool-caret .svg-icon {
-	width: 11px !important;
-	height: 11px !important;
-	min-width: 11px;
-	color: var(--text-muted);
+	width: 9px !important;
+	height: 9px !important;
+	min-width: 9px;
 }
 .mica-qe-expand .svg-icon {
 	width: 15px !important;
@@ -2067,6 +2124,81 @@ body[data-mica-grip="left"] .mica-cell-bar {
 }
 .mica-grid {
 	position: relative;
+}
+
+/* ---------- Grid hover tools + column resizers ---------- */
+.mica-grid-wrap {
+	position: relative;
+}
+.mica-grid-tools {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: none;
+	gap: 2px;
+	padding: 1px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+	box-shadow: var(--shadow-s);
+	z-index: 5;
+}
+body[data-mica-grip="left"] .mica-grid-tools {
+	right: auto;
+	left: 4px;
+}
+.mica-grid-wrap:hover > .mica-grid-tools {
+	display: inline-flex;
+}
+.mica-col-resizer {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 9px;
+	cursor: col-resize;
+	z-index: 4;
+	display: flex;
+	align-items: stretch;
+	justify-content: center;
+	touch-action: none;
+}
+.mica-col-resizer-line {
+	width: 3px;
+	border-radius: 2px;
+	background: transparent;
+	transition: background 100ms ease;
+}
+.mica-col-resizer:hover .mica-col-resizer-line,
+.mica-col-resizer:active .mica-col-resizer-line {
+	background: color-mix(in srgb, var(--mica-accent) 55%, transparent);
+}
+
+/* ---------- Line wrapping (block-level toggle, fence attr `wrap`) ---------- */
+/* Default: everything wraps — a block should never scroll sideways. */
+.mica[data-mica-wrap="on"] .mica-md {
+	overflow-wrap: anywhere;
+}
+.mica[data-mica-wrap="on"] .mica-md pre,
+.mica[data-mica-wrap="on"] .mica-md pre code {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+/* Off: long content scrolls WITHIN its own region, never the whole block. */
+.mica[data-mica-wrap="off"] .mica-md {
+	overflow-x: auto;
+	max-width: 100%;
+}
+.mica[data-mica-wrap="off"] .mica-tab-body,
+.mica[data-mica-wrap="off"] .mica-block-body {
+	overflow-x: hidden;
+}
+/* Regardless of mode, the body itself never becomes the scroller. */
+.mica-tab-body,
+.mica-block-body {
+	overflow-x: hidden;
+}
+.mica-md {
+	min-width: 0;
 }
 
 /* ---------- Responsive toolbar overflow ---------- */
