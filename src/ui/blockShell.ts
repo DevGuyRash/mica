@@ -36,6 +36,8 @@ export interface BlockUi {
 	reveal: Reveal | null;
 	draft: { key: string; text: string } | null;
 	collapsed: boolean;
+	/** Folded sections/groups (keys: `r:<path>:<start>` and `n:<path>`). */
+	folded: Set<string>;
 }
 
 export interface RenderCtx {
@@ -55,6 +57,8 @@ export interface RenderCtx {
 	preImage?: () => string;
 	/** Internal: repaint one region back to view mode after a cancel. */
 	repaintRegion?: (region: HTMLElement, target: RegionTarget) => void;
+	/** Internal: repaint the whole block without a doc change (folds). */
+	rerenderBlock?: () => void;
 }
 
 type Container = Extract<MicaNode, { kind: "container" }>;
@@ -120,6 +124,7 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 
 	// A repaint closure so collapse and cancels can redraw without a doc change.
 	ctx.repaintRegion = (region, target) => paintRegionView(region, ctx, target);
+	ctx.rerenderBlock = () => rerender(cst, el, ctx);
 
 	// Keep widget-internal pointer events away from CodeMirror: a click inside
 	// the block must never move the note's caret (that is what caused the
@@ -330,6 +335,62 @@ function countTabs(nodes: MicaNode[]): number {
 }
 
 /** Full re-render of the block into the same element (collapse, appearance). */
+const regionFoldKey = (path: number[], start: number): string => `r:${path.join(",")}:${start}`;
+const nodeFoldKey = (path: number[]): string => `n:${path.join(",")}`;
+
+function toggleFold(ctx: RenderCtx, key: string): void {
+	if (!ctx.ui) return;
+	if (ctx.ui.folded.has(key)) ctx.ui.folded.delete(key);
+	else ctx.ui.folded.add(key);
+	ctx.rerenderBlock?.();
+}
+
+/** A folded group/section renders as one slim, expandable bar. */
+function renderFoldBar(
+	host: HTMLElement,
+	ctx: RenderCtx,
+	key: string,
+	icon: string,
+	summary: string,
+	drag?: { path: number[]; region?: { start: number; end: number }; itemEl: HTMLElement },
+): void {
+	host.addClass("is-folded");
+	const bar = host.createDiv({ cls: "mica-fold-bar" });
+	const ico = bar.createSpan({ cls: "mica-fold-ico" });
+	setIcon(ico, "chevron-right");
+	const kindIco = bar.createSpan({ cls: "mica-fold-kind" });
+	setIcon(kindIco, icon);
+	bar.createSpan({ cls: "mica-fold-text", text: summary });
+	bar.setAttribute("aria-label", "Unfold");
+	bar.addEventListener("click", (e) => {
+		e.stopPropagation();
+		toggleFold(ctx, key);
+	});
+	if (ctx.editable && drag) {
+		bar.createDiv({ cls: "mica-footer-spacer" });
+		const grip = iconButton(bar, "mica-region-grip mica-fold-grip", "grip-vertical", "Drag to move");
+		grip.addEventListener("click", (e) => e.stopPropagation());
+		makeDraggable(
+			grip,
+			drag.region
+				? { kind: "region", fromPath: drag.path, region: drag.region }
+				: { kind: "group", fromPath: drag.path },
+			drag.path,
+			(op) => ctx.editable?.apply(op),
+			drag.itemEl,
+		);
+	}
+}
+
+/** The one-line summary a folded thing shows. */
+function foldSummary(text: string): string {
+	for (const line of text.split("\n")) {
+		const t = line.trim();
+		if (t) return t.length > 64 ? `${t.slice(0, 64)}…` : t;
+	}
+	return "(empty)";
+}
+
 function rerender(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	el.empty();
 	el.removeClass("is-collapsed");
@@ -652,6 +713,10 @@ function renderRegion(
 			if (!guard(e) || region.hasClass("is-editing")) return;
 			e.preventDefault();
 			e.stopPropagation();
+			if (region.hasClass("is-folded")) {
+				toggleFold(ctx, regionFoldKey(target.path, target.start));
+				return;
+			}
 			if (!target.original.trim()) {
 				// Empty space offers the full palette (text / callout / code / groups).
 				showInsertMenu(ctx, target.path, target.start, e, () => openQuickEdit(region, ctx, target));
@@ -693,6 +758,16 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 	region.empty();
 	region.removeClass("is-editing");
 	region.toggleClass("is-editable", Boolean(ctx.editable));
+	const fkey = regionFoldKey(target.path, target.start);
+	if (ctx.ui?.folded.has(fkey) && target.original.trim()) {
+		renderFoldBar(region, ctx, fkey, "text", foldSummary(target.original), {
+			path: target.path,
+			region: { start: target.start, end: target.end },
+			itemEl: region,
+		});
+		return;
+	}
+	region.removeClass("is-folded");
 	const view = region.createDiv({ cls: "mica-md" });
 	if (target.original.trim()) {
 		renderMarkdown(target.original, view, ctx);
@@ -708,6 +783,31 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 				target.path,
 				(op) => ctx.editable?.apply(op),
 				region,
+			);
+			iconButton(tools, "mica-minitool", "chevrons-down-up", "Fold this section").addEventListener(
+				"click",
+				(e) => {
+					e.stopPropagation();
+					toggleFold(ctx, fkey);
+				},
+			);
+			iconButton(tools, "mica-minitool mica-region-x", "x", "Delete this section").addEventListener(
+				"click",
+				(e) => {
+					e.stopPropagation();
+					deleteWithUndo(
+						ctx,
+						{
+							op: "saveRegion",
+							path: target.path,
+							start: target.start,
+							end: target.end,
+							expected: target.original,
+							text: "",
+						},
+						"Section deleted",
+					);
+				},
 			);
 		}
 	} else if (ctx.editable) {
@@ -751,6 +851,12 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	const wrap = el.createDiv({ cls: "mica-tabs" });
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
 	wrap.setAttribute("data-mica-node", path.join("."));
+	const tkey = nodeFoldKey(path);
+	if (ctx.ui?.folded.has(tkey)) {
+		const n = node.children.filter((c) => c.kind === "container" && c.name === "tab").length;
+		renderFoldBar(wrap, ctx, tkey, "app-window", `Tabs · ${n}`, { path, itemEl: wrap });
+		return;
+	}
 	const navOuter = wrap.createDiv({ cls: "mica-tab-nav-outer" });
 	const nav = navOuter.createDiv({ cls: "mica-tab-nav", attr: { role: "tablist" } });
 	nav.setAttribute("data-mica-container", "tab");
@@ -856,6 +962,13 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				menu.showAtMouseEvent(e);
 			});
 		}
+		iconButton(sticky, "mica-minitool mica-group-fold", "chevrons-down-up", "Fold this tab group").addEventListener(
+			"click",
+			(e) => {
+				e.stopPropagation();
+				toggleFold(ctx, tkey);
+			},
+		);
 		const grip = iconButton(sticky, "mica-group-grip", "grip-vertical", "Drag to move this tab group");
 		makeDraggable(grip, "group", path, (op) => ctx.editable?.apply(op), wrap);
 		iconButton(sticky, "mica-group-x", "trash-2", "Delete tab group").addEventListener("click", (e) => {
@@ -997,7 +1110,20 @@ function mountColResizers(
 		strips.push(strip);
 		strip.addEventListener("dblclick", (e) => {
 			e.stopPropagation();
-			ctx.editable?.apply({ op: "setGroupAttr", path, key: "colw", value: null });
+			// Reset ONLY this pair: both take their average share; if that makes
+			// every column equal again, drop the attr entirely.
+			const w = [...widths];
+			const avg = (w[b - 1] + w[b]) / 2;
+			w[b - 1] = avg;
+			w[b] = avg;
+			const rounded = w.map((x) => Math.round(x * 100) / 100);
+			const uniform = rounded.every((x) => Math.abs(x - rounded[0]) < 0.03);
+			ctx.editable?.apply({
+				op: "setGroupAttr",
+				path,
+				key: "colw",
+				value: uniform ? null : rounded.join(","),
+			});
 		});
 		strip.addEventListener("pointerdown", (down) => {
 			if (down.button !== 0) return;
@@ -1048,6 +1174,15 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	const wrap = el.createDiv({ cls: "mica-grid-wrap" });
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
 	wrap.setAttribute("data-mica-node", path.join("."));
+	const gkey = nodeFoldKey(path);
+	if (ctx.ui?.folded.has(gkey)) {
+		const cells = node.children.filter((c) => c.kind === "container" && c.name === "cell").length;
+		renderFoldBar(wrap, ctx, gkey, "layout-grid", `Grid · ${cells} cell${cells === 1 ? "" : "s"}`, {
+			path,
+			itemEl: wrap,
+		});
+		return;
+	}
 	const grid = wrap.createDiv({ cls: "mica-grid" });
 	grid.setAttribute("data-mica-container", "cell");
 	grid.setAttribute("data-path", path.join("."));
@@ -1107,9 +1242,17 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 
 	if (ctx.editable) {
 		const tools = wrap.createDiv({ cls: "mica-grid-tools" });
+		iconButton(tools, "mica-minitool", "chevrons-down-up", "Fold this grid").addEventListener("click", (e) => {
+			e.stopPropagation();
+			toggleFold(ctx, gkey);
+		});
 		const topGrip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move this grid");
 		topGrip.addEventListener("click", (e) => e.stopPropagation());
 		makeDraggable(topGrip, "group", path, (op) => ctx.editable?.apply(op), wrap);
+		iconButton(tools, "mica-minitool mica-region-x", "x", "Delete grid").addEventListener("click", (e) => {
+			e.stopPropagation();
+			deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted");
+		});
 
 		// Column resizers: one draggable divider per interior column boundary.
 		if (cols > 1) mountColResizers(grid, ctx, path, cols, widths);

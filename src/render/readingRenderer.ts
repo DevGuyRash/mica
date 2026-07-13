@@ -39,7 +39,7 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 		if (id) {
 			ui = plugin.micaUi.get(id);
 			if (!ui) {
-				ui = { active: new Map(), reveal: null, draft: null, collapsed: false };
+				ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
 				plugin.micaUi.set(id, ui);
 			}
 		}

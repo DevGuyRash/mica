@@ -7,9 +7,9 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - **Daily-driver validation of the v0.2 rebuild** in the real vault: live with the
   quick editor / lightbox / pointer DnD (now incl. per-callout region drags) /
   versions timeline / block header for a few sessions. The automated gate
-  (169 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
-  34 e2e tests incl. DnD stress + grid-resize/wrap suites in a real Obsidian) is
-  green; lived-in feel is the remaining unknown.
+  (170 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
+  37 e2e tests incl. DnD stress + feature suites in a real Obsidian) is green;
+  lived-in feel is the remaining unknown.
 - **Callout-split signature churn (one-time)**: the parser now gives callouts
   their own leaf, so the content signature of blocks containing callouts changes
   once — expect a single spurious auto-snapshot per such block on first edit.
@@ -31,6 +31,10 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - **Row height resizing**: column widths ship (colw fractions + dividers);
   per-row heights were deliberately skipped (rows are content-sized) — revisit
   only if asked.
+- **Fold persistence**: folds are session-state (per-block UI store). If users
+  want folds to survive restarts, persist keys into fence attrs or data.json.
+- **Cell-level collapse**: deliberately skipped (a folded cell buys nothing in
+  a shared grid row) — section/group folds only.
 - **Versions modal**: n-up compare view exists in diffView but has no UI entry
   point; consider a "compare many" affordance if timeline use demands it.
 - **Navigator drag**: the block navigator lists/jumps; dragging rows to reorder

@@ -63,6 +63,8 @@ export interface MicaSettings {
 	blockHeaderMode: "hover" | "always" | "never";
 	/** Which side hover tools (drag grip, pencil, cell bar) sit on. */
 	dragHandlePosition: "left" | "right";
+	/** What clicking outside an inline editor does. */
+	editorClickOutside: "nothing" | "cancel" | "save";
 	/** Ordered editor-toolbar item ids ("|" = separator). */
 	toolbarLayout: string[];
 	/** Variant-group defaults (group id → variant id), following last use. */
@@ -95,6 +97,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 	blockHeaderMode: "hover",
 	dragHandlePosition: "right",
+	editorClickOutside: "nothing",
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
 	toolbarDefaults: {},
 	customTools: [],
@@ -336,6 +339,24 @@ export class MicaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Clicking outside an editor")
+			.setDesc(
+				"What happens to an open inline editor when you click elsewhere: keep editing, discard, or save & close (also prevents several cells editing at once).",
+			)
+			.addDropdown((d) =>
+				d
+					.addOption("nothing", "Keep editing")
+					.addOption("cancel", "Discard changes")
+					.addOption("save", "Save & close")
+					.setValue(s.editorClickOutside)
+					.onChange(async (v) => {
+						s.editorClickOutside = v as MicaSettings["editorClickOutside"];
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Hover tools position")
 			.setDesc("Which corner a section's drag grip and edit pencil (and a cell's toolbar) appear in.")
 			.addDropdown((d) =>
@@ -459,6 +480,7 @@ export class MicaSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setHeading().setName("Migration");
 
 		new Setting(containerEl)
+			.setClass("mica-setting-stack")
 			.setName("Import callouts as versions")
 			.setDesc(
 				"When migrating from obsidian-tabs, callouts of these comma-separated types become version history. Defaults to every built-in Obsidian type; leave empty to import ANY type (including custom ones), or narrow it (e.g. “success, bug, todo”).",
@@ -589,6 +611,11 @@ export class MicaSettingTab extends PluginSettingTab {
 					selectedCurrent = i;
 					selectedAvail = null;
 					paint();
+				});
+				row.addEventListener("dblclick", () => {
+					s.toolbarLayout.splice(i, 1);
+					selectedCurrent = -1;
+					void save().then(paint);
 				});
 			});
 			const curBtns = cur.createDiv({ cls: "mica-ribbon-order" });

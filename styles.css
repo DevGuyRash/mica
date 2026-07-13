@@ -1044,9 +1044,109 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 
 .mica-settings-wide {
 	width: 100%;
+	min-height: 64px;
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-smaller);
 	resize: vertical;
+}
+/* A setting whose control needs the full row (textareas, composers). */
+.setting-item.mica-setting-stack {
+	flex-direction: column;
+	align-items: stretch;
+}
+.setting-item.mica-setting-stack .setting-item-control {
+	width: 100%;
+	margin-top: 8px;
+	justify-content: flex-start;
+}
+.setting-item.mica-setting-stack .setting-item-control textarea {
+	flex: 1;
+}
+
+/* ---------- Toolbar ribbon composer (settings) ---------- */
+.mica-ribbon-editor {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+	gap: 10px;
+	align-items: stretch;
+	margin: 12px 0 18px;
+}
+.mica-ribbon-pane {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-secondary);
+	overflow: hidden;
+}
+.mica-ribbon-title {
+	padding: 7px 10px;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	color: var(--text-muted);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+.mica-ribbon-list {
+	flex: 1;
+	min-height: 200px;
+	max-height: 320px;
+	overflow-y: auto;
+	padding: 4px;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+.mica-ribbon-item {
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 8px;
+	width: 100%;
+	padding: 5px 8px;
+	border-radius: 6px;
+	font-size: var(--font-ui-small);
+	text-align: left;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.mica-ribbon-item.is-selected {
+	background: color-mix(in srgb, var(--mica-accent) 24%, transparent);
+	color: var(--text-normal);
+}
+.mica-ribbon-ico {
+	display: inline-flex;
+	flex-shrink: 0;
+}
+.mica-ribbon-ico .svg-icon {
+	width: 14px !important;
+	height: 14px !important;
+}
+.mica-ribbon-mid {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	gap: 6px;
+}
+.mica-ribbon-btn {
+	width: 30px;
+	height: 30px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+}
+.mica-ribbon-btn:hover {
+	border-color: var(--mica-accent);
+	color: var(--mica-accent);
+}
+.mica-ribbon-order {
+	display: flex;
+	gap: 6px;
+	padding: 6px 8px;
+	border-top: 1px solid var(--background-modifier-border);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1173,7 +1273,8 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-cell > .mica-region.is-sole > .mica-region-tools {
 	display: none !important;
 }
-.mica-region-grip {
+.mica-region-grip,
+.mica-minitool {
 	width: 22px;
 	height: 22px;
 	display: inline-flex;
@@ -1192,11 +1293,16 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-region-grip:active {
 	cursor: grabbing;
 }
-.mica-region-grip:hover {
+.mica-region-x:hover {
+	color: var(--text-error, #e05561) !important;
+}
+.mica-region-grip:hover,
+.mica-minitool:hover {
 	color: var(--mica-accent);
 	background: var(--background-modifier-hover);
 }
-.mica-region-grip .svg-icon {
+.mica-region-grip .svg-icon,
+.mica-minitool .svg-icon {
 	width: 13px;
 	height: 13px;
 }
@@ -1593,6 +1699,11 @@ body.mica-dnd-active * {
 }
 .mica-draggable {
 	touch-action: none;
+}
+.mica-group-fold {
+	border: none;
+	background: transparent;
+	padding: 0;
 }
 .mica-group-grip {
 	display: inline-flex;
@@ -2080,8 +2191,10 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	position: absolute;
 	top: 0;
 	bottom: 0;
-	right: -7px;
-	width: 14px;
+	/* Fully INSIDE the grid box — an overhang gets clipped by the body's
+	   overflow-x guard (the strip lives in the grid's right padding). */
+	right: 0;
+	width: 13px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -2124,6 +2237,48 @@ body[data-mica-grip="left"] .mica-cell-bar {
 }
 .mica-grid {
 	position: relative;
+}
+
+/* ---------- Folded sections / groups ---------- */
+.mica-fold-bar {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 5px 9px;
+	border: 1px dashed color-mix(in srgb, var(--mica-accent) 30%, var(--background-modifier-border));
+	border-radius: var(--mica-ctrl-radius, 7px);
+	background: color-mix(in srgb, var(--mica-accent) 4%, transparent);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	cursor: pointer;
+	user-select: none;
+}
+.mica-fold-bar:hover {
+	border-color: var(--mica-accent);
+	color: var(--text-normal);
+}
+.mica-fold-ico .svg-icon,
+.mica-fold-kind .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+.mica-fold-ico {
+	color: var(--mica-accent);
+	display: inline-flex;
+}
+.mica-fold-kind {
+	display: inline-flex;
+	opacity: 0.75;
+}
+.mica-fold-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.mica-region.is-folded,
+.mica-grid-wrap.is-folded,
+.mica-tabs.is-folded {
+	margin: 3px 0;
 }
 
 /* ---------- Grid hover tools + column resizers ---------- */

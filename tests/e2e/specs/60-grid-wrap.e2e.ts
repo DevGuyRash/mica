@@ -79,3 +79,111 @@ describe("grid column resize + wrap toggle", function () {
 		);
 	});
 });
+
+describe("round 6: folds, click-outside, region delete", function () {
+	it("folding a section collapses it to a bar and unfolds on click", async function () {
+		await seedAndOpen("Fold.md", "Intro.\n\n```mica id=fd-1\ntab: Main\n> [!note] Foldme\n\nprose after\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
+			{ timeout: 8000, timeoutMsg: "regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Foldme"),
+			) as HTMLElement;
+			(region.querySelector('[aria-label="Fold this section"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-fold-bar").length === 1),
+			{ timeout: 8000, timeoutMsg: "the fold bar never appeared" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-fold-bar") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() =>
+						document.querySelectorAll(".mica-lp .mica-fold-bar").length === 0 &&
+						Array.from(document.querySelectorAll(".mica-lp .mica-region")).some((r) =>
+							r.textContent?.includes("Foldme"),
+						),
+				),
+			{ timeout: 8000, timeoutMsg: "the section never unfolded" },
+		);
+	});
+
+	it("click-outside in save mode commits the open editor", async function () {
+		await browser.executeObsidian(({ app }) => {
+			type P = { settings: { editorClickOutside: string }; applyStyleVars(): void };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, P> } }).plugins.plugins["mica"];
+			plugin.settings.editorClickOutside = "save";
+			plugin.applyStyleVars();
+		});
+		await seedAndOpen("ClickOut.md", "Intro.\n\n```mica id=co-1\ntab: Main\noriginal text\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			{ timeout: 8000, timeoutMsg: "region never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-region.is-editable") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(
+						(document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null)?.shadowRoot?.querySelector(
+							".cm-content",
+						),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "editor never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { setValue(v: string): void };
+			};
+			host.micaEditor?.setValue("edited by click-out");
+			// Click far outside the editor (body counts: it contains no editor).
+			document.body.dispatchEvent(
+				new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerId: 9 }),
+			);
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("edited by click-out");
+				}),
+			{ timeout: 8000, timeoutMsg: "the click-outside save never landed" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			type P = { settings: { editorClickOutside: string }; applyStyleVars(): void };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, P> } }).plugins.plugins["mica"];
+			plugin.settings.editorClickOutside = "nothing";
+			plugin.applyStyleVars();
+		});
+	});
+
+	it("the region ✕ deletes the section (with undo pre-image applied)", async function () {
+		await seedAndOpen("RegionDel.md", "Intro.\n\n```mica id=rd-1\ntab: Main\nkeep me\n\n> [!tip] Delete me\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
+			{ timeout: 8000, timeoutMsg: "regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Delete me"),
+			) as HTMLElement;
+			(region.querySelector('[aria-label="Delete this section"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return !v.includes("Delete me") && v.includes("keep me");
+				}),
+			{ timeout: 8000, timeoutMsg: "the section was not deleted" },
+		);
+	});
+});

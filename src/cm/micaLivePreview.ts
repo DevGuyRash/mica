@@ -70,7 +70,7 @@ class MicaWidget extends WidgetType {
 		const key = this.id ?? `@${this.start}`;
 		let ui = this.plugin.micaUi.get(key);
 		if (!ui) {
-			ui = { active: new Map(), reveal: null, draft: null, collapsed: false };
+			ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
 			this.plugin.micaUi.set(key, ui);
 		}
 		return ui;

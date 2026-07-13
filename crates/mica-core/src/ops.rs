@@ -1349,6 +1349,24 @@ mod tests {
     }
 
     #[test]
+    fn save_region_with_empty_text_deletes_the_run() {
+        // The region "x" toolbar uses this as its delete op.
+        let src = "tab: A\nalpha\n\n> [!note] Hi\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::SaveRegion {
+                path: vec![0, 0],
+                start: 1,
+                end: 2,
+                expected: "> [!note] Hi\n".into(),
+                text: String::new(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "tab: A\nalpha\n\n");
+    }
+
+    #[test]
     fn set_group_attr_writes_and_removes_tokens() {
         // Write colw next to cols…
         let (ok, out) = apply(

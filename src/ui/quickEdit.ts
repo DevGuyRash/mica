@@ -16,6 +16,82 @@ export function draftKey(t: RegionTarget): string {
 	return `${t.path.join(",")}:${t.start}:${t.end}`;
 }
 
+// ---------------------------------------------------------------------------
+// Open-editor registry: click-outside behavior + save-all semantics
+// ---------------------------------------------------------------------------
+
+export type ClickOutsideMode = "nothing" | "cancel" | "save";
+
+let clickOutsideMode: ClickOutsideMode = "nothing";
+
+/** Called from settings load/change — how clicking outside an editor acts. */
+export function setEditorBehavior(mode: ClickOutsideMode): void {
+	clickOutsideMode = mode;
+}
+
+interface OpenEditor {
+	region: HTMLElement;
+	target: RegionTarget;
+	getValue: () => string;
+	applyOp: (value: string) => void;
+	/** Destroy the editor locally (no doc change, draft cleared). */
+	closeLocal: () => void;
+}
+
+const openEditors = new Set<OpenEditor>();
+
+/** Later regions first, so earlier splices can't shift later targets. */
+function byDocOrderDesc(a: OpenEditor, b: OpenEditor): number {
+	const pa = a.target.path;
+	const pb = b.target.path;
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const d = (pb[i] ?? -1) - (pa[i] ?? -1);
+		if (d) return d;
+	}
+	return b.target.start - a.target.start;
+}
+
+/**
+ * Commit EVERY open editor (the user asked that one Save closes them all).
+ * Values are snapshotted before any op runs — the first apply re-renders the
+ * block and destroys the other editors' DOM.
+ */
+export function commitAllOpen(): void {
+	sweepDetached();
+	const jobs = [...openEditors].map((e) => ({ e, value: e.getValue() }));
+	for (const { e } of jobs) e.closeLocal();
+	jobs.filter((j) => j.value !== j.e.target.original)
+		.sort((a, b) => byDocOrderDesc(a.e, b.e))
+		.forEach((j) => j.e.applyOp(j.value));
+}
+
+/** Widget rebuilds (mode flips, cursor overlap) can destroy an editor's DOM
+ *  without unregistering it — drop entries whose region left the document. */
+function sweepDetached(): void {
+	for (const ed of [...openEditors]) if (!ed.region.isConnected) openEditors.delete(ed);
+}
+
+function onDocPointerDown(e: PointerEvent): void {
+	if (!openEditors.size) return;
+	sweepDetached();
+	if (clickOutsideMode === "nothing" || !openEditors.size) return;
+	const t = e.target as HTMLElement | null;
+	if (!t) return;
+	// Menus, modals, and toolbar popovers belong to the editing session.
+	if (t.closest(".menu, .modal, .mica-popover, .suggestion-container")) return;
+	for (const ed of [...openEditors]) {
+		if (ed.region.contains(t)) continue;
+		if (clickOutsideMode === "save") {
+			const value = ed.getValue();
+			ed.closeLocal();
+			if (value !== ed.target.original) ed.applyOp(value);
+		} else {
+			ed.closeLocal();
+		}
+	}
+}
+document.addEventListener("pointerdown", onDocPointerDown, true);
+
 /**
  * The inline quick editor: a compact CodeMirror markdown editor with a mini
  * toolbar and a PINNED action bar on top (targets never move while the editor
@@ -71,30 +147,32 @@ export function openQuickEdit(region: HTMLElement, ctx: RenderCtx, target: Regio
 	buildToolbar(tools, ctx.app, () => editor.view, true);
 
 	const closeToView = (): void => {
+		openEditors.delete(entry);
 		setDraft(null);
 		editor.destroy();
 		region.removeClass("is-editing");
 		ctx.repaintRegion?.(region, target);
 	};
 
-	const commit = (): void => {
-		const val = editor.getValue();
-		if (val === target.original) {
-			closeToView();
-			return;
-		}
-		setDraft(null);
-		editor.destroy();
-		region.removeClass("is-editing");
-		ctx.editable?.apply({
-			op: "saveRegion",
-			path: target.path,
-			start: target.start,
-			end: target.end,
-			expected: target.original,
-			text: val,
-		});
+	const entry: OpenEditor = {
+		region,
+		target,
+		getValue: () => editor.getValue(),
+		applyOp: (value) =>
+			ctx.editable?.apply({
+				op: "saveRegion",
+				path: target.path,
+				start: target.start,
+				end: target.end,
+				expected: target.original,
+				text: value,
+			}),
+		closeLocal: closeToView,
 	};
+	openEditors.add(entry);
+
+	// One Save commits every open editor (registry semantics).
+	const commit = (): void => commitAllOpen();
 
 	const requestCancel = (): void => {
 		if (editor.getValue() === target.original || discardArmed) {
@@ -113,6 +191,7 @@ export function openQuickEdit(region: HTMLElement, ctx: RenderCtx, target: Regio
 	cancel.addEventListener("click", requestCancel);
 	expand.addEventListener("mousedown", (e) => e.preventDefault());
 	expand.addEventListener("click", () => {
+		openEditors.delete(entry);
 		const value = editor.getValue();
 		editor.destroy();
 		region.removeClass("is-editing");

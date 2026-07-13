@@ -1,5 +1,6 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
+import { setEditorBehavior } from "./ui/quickEdit";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
@@ -199,6 +200,7 @@ export default class MicaPlugin extends Plugin {
 		b.setAttribute("data-mica-density", s.density);
 		b.setAttribute("data-mica-tabstyle", s.tabStyle);
 		b.setAttribute("data-mica-grip", s.dragHandlePosition);
+		setEditorBehavior(s.editorClickOutside);
 		b.toggleClass("mica-animate", s.animations);
 		const set = (k: string, v: string | null): void => {
 			if (v === null) b.style.removeProperty(k);
