@@ -1,4 +1,9 @@
 {
 	"cssTheme": "Cyber Glow",
-	"enabledCssSnippets": ["typography", "ui-misc", "mcl-slim"]
+	"enabledCssSnippets": [
+		"typography",
+		"ui-misc",
+		"mcl-slim",
+		"sandbox-motion"
+	]
 }

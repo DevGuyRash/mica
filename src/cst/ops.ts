@@ -21,7 +21,8 @@ export type StructOp =
 	| { op: "insertLeaf"; path: number[]; at: number; text: string }
 	| { op: "deleteNode"; path: number[] }
 	| { op: "duplicateNode"; path: number[] }
-	| { op: "moveNode"; from: number[]; toParent: number[]; toIndex: number };
+	| { op: "moveNode"; from: number[]; toParent: number[]; toIndex: number }
+	| { op: "moveRegion"; path: number[]; start: number; end: number; toParent: number[]; toIndex: number };
 
 /** Where the renderer should place focus after an op re-renders the block. */
 export interface Reveal {

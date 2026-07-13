@@ -654,33 +654,6 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	box-shadow: inset 0 -3px 0 0 var(--mica-accent);
 }
 
-.mica-cell-drag {
-	position: absolute;
-	top: 4px;
-	left: 4px;
-	display: grid;
-	place-items: center;
-	width: 18px;
-	height: 18px;
-	padding: 0;
-	border: none;
-	border-radius: var(--mica-ctrl-radius);
-	background: transparent;
-	color: var(--text-faint);
-	line-height: 1;
-	cursor: grab;
-	opacity: 0;
-	transition: opacity 0.12s;
-}
-
-.mica-cell:hover .mica-cell-drag {
-	opacity: 0.7;
-}
-
-.mica-cell-drag:active {
-	cursor: grabbing;
-}
-
 /* ---------- Live Preview wrapper ---------- */
 .mica-lp {
 	margin: 0.5em 0;
@@ -1156,32 +1129,56 @@ body.mica-theme-solar {
 .mica-region {
 	position: relative;
 }
-.mica-region-pencil {
+.mica-region-tools {
 	position: absolute;
 	top: 4px;
 	right: 4px;
-	width: 22px;
-	height: 22px;
 	display: none;
-	align-items: center;
-	justify-content: center;
-	padding: 0;
+	gap: 2px;
+	padding: 1px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 6px;
 	background: var(--background-primary);
-	color: var(--text-muted);
-	cursor: pointer;
 	box-shadow: var(--shadow-s);
 	z-index: 3;
 }
-.mica-region.is-editable:hover .mica-region-pencil {
+body[data-mica-grip="left"] .mica-region-tools {
+	right: auto;
+	left: 4px;
+}
+.mica-region.is-editable:hover > .mica-region-tools {
 	display: inline-flex;
 }
-.mica-region-pencil:hover {
-	color: var(--mica-accent);
-	border-color: var(--mica-accent);
+.mica-region.is-editing > .mica-region-tools {
+	display: none;
 }
-.mica-region-pencil .svg-icon {
+.mica-region-pencil,
+.mica-region-grip {
+	width: 22px;
+	height: 22px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+.mica-region-grip {
+	cursor: grab;
+}
+.mica-region-grip:active {
+	cursor: grabbing;
+}
+.mica-region-pencil:hover,
+.mica-region-grip:hover {
+	color: var(--mica-accent);
+	background: var(--background-modifier-hover);
+}
+.mica-region-pencil .svg-icon,
+.mica-region-grip .svg-icon {
 	width: 13px;
 	height: 13px;
 }
@@ -1622,6 +1619,10 @@ body.mica-dnd-active * {
 }
 .mica-cell:hover > .mica-cell-bar {
 	display: inline-flex;
+}
+body[data-mica-grip="left"] .mica-cell-bar {
+	right: auto;
+	left: 4px;
 }
 .mica-cell-tool {
 	display: inline-flex;

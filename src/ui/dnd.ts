@@ -16,7 +16,15 @@ import type { StructOp } from "../cst/ops";
  * one `moveNode` op on drop.
  */
 
-export type DragKind = "tab" | "cell" | "group";
+export type DragKind = "tab" | "cell" | "group" | "region";
+
+/** What is being dragged: a node (tab/cell/group) or a leaf run (region). */
+export interface DragSpec {
+	kind: DragKind;
+	fromPath: number[];
+	/** Present for region drags: the leaf run `[start, end)` within `fromPath`. */
+	region?: { start: number; end: number };
+}
 
 interface Slot {
 	parentPath: number[];
@@ -36,6 +44,7 @@ interface Slot {
 interface ActiveDrag {
 	kind: DragKind;
 	fromPath: number[];
+	region?: { start: number; end: number };
 	source: HTMLElement;
 	ghost: HTMLElement;
 	indicator: HTMLElement;
@@ -60,11 +69,12 @@ const parsePath = (s: string | undefined): number[] => (s ? s.split(".").map(Num
  */
 export function makeDraggable(
 	handle: HTMLElement,
-	kind: DragKind,
+	spec: DragKind | DragSpec,
 	path: number[],
 	apply: (op: StructOp) => void,
 	itemEl?: HTMLElement,
 ): void {
+	const resolved: DragSpec = typeof spec === "string" ? { kind: spec, fromPath: path } : spec;
 	handle.addClass("mica-draggable");
 	handle.addEventListener("pointerdown", (down: PointerEvent) => {
 		if (down.button !== 0 || down.ctrlKey || down.metaKey) return;
@@ -79,7 +89,7 @@ export function makeDraggable(
 				started = true;
 				// Suppress the click that would otherwise follow this drag.
 				handle.addEventListener("click", swallowClick, { capture: true, once: true });
-				beginDrag(e, kind, path, item, apply);
+				beginDrag(e, resolved, item, apply);
 			}
 			if (active) dragMove(e);
 		};
@@ -91,6 +101,11 @@ export function makeDraggable(
 				e.preventDefault();
 				e.stopPropagation();
 				finishDrag(e.type === "pointerup");
+			}
+			if (started) {
+				// If no click follows (released off-element), disarm the one-shot
+				// swallow so the NEXT real click isn't eaten.
+				window.setTimeout(() => handle.removeEventListener("click", swallowClick, { capture: true }), 0);
 			}
 		};
 		window.addEventListener("pointermove", move, true);
@@ -104,13 +119,8 @@ function swallowClick(e: MouseEvent): void {
 	e.stopPropagation();
 }
 
-function beginDrag(
-	e: PointerEvent,
-	kind: DragKind,
-	fromPath: number[],
-	item: HTMLElement,
-	apply: (op: StructOp) => void,
-): void {
+function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (op: StructOp) => void): void {
+	const { kind, fromPath } = spec;
 	const root = item.closest(".mica") as HTMLElement | null;
 	if (!root) return;
 
@@ -136,11 +146,12 @@ function beginDrag(
 	active = {
 		kind,
 		fromPath,
+		region: spec.region,
 		source: item,
 		ghost,
 		indicator,
 		root,
-		slots: computeSlots(root, kind, fromPath),
+		slots: computeSlots(root, spec),
 		current: null,
 		offsetX: e.clientX - rect.left,
 		offsetY: e.clientY - rect.top,
@@ -170,16 +181,30 @@ function beginDrag(
  * reorders that column and crossing into another column is an explicit,
  * visible act. Indicators span the full gap they represent.
  */
-function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Slot[] {
-	const wanted = kind === "group" ? "group" : kind;
+function computeSlots(root: HTMLElement, spec: DragSpec): Slot[] {
+	const { kind, fromPath } = spec;
+	const wanted = kind === "group" || kind === "region" ? "group" : kind;
 	const slots: Slot[] = [];
 	const fromKey = fromPath.join(".");
+	const fromParentKey = fromPath.slice(0, -1).join(".");
+	const fromIdx = fromPath[fromPath.length - 1] ?? -1;
+
+	/** Drop the slots that would be NO-OPS — an indicator must never promise a
+	 *  move that changes nothing (the gaps hugging the dragged item itself). */
+	const isNoop = (parentPath: number[], index: number): boolean => {
+		const pk = parentPath.join(".");
+		if (spec.region) {
+			return pk === fromKey && index >= spec.region.start && index <= spec.region.end;
+		}
+		return pk === fromParentKey && (index === fromIdx || index === fromIdx + 1);
+	};
 
 	for (const el of Array.from(root.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
 		const parentPath = parsePath(el.dataset.path);
 		const parentKey = parentPath.join(".");
-		// Never offer slots inside the dragged node's own subtree.
-		if (fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
+		// Never offer slots inside the dragged node's own subtree (regions are
+		// leaves — they have no subtree to exclude).
+		if (!spec.region && fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
 		const rect = el.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) continue; // hidden panel
 		const len = Number(el.dataset.len ?? "0");
@@ -270,34 +295,41 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 		}
 
 		const horizontal = el.dataset.axis === "x";
+		let prevEdge: number | null = null;
 		for (const kid of kids) {
 			const idx = Number(kid.dataset.micaIdx ?? "0");
 			const r = kid.getBoundingClientRect();
-			slots.push(
-				horizontal
-					? {
-							parentPath,
-							index: idx,
-							x: r.left - 2,
-							y: r.top,
-							w: 3,
-							h: r.height,
-							cx: r.left,
-							cy: r.top + r.height / 2,
-							container,
-						}
-					: {
-							parentPath,
-							index: idx,
-							x: rect.left + 4,
-							y: r.top - 2,
-							w: rect.width - 8,
-							h: 3,
-							cx: rect.left + rect.width / 2,
-							cy: r.top,
-							container,
-						},
-			);
+			if (horizontal) {
+				// Centre the line in the gap between siblings, so it reads as
+				// "between A and B" — never as pointing at either one.
+				const gx = prevEdge === null ? r.left - 2 : (prevEdge + r.left) / 2;
+				slots.push({
+					parentPath,
+					index: idx,
+					x: gx - 1.5,
+					y: r.top,
+					w: 3,
+					h: r.height,
+					cx: gx,
+					cy: r.top + r.height / 2,
+					container,
+				});
+				prevEdge = r.right;
+			} else {
+				const gy = prevEdge === null ? r.top - 2 : (prevEdge + r.top) / 2;
+				slots.push({
+					parentPath,
+					index: idx,
+					x: rect.left + 4,
+					y: gy - 1.5,
+					w: rect.width - 8,
+					h: 3,
+					cx: rect.left + rect.width / 2,
+					cy: gy,
+					container,
+				});
+				prevEdge = r.bottom;
+			}
 		}
 		// Append slot after the last child.
 		const last = kids[kids.length - 1];
@@ -328,7 +360,7 @@ function computeSlots(root: HTMLElement, kind: DragKind, fromPath: number[]): Sl
 					},
 		);
 	}
-	return slots;
+	return slots.filter((s) => !isNoop(s.parentPath, s.index));
 }
 
 function dragMove(e: PointerEvent): void {
@@ -377,7 +409,10 @@ function springLoad(e: PointerEvent): void {
 	const d = active;
 	if (!d) return;
 	const under = document.elementFromPoint(e.clientX, e.clientY);
-	const chip = (under as HTMLElement | null)?.closest<HTMLElement>(".mica-tab-btn:not(.is-active)") ?? null;
+	// Match the whole chip (its button is a child, so `closest` from the chip's
+	// padding or its ✕ affordance would miss a `.mica-tab-btn` selector).
+	const chipWrap = (under as HTMLElement | null)?.closest<HTMLElement>(".mica-tab-chip") ?? null;
+	const chip = chipWrap?.querySelector<HTMLElement>(".mica-tab-btn:not(.is-active)") ?? null;
 	if (chip === d.springEl) return;
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
 	d.springEl = chip;
@@ -386,7 +421,7 @@ function springLoad(e: PointerEvent): void {
 		if (!active || active.springEl !== chip) return;
 		chip.click();
 		// The panel switch re-lays-out the block — recompute geometry.
-		active.slots = computeSlots(active.root, active.kind, active.fromPath);
+		active.slots = computeSlots(active.root, { kind: active.kind, fromPath: active.fromPath, region: active.region });
 	}, 450);
 }
 
@@ -407,7 +442,7 @@ function autoScroll(e: PointerEvent): void {
 		const step = (): void => {
 			if (!active) return;
 			scroller.scrollTop += dy;
-			active.slots = computeSlots(active.root, active.kind, active.fromPath);
+			active.slots = computeSlots(active.root, { kind: active.kind, fromPath: active.fromPath, region: active.region });
 			active.scrollRaf = window.requestAnimationFrame(step);
 		};
 		d.scrollRaf = window.requestAnimationFrame(step);
@@ -423,6 +458,17 @@ function finishDrag(commit: boolean): void {
 	d.cleanup();
 	if (!commit || !d.current) return;
 	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => void }).apply;
+	if (d.region) {
+		apply?.({
+			op: "moveRegion",
+			path: d.fromPath,
+			start: d.region.start,
+			end: d.region.end,
+			toParent: d.current.parentPath,
+			toIndex: d.current.index,
+		});
+		return;
+	}
 	apply?.({
 		op: "moveNode",
 		from: d.fromPath,

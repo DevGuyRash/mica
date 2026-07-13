@@ -155,6 +155,7 @@ export default class MicaPlugin extends Plugin {
 		b.removeClass("mica-animate");
 		b.removeAttribute("data-mica-density");
 		b.removeAttribute("data-mica-tabstyle");
+		b.removeAttribute("data-mica-grip");
 		for (const k of [
 			"--mica-accent",
 			"--mica-radius",
@@ -197,6 +198,7 @@ export default class MicaPlugin extends Plugin {
 		b.addClass(`mica-theme-${s.theme}`);
 		b.setAttribute("data-mica-density", s.density);
 		b.setAttribute("data-mica-tabstyle", s.tabStyle);
+		b.setAttribute("data-mica-grip", s.dragHandlePosition);
 		b.toggleClass("mica-animate", s.animations);
 		const set = (k: string, v: string | null): void => {
 			if (v === null) b.style.removeProperty(k);

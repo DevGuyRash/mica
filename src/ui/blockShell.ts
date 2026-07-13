@@ -462,28 +462,35 @@ interface NodesOpts {
 function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: number[], opts: NodesOpts = {}): void {
 	let i = 0;
 	let opened = false;
-	let rendered = 0;
 	while (i < nodes.length) {
 		if (nodes[i].kind === "leaf") {
-			let j = i;
-			let md = "";
-			while (j < nodes.length && nodes[j].kind === "leaf") {
-				md += (nodes[j] as Leaf).text;
-				j++;
+			// The parser splits callouts and code fences into their own leaves;
+			// each becomes its own region (grip + pencil). Whitespace-only
+			// leaves glue to the PRECEDING unit so spacing between sections
+			// never renders as a phantom empty region.
+			const isWsLeaf = (n: number): boolean =>
+				n < nodes.length && nodes[n].kind === "leaf" && !(nodes[n] as Leaf).text.trim();
+			const isLeaf = (n: number): boolean => n < nodes.length && nodes[n].kind === "leaf";
+			while (isLeaf(i)) {
+				// One unit = leading spacing + one content leaf + trailing spacing.
+				let j = i;
+				while (isWsLeaf(j)) j++;
+				if (isLeaf(j)) j++;
+				while (isWsLeaf(j)) j++;
+				let md = "";
+				for (let k = i; k < j; k++) md += (nodes[k] as Leaf).text;
+				if (ctx.editable && i > 0) renderInsertZone(el, ctx, path, i);
+				const auto: boolean = Boolean(opts.autoOpen) && !opened;
+				renderRegion(el, ctx, { path, start: i, end: j, original: md }, auto);
+				opened = opened || auto;
+				i = j;
 			}
-			// A boundary after a container gets its insert zone too.
-			if (ctx.editable && i > 0) renderInsertZone(el, ctx, path, i);
-			const auto: boolean = Boolean(opts.autoOpen) && !opened;
-			renderRegion(el, ctx, { path, start: i, end: j, original: md }, auto);
-			opened = opened || auto;
-			i = j;
 		} else {
 			// Insert-between zones — including BEFORE the first section.
 			if (ctx.editable) renderInsertZone(el, ctx, path, i);
 			renderContainer(nodes[i] as Container, el, ctx, [...path, i]);
 			i++;
 		}
-		rendered++;
 	}
 	if (ctx.editable && nodes.length === 0) {
 		renderRegion(el, ctx, { path, start: 0, end: 0, original: "" }, Boolean(opts.autoOpen) && !opened);
@@ -615,6 +622,7 @@ const INTERACTIVE = "a, button, input, textarea, .internal-link, .mica-mdeditor"
 
 function renderRegion(el: HTMLElement, ctx: RenderCtx, target: RegionTarget, autoOpen: boolean): void {
 	const region = el.createDiv({ cls: "mica-region" });
+	if (target.start < target.end) region.setAttribute("data-mica-idx", String(target.start));
 	paintRegionView(region, ctx, target);
 
 	if (ctx.editable) {
@@ -668,7 +676,18 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 	if (target.original.trim()) {
 		renderMarkdown(target.original, view, ctx);
 		if (ctx.editable) {
-			const pencil = iconButton(region, "mica-region-pencil", "pencil", "Edit (Ctrl+click for the full editor)");
+			// Hover tools live together at the region's corner: grip then pencil.
+			const tools = region.createDiv({ cls: "mica-region-tools" });
+			const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move this section");
+			grip.addEventListener("click", (e) => e.stopPropagation());
+			makeDraggable(
+				grip,
+				{ kind: "region", fromPath: target.path, region: { start: target.start, end: target.end } },
+				target.path,
+				(op) => ctx.editable?.apply(op),
+				region,
+			);
+			const pencil = iconButton(tools, "mica-region-pencil", "pencil", "Edit (Ctrl+click for the full editor)");
 			pencil.addEventListener("click", (e) => {
 				e.stopPropagation();
 				if (e.ctrlKey || e.metaKey) openLightboxFor(ctx, target);

@@ -56,6 +56,8 @@ export interface MicaSettings {
 	versionCalloutTypes: string;
 	/** Block header bar: revealed on hover, always shown, or never. */
 	blockHeaderMode: "hover" | "always" | "never";
+	/** Which side hover tools (drag grip, pencil, cell bar) sit on. */
+	dragHandlePosition: "left" | "right";
 	/** Ordered editor-toolbar item ids ("|" = separator). */
 	toolbarLayout: string[];
 	/** Variant-group defaults (group id → variant id), following last use. */
@@ -85,6 +87,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	animations: true,
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 	blockHeaderMode: "hover",
+	dragHandlePosition: "right",
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
 	toolbarDefaults: {},
 	customTools: [],
@@ -321,6 +324,21 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.blockHeaderMode)
 					.onChange(async (v) => {
 						s.blockHeaderMode = v as MicaSettings["blockHeaderMode"];
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Hover tools position")
+			.setDesc("Which corner a section's drag grip and edit pencil (and a cell's toolbar) appear in.")
+			.addDropdown((d) =>
+				d
+					.addOption("right", "Top right")
+					.addOption("left", "Top left")
+					.setValue(s.dragHandlePosition)
+					.onChange(async (v) => {
+						s.dragHandlePosition = v as MicaSettings["dragHandlePosition"];
+						this.micaPlugin.applyStyleVars();
 						await save();
 					}),
 			);

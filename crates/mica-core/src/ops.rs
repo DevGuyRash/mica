@@ -148,6 +148,23 @@ pub enum StructOp {
         /// Insertion index in the destination's children.
         to_index: usize,
     },
+    /// Move a leaf RUN (`[start, end)` of the container at `path`) — prose,
+    /// callouts, code blocks — into `to_parent` at `to_index`. Leaves may land
+    /// in any container except directly inside a tabs strip or a grid's cell
+    /// list (they would be invisible there).
+    #[serde(rename_all = "camelCase")]
+    MoveRegion {
+        /// Container whose children hold the run (`[]` = block root).
+        path: Vec<usize>,
+        /// First child index of the run.
+        start: usize,
+        /// One past the last child index of the run.
+        end: usize,
+        /// Path of the destination container (`[]` = block root).
+        to_parent: Vec<usize>,
+        /// Insertion index in the destination's children.
+        to_index: usize,
+    },
 }
 
 /// Apply `op` to `cst` in place.
@@ -374,6 +391,13 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             to_parent,
             to_index,
         } => move_node(cst, from, to_parent, *to_index),
+        StructOp::MoveRegion {
+            path,
+            start,
+            end,
+            to_parent,
+            to_index,
+        } => move_region(cst, path, *start, *end, to_parent, *to_index),
     }
 }
 
@@ -716,6 +740,74 @@ fn move_node(cst: &mut Cst, from: &[usize], to_parent: &[usize], to_index: usize
             remove_node_at(cst, &src_parent_path);
         }
     }
+    true
+}
+
+/// The `MoveRegion` implementation: validate, splice out, re-index, splice in.
+fn move_region(
+    cst: &mut Cst,
+    path: &[usize],
+    start: usize,
+    end: usize,
+    to_parent: &[usize],
+    to_index: usize,
+) -> bool {
+    if start >= end {
+        return false;
+    }
+    // Destination must be a container that RENDERS leaves: not a tabs strip,
+    // not a grid's cell list.
+    if !to_parent.is_empty() {
+        match node_at(cst, to_parent) {
+            Some(Node::Container { name, .. }) if name != "tabs" && name != "grid" => {}
+            _ => return false,
+        }
+    }
+    // The run must be all-leaf and in range.
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        if end > children.len() || !children[start..end].iter().all(|n| matches!(n, Node::Leaf { .. })) {
+            return false;
+        }
+    }
+    let same = to_parent == path;
+    let count = end - start;
+    // Same-container no-op: dropping back into (or adjacent to) its own span.
+    if same && to_index >= start && to_index <= end {
+        return false;
+    }
+
+    let Some(src_children) = children_at_mut(cst, path) else {
+        return false;
+    };
+    let run: Vec<Node> = src_children.splice(start..end, std::iter::empty()).collect();
+
+    // Re-index the destination for the removal.
+    let mut at = to_index;
+    let mut dest_path: Vec<usize> = to_parent.to_vec();
+    if same {
+        if at > end {
+            at -= count;
+        }
+    } else {
+        let d = path.len();
+        if dest_path.len() > d && dest_path[..d] == *path && dest_path[d] >= end {
+            dest_path[d] -= count;
+        }
+    }
+
+    let Some(dest_children) = children_at_mut(cst, &dest_path) else {
+        // Destination vanished — restore the run.
+        if let Some(src) = children_at_mut(cst, path) {
+            let idx = start.min(src.len());
+            src.splice(idx..idx, run);
+        }
+        return false;
+    };
+    let at = at.min(dest_children.len());
+    dest_children.splice(at..at, run);
     true
 }
 
@@ -1399,6 +1491,62 @@ mod tests {
             out,
             ":::grid {cols=2}\n:::cell\nc\n:::tabs\n:::tab A\na\n:::\n:::\n:::\n:::\n"
         );
+    }
+
+    #[test]
+    fn move_region_relocates_leaf_runs() {
+        // Tab A parses as [prose "alpha\n\n", callout leaf] — move just the
+        // callout into tab B, after its existing content.
+        let src = "tab: A\nalpha\n\n> [!note] Hi\ntab: B\nbeta\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveRegion { path: vec![0, 0], start: 1, end: 2, to_parent: vec![0, 1], to_index: 1 },
+        );
+        assert!(ok);
+        assert_eq!(out, "tab: A\nalpha\n\ntab: B\nbeta\n> [!note] Hi\n");
+    }
+
+    #[test]
+    fn move_region_within_same_container_reorders_around_sibling() {
+        // Root: [leaf intro, grid, leaf outro] — move outro before the grid.
+        let src = "intro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\noutro\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveRegion { path: vec![], start: 2, end: 3, to_parent: vec![], to_index: 1 },
+        );
+        assert!(ok);
+        assert_eq!(out, "intro\noutro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\n");
+    }
+
+    #[test]
+    fn move_region_same_position_is_noop() {
+        let src = "intro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\noutro\n";
+        for to_index in [2usize, 3usize] {
+            let (ok, out) = apply(
+                src,
+                StructOp::MoveRegion { path: vec![], start: 2, end: 3, to_parent: vec![], to_index },
+            );
+            assert!(!ok, "to_index {to_index} is the run's own position");
+            assert_eq!(out, src);
+        }
+    }
+
+    #[test]
+    fn move_region_rejects_bad_targets() {
+        let src = "tab: A\nalpha\ntab: B\nbeta\n";
+        // Into the tabs STRIP (children of tabs) — leaves are invisible there.
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveRegion { path: vec![0, 0], start: 0, end: 1, to_parent: vec![0], to_index: 1 },
+        );
+        assert!(!ok);
+        assert_eq!(out, src);
+        // Out-of-range run.
+        let (ok2, _) = apply(
+            src,
+            StructOp::MoveRegion { path: vec![0, 0], start: 5, end: 6, to_parent: vec![0, 1], to_index: 0 },
+        );
+        assert!(!ok2);
     }
 
     #[test]

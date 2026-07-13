@@ -1,0 +1,8 @@
+/* Sandbox-only: the wdio/Xvfb compositor never advances CSS animations, so
+ * the theme's slide-down ENTRANCE (from translateY(-100%), fill forwards)
+ * pins every .view-content one pane-height above the window — breaking any
+ * test that hit-tests real pixels (elementFromPoint). Disable entrance
+ * MOTION only; every static hostile rule this vault exists to test stays. */
+.workspace-split.mod-vertical.mod-root .workspace-tabs:not(.mod-stacked) .view-content {
+	animation: none !important;
+}

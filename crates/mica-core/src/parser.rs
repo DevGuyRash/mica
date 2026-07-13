@@ -185,7 +185,30 @@ fn parse_children(
             continue;
         }
 
-        // 5. Ordinary markdown content.
+        // 5. A callout header (`> [!type]`) opens a self-contained callout
+        //    leaf — like a code fence, it is a unit users move and edit whole.
+        //    Quoted continuations stay inside; a NEW top-level callout header
+        //    or any unquoted line ends it.
+        if callout_open(text) {
+            flush_md(&mut children, &mut md);
+            let mut callout = String::from(line);
+            *pos += 1;
+            while *pos < lines.len() {
+                let t = trim_eol(lines[*pos]);
+                if !quoted_line(t) || callout_open(t) {
+                    break;
+                }
+                callout.push_str(lines[*pos]);
+                *pos += 1;
+            }
+            children.push(Node::Leaf {
+                text: callout,
+                is_code: false,
+            });
+            continue;
+        }
+
+        // 6. Ordinary markdown content.
         md.push_str(line);
         *pos += 1;
     }
@@ -307,6 +330,21 @@ fn code_open(text: &str) -> Option<(u8, usize)> {
         return None;
     }
     Some((fc, fl))
+}
+
+/// An Obsidian/Admonition callout header: `> [!type] optional title`.
+/// A nested `> > [!type]` does NOT match — it belongs to its parent callout.
+fn callout_open(text: &str) -> bool {
+    let t = text.trim_start();
+    let Some(rest) = t.strip_prefix('>') else {
+        return false;
+    };
+    rest.trim_start().starts_with("[!")
+}
+
+/// Any blockquote-continuation line (`>`-prefixed).
+fn quoted_line(text: &str) -> bool {
+    text.trim_start().starts_with('>')
 }
 
 fn is_code_close(text: &str, fence_char: u8, fence_len: usize) -> bool {
@@ -538,9 +576,59 @@ mod tests {
     }
 
     #[test]
+    fn callout_becomes_its_own_leaf() {
+        // Callouts are self-contained blocks users drag and edit as units —
+        // the parser gives them their own leaf, exactly like code fences.
+        let cst = parse_block_impl("intro\n\n> [!note] Hi\n> body\n\nafter\n");
+        let texts: Vec<&str> = cst
+            .children
+            .iter()
+            .map(|n| match n {
+                Node::Leaf { text, .. } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(texts, vec!["intro\n\n", "> [!note] Hi\n> body\n", "\nafter\n"]);
+        assert_eq!(
+            serialize_impl(&cst),
+            "intro\n\n> [!note] Hi\n> body\n\nafter\n"
+        );
+    }
+
+    #[test]
+    fn adjacent_callouts_split_into_two_leaves() {
+        let cst = parse_block_impl("> [!tip] One\n> [!warning] Two\n> more\n");
+        assert_eq!(cst.children.len(), 2);
+        let Node::Leaf { text, .. } = &cst.children[1] else {
+            panic!("expected leaf")
+        };
+        assert_eq!(text, "> [!warning] Two\n> more\n");
+    }
+
+    #[test]
+    fn quoted_fence_stays_inside_callout_and_nested_callout_is_continuation() {
+        let src = "> [!note] Outer\n> ```\n> code\n> ```\n> > [!tip] Inner\n> tail\nout\n";
+        let cst = parse_block_impl(src);
+        assert_eq!(cst.children.len(), 2); // [callout leaf, "out" leaf]
+        let Node::Leaf { text, is_code } = &cst.children[0] else {
+            panic!("expected leaf")
+        };
+        assert!(!is_code);
+        assert!(text.ends_with("> tail\n"));
+        assert_eq!(serialize_impl(&cst), src);
+    }
+
+    #[test]
+    fn plain_blockquote_stays_in_prose() {
+        // Only `[!type]` callouts split — ordinary quotes are just markdown.
+        let cst = parse_block_impl("a\n> quoted\nb\n");
+        assert_eq!(cst.children.len(), 1);
+    }
+
+    #[test]
     fn roundtrip_real_note_content_if_present() {
-        // A large real note round-trips byte-exact (it has no ::: directives, so
-        // it is one big markdown leaf — this stresses fidelity on ~700 KB).
+        // A large real note round-trips byte-exact (no ::: directives — just
+        // prose/callout/code leaves; this stresses fidelity on ~700 KB).
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/real-note.md");
         if let Ok(src) = std::fs::read_to_string(path) {
             assert_eq!(serialize_impl(&parse_block_impl(&src)), src);

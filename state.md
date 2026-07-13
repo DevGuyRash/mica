@@ -5,17 +5,23 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 ## Now
 
 - **Daily-driver validation of the v0.2 rebuild** in the real vault: live with the
-  quick editor / lightbox / pointer DnD / versions timeline / block header for a
-  few sessions. The automated gate (155 Rust tests incl. 14 CLI end-to-end, Node
-  smoke, strict typecheck+lint+clippy, 24 e2e tests in a real Obsidian) is green;
-  lived-in feel is the remaining unknown.
+  quick editor / lightbox / pointer DnD (now incl. per-callout region drags) /
+  versions timeline / block header for a few sessions. The automated gate
+  (163 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
+  32 e2e tests incl. the DnD stress suite in a real Obsidian) is green; lived-in
+  feel is the remaining unknown.
+- **Callout-split signature churn (one-time)**: the parser now gives callouts
+  their own leaf, so the content signature of blocks containing callouts changes
+  once — expect a single spurious auto-snapshot per such block on first edit.
 - **Commits are unsigned** (1Password SSH signer was unavailable to the autonomous
   session). Re-sign with: `git rebase --exec 'git commit --amend --no-edit -S' 65a1e9e`.
 - **Obsidian CLI socket fragility**: any `obsidian <cmd>` invocation while the app
   is booting spawns a second instance that unlinks `$XDG_RUNTIME_DIR/<obsidian-ipc-endpoint>`;
-  a stale file also blocks the next bind (EADDRINUSE). If `obsidian eval` reports
-  "Unable to connect", remove the stale socket file and toggle Settings → Command
-  line interface off/on (or restart the app once, without probing during boot).
+  a stale file also blocks the next bind (EADDRINUSE). Recovery that works:
+  `rm -f` the socket file, SIGTERM the electron main pid, relaunch detached
+  (`setsid /usr/bin/obsidian`), wait ≥15 s with NO obsidian invocations, then use.
+  `obsidian eval` cannot await promises and console.log does not come back — chain
+  `.then(r => app.vault.adapter.write("out.json", …))` and read the file instead.
 
 ## Remaining scope
 
@@ -64,6 +70,10 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - The bundled `@codemirror/lang-markdown` must keep importing Obsidian's
   externalized `@codemirror/*`/`@lezer/*` instances (tag identity for
   highlighting). Pin bumps of those packages deserve a live-Obsidian check.
+- The fixture theme's `slide-down` entrance animation never advances under the
+  sandbox compositor, pinning `.view-content` a full pane-height off-screen — the
+  `sandbox-motion` snippet disables that one animation; static hostile rules stay.
+  Only hit-testing (elementFromPoint) ever noticed; keep the snippet enabled.
 - The virtualized reading view renders nothing under headless Xvfb; reading-mode
   e2e drives the code-block processor directly. Appearance is validated by
   computed styles (color-mix hangs CDP screenshots under Xvfb) — use
