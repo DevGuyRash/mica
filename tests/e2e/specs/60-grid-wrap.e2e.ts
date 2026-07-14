@@ -211,15 +211,20 @@ describe("structured callout editor", function () {
 			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
 		});
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-callout-editor").length === 1),
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lightbox-fields").length === 1),
 			{ timeout: 8000, timeoutMsg: "the callout editor never opened" },
 		);
 		await browser.executeObsidian(() => {
-			const modal = document.querySelector(".mica-callout-editor") as HTMLElement;
-			const type = modal.querySelector(".mica-coedit-type") as HTMLInputElement;
-			type.value = "warning";
+			const modal = document.querySelector(".mica-lightbox") as HTMLElement;
+			// Type via the shared color-tinted picker.
+			(modal.querySelector(".mica-coedit-type") as HTMLElement).click();
+			const pick = Array.from(modal.querySelectorAll(".mica-coedit-typepop .mica-callout-type")).find(
+				(b) => b.querySelector(".mica-callout-name")?.textContent === "warning",
+			) as HTMLElement;
+			pick.click();
 			const title = modal.querySelector(".mica-coedit-title") as HTMLInputElement;
 			title.value = "New title";
+			title.dispatchEvent(new Event("input", { bubbles: true }));
 			(Array.from(modal.querySelectorAll(".mica-pop-seg")).find((b) => b.textContent === "Closed") as HTMLElement).click();
 			const host = modal.querySelector(".mica-mdeditor") as HTMLElement & {
 				micaEditor?: { setValue(v: string): void };

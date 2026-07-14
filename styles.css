@@ -2080,39 +2080,46 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	position: relative;
 }
 
-/* ---------- Structured callout editor ---------- */
-.mica-callout-editor {
-	width: min(680px, 92vw);
-}
-.mica-coedit-root {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
+/* ---------- Structured callout editor (an EditorLightbox derivative) ---------- */
+.mica-lightbox-fields {
+	position: relative;
+	padding-bottom: 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	margin-bottom: 8px;
 }
 .mica-coedit-row {
 	display: flex;
 	align-items: center;
 	gap: 6px;
+	flex-wrap: wrap;
 }
 .mica-coedit-type {
-	width: 150px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 8px;
+	border: 1px solid color-mix(in srgb, var(--mica-co-color, var(--mica-accent)) 45%, var(--background-modifier-border));
+	border-radius: 7px;
+	color: var(--mica-co-color, var(--mica-accent));
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-small);
 }
+.mica-coedit-type .mica-callout-ico .svg-icon {
+	width: 14px !important;
+	height: 14px !important;
+}
+.mica-coedit-caret .svg-icon {
+	width: 10px !important;
+	height: 10px !important;
+	opacity: 0.7;
+}
 .mica-coedit-title {
-	width: 100%;
+	flex: 1;
+	min-width: 160px;
 }
-.mica-coedit-body {
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 8px;
-	min-height: 120px;
-	max-height: 50vh;
-	overflow: auto;
-}
-.mica-coedit-footer {
-	display: flex;
-	align-items: center;
-	gap: 8px;
+.mica-coedit-typepop {
+	top: calc(100% + 4px);
+	left: 0;
 }
 
 /* ---------- Folded sections / groups ---------- */

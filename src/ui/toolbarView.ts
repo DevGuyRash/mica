@@ -1,6 +1,6 @@
 import { setIcon, type App } from "obsidian";
 import type { EditorView } from "@codemirror/view";
-import { calloutCatalog, type CalloutFold } from "./calloutCatalog";
+import { calloutCatalog, type CalloutFold, type CalloutType } from "./calloutCatalog";
 import { groupDefault, rememberDefault, resolveTool, toolbarConfig, type ToolItem } from "./toolSpec";
 import * as verbs from "./toolbar";
 
@@ -255,13 +255,46 @@ function positionPopoverUnder(bar: HTMLElement, anchor: HTMLElement): void {
 // Pickers
 // ---------------------------------------------------------------------------
 
-/** The callout picker: search, fold mode, optional title, full type catalog. */
-function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorView, close: () => void): void {
-	panel.addClass("mica-callout-picker");
+/**
+ * The searchable, color-tinted callout TYPE grid (Admonition-style: each
+ * type shows its icon + name in the color it will actually render with,
+ * theme included). Shared by the toolbar picker and the callout editor.
+ */
+export function buildCalloutTypeGrid(panel: HTMLElement, app: App, onPick: (t: CalloutType) => void): void {
 	const search = panel.createEl("input", {
 		cls: "mica-pop-search",
 		attr: { type: "text", placeholder: "Filter types…" },
 	});
+	const grid = panel.createDiv({ cls: "mica-callout-grid" });
+	const types = calloutCatalog(app);
+	const paint = (filter: string): void => {
+		grid.empty();
+		const f = filter.trim().toLowerCase();
+		for (const t of types) {
+			if (f && !t.id.includes(f) && !t.aliases.some((a) => a.includes(f))) continue;
+			const b = grid.createEl("button", {
+				cls: "clickable-icon mica-callout-type",
+				attr: {
+					type: "button",
+					"aria-label": t.aliases.length ? `${t.id} (also: ${t.aliases.join(", ")})` : t.id,
+				},
+			});
+			b.style.setProperty("--mica-co-color", t.color);
+			setIcon(b.createSpan({ cls: "mica-callout-ico" }), t.icon);
+			b.createSpan({ cls: "mica-callout-name", text: t.id });
+			if (t.source === "admonition") b.createSpan({ cls: "mica-callout-src", text: "adm" });
+			b.addEventListener("click", () => onPick(t));
+		}
+		if (!grid.childElementCount) grid.createDiv({ cls: "mica-pop-empty", text: "No matching types" });
+	};
+	search.addEventListener("input", () => paint(search.value));
+	paint("");
+	queueMicrotask(() => search.focus());
+}
+
+/** The toolbar's callout picker: fold mode + optional title + the type grid. */
+function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorView, close: () => void): void {
+	panel.addClass("mica-callout-picker");
 
 	let fold: CalloutFold = "";
 	const foldRow = panel.createDiv({ cls: "mica-pop-row" });
@@ -288,34 +321,10 @@ function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorV
 		attr: { type: "text", placeholder: "Title (optional)" },
 	});
 
-	const grid = panel.createDiv({ cls: "mica-callout-grid" });
-	const types = calloutCatalog(app);
-	const paint = (filter: string): void => {
-		grid.empty();
-		const f = filter.trim().toLowerCase();
-		for (const t of types) {
-			if (f && !t.id.includes(f) && !t.aliases.some((a) => a.includes(f))) continue;
-			const b = grid.createEl("button", {
-				cls: "clickable-icon mica-callout-type",
-				attr: {
-					type: "button",
-					"aria-label": t.aliases.length ? `${t.id} (also: ${t.aliases.join(", ")})` : t.id,
-				},
-			});
-			b.style.setProperty("--mica-co-color", t.color);
-			setIcon(b.createSpan({ cls: "mica-callout-ico" }), t.icon);
-			b.createSpan({ cls: "mica-callout-name", text: t.id });
-			if (t.source === "admonition") b.createSpan({ cls: "mica-callout-src", text: "adm" });
-			b.addEventListener("click", () => {
-				verbs.insertCallout(getView(), t.id, fold, title.value.trim());
-				close();
-			});
-		}
-		if (!grid.childElementCount) grid.createDiv({ cls: "mica-pop-empty", text: "No matching types" });
-	};
-	search.addEventListener("input", () => paint(search.value));
-	paint("");
-	queueMicrotask(() => search.focus());
+	buildCalloutTypeGrid(panel, app, (t) => {
+		verbs.insertCallout(getView(), t.id, fold, title.value.trim());
+		close();
+	});
 }
 
 /** The code fence language picker: search-or-type, Enter inserts. */

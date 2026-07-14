@@ -13,6 +13,12 @@ export interface LightboxOpts {
 	onDiscard?: () => void;
 	/** Live draft mirror (keeps quick-edit drafts in sync while typing here). */
 	onDraft?: (value: string) => void;
+	/** Optional derivative hook: inject field rows ABOVE the editor. `refresh`
+	 *  re-renders the live preview (call it when a field changes). */
+	header?: (host: HTMLElement, refresh: () => void) => void;
+	/** Optional derivative hook: what the preview (and only the preview)
+	 *  renders — e.g. the assembled callout around the edited body. */
+	previewTransform?: (body: string) => string;
 }
 
 /**
@@ -41,6 +47,12 @@ export class EditorLightbox extends Modal {
 		this.titleEl.setText(this.opts.title);
 
 		const root = this.contentEl.createDiv({ cls: "mica-lightbox-root" });
+		if (this.opts.header) {
+			const head = root.createDiv({ cls: "mica-lightbox-fields" });
+			this.opts.header(head, () => {
+				if (this.previewOn) this.renderPreview();
+			});
+		}
 		const toolbarRow = root.createDiv({ cls: "mica-lightbox-toolbar" });
 		const split = root.createDiv({ cls: "mica-lightbox-split" });
 		const editorHost = split.createDiv({ cls: "mica-lightbox-editor" });
@@ -162,7 +174,7 @@ export class EditorLightbox extends Modal {
 		child.load();
 		void MarkdownRenderer.render(
 			this.opts.app,
-			this.editor.getValue(),
+			this.opts.previewTransform?.(this.editor.getValue()) ?? this.editor.getValue(),
 			this.previewEl.createDiv({ cls: "mica-md-inner" }),
 			this.opts.sourcePath,
 			child,
