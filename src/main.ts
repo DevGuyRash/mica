@@ -48,11 +48,14 @@ export default class MicaPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
+				this.engine.forgetFile(oldPath);
 				if (file instanceof TFile && file.extension === "md") void this.followRename(file, oldPath);
 			}),
 		);
+		this.registerEvent(this.app.vault.on("delete", (file) => this.engine.forgetFile(file.path)));
 
 		this.app.workspace.onLayoutReady(() => {
+			this.registerSidecarExclusion();
 			if (this.settings.reconcileOnLoad) void this.reconcileOnLoad();
 		});
 
@@ -209,6 +212,22 @@ export default class MicaPlugin extends Plugin {
 		}
 	}
 
+	/**
+	 * Keep `.mica/` sidecars out of search/graph/switcher: add a regex filter
+	 * to Obsidian's "Excluded files" once (idempotent; user can remove it).
+	 */
+	private registerSidecarExclusion(): void {
+		const FILTER = "/\\.mica\\//";
+		type Cfg = { getConfig?(k: string): unknown; setConfig?(k: string, v: unknown): void };
+		const vault = this.app.vault as unknown as Cfg;
+		const current = vault.getConfig?.("userIgnoreFilters");
+		if (!Array.isArray(current)) {
+			if (current === undefined || current === null) vault.setConfig?.("userIgnoreFilters", [FILTER]);
+			return;
+		}
+		if (!current.includes(FILTER)) vault.setConfig?.("userIgnoreFilters", [...current, FILTER]);
+	}
+
 	applyStyleVars(): void {
 		const s = this.settings;
 		const b = document.body;
@@ -232,10 +251,12 @@ export default class MicaPlugin extends Plugin {
 
 	private async reconcileOnLoad(): Promise<void> {
 		try {
-			const { actions, rehomed } = await repair(this);
-			if (actions.length || rehomed.length) {
-				new Notice(`Mica: reconciled — ${rehomed.length} rehomed, ${actions.length} issue(s). See console.`);
-				console.info("Mica startup reconcile:", { rehomed, actions });
+			const { actions, rehomed, forked, buried } = await repair(this);
+			if (actions.length || rehomed.length || forked.length || buried.length) {
+				new Notice(
+					`Mica: reconciled — ${rehomed.length} rehomed, ${forked.length} forked, ${buried.length} buried, ${actions.length} issue(s). See console.`,
+				);
+				console.info("Mica startup reconcile:", { rehomed, forked, buried, actions });
 			}
 		} catch (e) {
 			console.error("Mica: startup reconcile failed", e);

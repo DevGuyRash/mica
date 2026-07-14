@@ -255,4 +255,37 @@ describe("runtime contracts (window.mica)", function () {
 		);
 		expect(inboxGone).toBe(true);
 	});
+
+	it("large version objects compress to .gz and revert losslessly", async function () {
+		const big = "B".repeat(6000);
+		const result = await browser.executeObsidian(async ({ app }, payload) => {
+			type M = {
+				blockUpdate(n: string, id: string, c: string): Promise<unknown>;
+				versionsSnapshot(n: string): Promise<unknown>;
+				versionsList(n: string, id: string): Promise<{ hash: string }[]>;
+				versionsRevert(n: string, id: string, h: string): Promise<unknown>;
+				blockRead(n: string, id: string): Promise<string>;
+			};
+			const mica = (window as unknown as { mica: M }).mica;
+			const name = "GzRound.md";
+			if (!app.vault.getAbstractFileByPath(name)) {
+				await app.vault.create(name, "```mica id=gz-1\ntab: A\nsmall\n```\n");
+			}
+			await mica.versionsSnapshot(name);
+			await mica.blockUpdate(name, "gz-1", `tab: A\n${payload}\n`);
+			await mica.versionsSnapshot(name);
+			const versions = await mica.versionsList(name, "gz-1");
+			const files = (await app.vault.adapter.list("GzRound.mica/objects")).files;
+			const hasGz = files.some((f: string) => f.endsWith(".mica.gz"));
+			// Revert to the FIRST (small) version, then forward to the big one.
+			await mica.versionsRevert(name, "gz-1", versions[0].hash);
+			const bigVersion = versions.find((v) => v.hash !== versions[0].hash);
+			if (!bigVersion) return { hasGz, ok: false };
+			await mica.versionsRevert(name, "gz-1", bigVersion.hash);
+			const read = await mica.blockRead(name, "gz-1");
+			return { hasGz, ok: read.includes(payload) };
+		}, big);
+		expect(result.hasGz).toBe(true);
+		expect(result.ok).toBe(true);
+	});
 });

@@ -41,6 +41,11 @@ export class VersionEngine {
 		bounce(file);
 	}
 
+	/** Forget one file's debouncer (rename/delete would leak it forever). */
+	forgetFile(path: string): void {
+		this.debouncers.delete(path);
+	}
+
 	/** Drop cached debouncers (e.g. after the debounce setting changes). */
 	resetDebouncers(): void {
 		this.debouncers.clear();

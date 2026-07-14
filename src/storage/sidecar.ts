@@ -22,6 +22,25 @@ export function objectPath(file: TFile, hash: string): string {
 	return `${objectsDir(file)}/${hash.replace(":", "-")}.mica.md`;
 }
 
+/** Compressed variant (large objects only). Hash stays over the PLAINTEXT. */
+export function objectPathGz(file: TFile, hash: string): string {
+	return `${objectsDir(file)}/${hash.replace(":", "-")}.mica.gz`;
+}
+
+/** Objects at or under this size stay human-readable plaintext .md. The rule
+ *  is shared with the mica CLI — both sides read either form. */
+export const COMPRESS_MIN_BYTES = 4096;
+
+async function gzipText(text: string): Promise<ArrayBuffer> {
+	const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+	return new Response(stream).arrayBuffer();
+}
+
+async function gunzipToText(buf: ArrayBuffer): Promise<string> {
+	const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+	return new Response(stream).text();
+}
+
 export async function ensureSidecar(vault: Vault, file: TFile): Promise<void> {
 	for (const dir of [sidecarDir(file), objectsDir(file)]) {
 		if (!vault.getAbstractFileByPath(dir)) {
@@ -30,16 +49,26 @@ export async function ensureSidecar(vault: Vault, file: TFile): Promise<void> {
 	}
 }
 
-/** Content-addressed write: objects are immutable, so an existing hash is a no-op. */
+/** Content-addressed write: objects are immutable, so an existing hash is a
+ *  no-op. Small objects stay human-readable plaintext; large ones gzip. */
 export async function writeObject(vault: Vault, file: TFile, hash: string, content: string): Promise<void> {
-	const path = objectPath(file, hash);
-	if (vault.getAbstractFileByPath(path)) return;
-	await vault.create(path, content).catch(() => undefined);
+	const plain = objectPath(file, hash);
+	const gz = objectPathGz(file, hash);
+	if (vault.getAbstractFileByPath(plain) || vault.getAbstractFileByPath(gz)) return;
+	if (content.length <= COMPRESS_MIN_BYTES) {
+		await vault.create(plain, content).catch(() => undefined);
+		return;
+	}
+	const bytes = await gzipText(content);
+	await vault.createBinary(gz, bytes).catch(() => undefined);
 }
 
 export async function readObject(vault: Vault, file: TFile, hash: string): Promise<string | null> {
-	const af = vault.getAbstractFileByPath(objectPath(file, hash));
-	return af instanceof TFile ? vault.read(af) : null;
+	const plain = vault.getAbstractFileByPath(objectPath(file, hash));
+	if (plain instanceof TFile) return vault.read(plain);
+	const gz = vault.getAbstractFileByPath(objectPathGz(file, hash));
+	if (gz instanceof TFile) return gunzipToText(await vault.readBinary(gz));
+	return null;
 }
 
 export async function readEventsAt(vault: Vault, path: string): Promise<LedgerEvent[]> {

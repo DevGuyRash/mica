@@ -28,6 +28,15 @@ pub fn ledger_path(note: &Path) -> PathBuf {
 }
 
 /// Object path for `hash` (`b3:abcd` → `objects/b3-abcd.mica.md`).
+/// Compressed-object variant path (large objects). Hash is over PLAINTEXT.
+pub fn object_path_gz(note: &Path, hash: &str) -> PathBuf {
+    objects_dir(note).join(format!("{}.mica.gz", hash.replace(':', "-")))
+}
+
+/// Objects at or under this size stay human-readable plaintext `.md`.
+/// Shared rule with the plugin — both sides read either form.
+pub const COMPRESS_MIN_BYTES: usize = 4096;
+
 pub fn object_path(note: &Path, hash: &str) -> PathBuf {
     objects_dir(note).join(format!("{}.mica.md", hash.replace(':', "-")))
 }
@@ -150,11 +159,19 @@ fn ensure_sidecar(note: &Path) -> Result<()> {
 /// ```
 pub fn write_object(note: &Path, hash: &str, content: &str) -> Result<()> {
     ensure_sidecar(note)?;
-    let path = object_path(note, hash);
-    if path.exists() {
+    let plain = object_path(note, hash);
+    let gz = object_path_gz(note, hash);
+    if plain.exists() || gz.exists() {
         return Ok(()); // immutable: same hash = same bytes
     }
-    fs::write(&path, content).map_err(io_ctx(path.display().to_string()))
+    if content.len() <= COMPRESS_MIN_BYTES {
+        return fs::write(&plain, content).map_err(io_ctx(plain.display().to_string()));
+    }
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut enc, content.as_bytes())
+        .and_then(|()| enc.finish())
+        .map_err(io_ctx(gz.display().to_string()))
+        .and_then(|bytes| fs::write(&gz, bytes).map_err(io_ctx(gz.display().to_string())))
 }
 
 /// Read a stored object's content; `None` when the object file is missing.
@@ -176,13 +193,21 @@ pub fn write_object(note: &Path, hash: &str, content: &str) -> Result<()> {
 /// let c = mica_cli::sidecar::read_object(std::path::Path::new("Note.md"), "b3:00").unwrap();
 /// ```
 pub fn read_object(note: &Path, hash: &str) -> Result<Option<String>> {
-    let path = object_path(note, hash);
-    if !path.is_file() {
+    let plain = object_path(note, hash);
+    if plain.is_file() {
+        return fs::read_to_string(&plain)
+            .map(Some)
+            .map_err(io_ctx(plain.display().to_string()));
+    }
+    let gz = object_path_gz(note, hash);
+    if !gz.is_file() {
         return Ok(None);
     }
-    fs::read_to_string(&path)
-        .map(Some)
-        .map_err(io_ctx(path.display().to_string()))
+    let bytes = fs::read(&gz).map_err(io_ctx(gz.display().to_string()))?;
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut out)
+        .map_err(io_ctx(gz.display().to_string()))?;
+    Ok(Some(out))
 }
 
 /// Write `manifest.json` exactly the way the plugin does: tab-indented JSON
@@ -325,5 +350,22 @@ mod tests {
             Some("first")
         );
         assert_eq!(read_object(&note, "b3:bb").unwrap(), None);
+    }
+
+    #[test]
+    fn large_objects_compress_small_stay_plaintext_and_both_read_back() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let note = dir.path().join("n.md");
+        std::fs::write(&note, "x").expect("note");
+        let small = "small body";
+        write_object(&note, "b3:aaaa", small).expect("small write");
+        assert!(object_path(&note, "b3:aaaa").is_file(), "small stays .md");
+        let large = "L".repeat(COMPRESS_MIN_BYTES + 100);
+        write_object(&note, "b3:bbbb", &large).expect("large write");
+        assert!(object_path_gz(&note, "b3:bbbb").is_file(), "large becomes .gz");
+        assert!(!object_path(&note, "b3:bbbb").exists());
+        assert_eq!(read_object(&note, "b3:aaaa").expect("r1"), Some(small.to_string()));
+        assert_eq!(read_object(&note, "b3:bbbb").expect("r2"), Some(large));
+        assert_eq!(read_object(&note, "b3:none").expect("r3"), None);
     }
 }
