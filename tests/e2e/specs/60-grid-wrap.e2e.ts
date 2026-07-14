@@ -404,3 +404,50 @@ describe("block navigator", function () {
 		);
 	});
 });
+
+describe("syntax highlighting", function () {
+	it("fenced code inside the quick editor gets token colors", async function () {
+		await seedAndOpen(
+			"CodeHl.md",
+			'Intro.\n\n```mica id=hl-1\ntab: Main\nProse first.\n\n````js\nconst x = "hello";\n````\n```\n',
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 1),
+			{ timeout: 8000, timeoutMsg: "regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("hello"),
+			) as HTMLElement;
+			region.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null;
+					const root = host?.shadowRoot;
+					// Keyword + string tokens prove the nested language parsed.
+					return Boolean(root?.querySelector(".mica-ck") && root.querySelector(".mica-cs"));
+				}),
+			{ timeout: 8000, timeoutMsg: "fenced-code tokens never highlighted in the editor" },
+		);
+	});
+
+	it("revealed raw source tints mica structure lines", async function () {
+		await seedAndOpen("SrcHl.md", "Intro.\n\n```mica id=hl-2\ntab: Main\nbody text\n```\n");
+		// Keep the cursor INSIDE the block while polling: Obsidian restores a
+		// remembered cursor shortly after open, which would un-reveal it.
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+					view?.editor.setCursor({ line: 3, ch: 0 });
+					return (
+						document.querySelectorAll(".cm-line.mica-src-tab").length >= 1 &&
+						document.querySelectorAll(".cm-line.mica-src-fence").length >= 1
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "structure lines never tinted in source view" },
+		);
+	});
+});

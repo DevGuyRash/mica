@@ -2406,3 +2406,17 @@ body[data-mica-grip="left"] .mica-grid-tools {
 		min-height: 36px;
 	}
 }
+
+/* ---------- Mica source-mode structure highlighting ---------- */
+.cm-line.mica-src-fence {
+	background: color-mix(in srgb, var(--mica-accent) 9%, transparent);
+	border-radius: 4px;
+}
+.cm-line.mica-src-tab {
+	background: color-mix(in srgb, var(--mica-accent) 5%, transparent);
+	color: var(--mica-accent);
+	font-weight: 600;
+}
+.cm-line.mica-src-dir {
+	color: color-mix(in srgb, var(--mica-accent) 70%, var(--text-faint));
+}

@@ -182,7 +182,7 @@ function sameAttrs(a: Record<string, string>, b: Record<string, string>): boolea
 // Cache the last scan so pure cursor moves (selection-only transactions) skip
 // the WASM scan — and, via the Text identity fast path, the O(doc) string
 // round-trip; a re-scan happens only when the document text changes.
-interface ScanCache {
+export interface ScanCache {
 	/** Text instances known to equal `doc` (split panes share one entry). */
 	texts: WeakSet<Text>;
 	doc: string;
@@ -194,7 +194,9 @@ interface ScanCache {
 	contents: string[];
 }
 let scanCache: ScanCache | null = null;
-function scanCached(state: EditorState): ScanCache {
+/** Exported for sibling extensions (source highlighter): same Text-identity
+ *  cache, so an extra consumer adds ZERO stringify/scan work per edit. */
+export function scanCached(state: EditorState): ScanCache {
 	if (scanCache?.texts.has(state.doc)) return scanCache;
 	const doc = state.doc.toString();
 	if (scanCache && scanCache.doc === doc) {

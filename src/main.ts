@@ -2,6 +2,7 @@ import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { setEditorBehavior } from "./ui/quickEdit";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
+import { micaSourceHighlight } from "./cm/micaSourceHighlight";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
@@ -39,6 +40,7 @@ export default class MicaPlugin extends Plugin {
 
 		registerReadingRenderer(this);
 		this.registerEditorExtension(micaLivePreview(this));
+		this.registerEditorExtension(micaSourceHighlight());
 		this.addSettingTab(new MicaSettingTab(this));
 
 		this.registerEvent(

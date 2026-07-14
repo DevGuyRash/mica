@@ -1,5 +1,6 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { resolveCodeLanguage } from "./codeLangs";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
@@ -38,6 +39,18 @@ const mdHighlight = HighlightStyle.define([
 	{ tag: tags.url, class: "mica-murl" },
 	{ tag: tags.processingInstruction, class: "mica-mmark" },
 	{ tag: tags.labelName, class: "mica-mmark" },
+	// Fenced-code tokens: Obsidian's --code-* variables inherit through the
+	// shadow boundary, so highlighted code follows the vault theme.
+	{ tag: tags.keyword, class: "mica-ck" },
+	{ tag: [tags.string, tags.special(tags.string), tags.regexp], class: "mica-cs" },
+	{ tag: [tags.comment, tags.lineComment, tags.blockComment], class: "mica-cc" },
+	{ tag: [tags.number, tags.bool, tags.atom, tags.null], class: "mica-cv" },
+	{ tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], class: "mica-cf" },
+	{ tag: [tags.typeName, tags.className, tags.namespace], class: "mica-ct" },
+	{ tag: tags.propertyName, class: "mica-cp" },
+	{ tag: [tags.tagName, tags.angleBracket], class: "mica-cg" },
+	{ tag: [tags.operator, tags.definitionOperator], class: "mica-co" },
+	{ tag: [tags.meta, tags.annotation], class: "mica-cm" },
 ]);
 
 /**
@@ -86,6 +99,16 @@ const micaEditorTheme = EditorView.theme({
 	".mica-mquote": { color: "var(--text-muted, #999)" },
 	".mica-mlink, .mica-murl": { color: "var(--link-color, var(--text-accent, #7c5cff))" },
 	".mica-mmark": { color: "color-mix(in srgb, var(--mica-accent, #7c5cff) 75%, var(--text-faint, #777))" },
+	".mica-ck": { color: "var(--code-keyword, #cf8e6d)" },
+	".mica-cs": { color: "var(--code-string, #6aab73)" },
+	".mica-cc": { color: "var(--code-comment, #7a7e85)", fontStyle: "italic" },
+	".mica-cv": { color: "var(--code-value, #2aacb8)" },
+	".mica-cf": { color: "var(--code-function, #56a8f5)" },
+	".mica-ct": { color: "var(--code-important, #c77dbb)" },
+	".mica-cp": { color: "var(--code-property, #c77dbb)" },
+	".mica-cg": { color: "var(--code-tag, #e8bf6a)" },
+	".mica-co": { color: "var(--code-operator, var(--text-muted, #999))" },
+	".mica-cm": { color: "var(--code-comment, #7a7e85)" },
 });
 
 /**
@@ -135,7 +158,7 @@ export class MdEditor {
 					saveKeys,
 					history(),
 					keymap.of([...historyKeymap, ...defaultKeymap, indentWithTab]),
-					markdown({ base: markdownLanguage }),
+					markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage }),
 					syntaxHighlighting(mdHighlight),
 					micaEditorTheme,
 					EditorView.lineWrapping,

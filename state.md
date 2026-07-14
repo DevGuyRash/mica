@@ -7,7 +7,7 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - **Daily-driver validation of the v0.2 rebuild** in the real vault: live with
   the editors / pointer DnD / folds / versions timeline for a few sessions.
   The automated gate (182 Rust tests, Node smoke, strict
-  typecheck+lint+clippy+fmt, 45 e2e in a real Obsidian) is green; lived-in
+  typecheck+lint+clippy+fmt, 47 e2e in a real Obsidian) is green; lived-in
   feel is the remaining unknown.
 - **Commits are unsigned** (1Password SSH signer needs interactive approval).
   Re-sign with: `git rebase --exec 'git commit --amend --no-edit -S' 65a1e9e`.
