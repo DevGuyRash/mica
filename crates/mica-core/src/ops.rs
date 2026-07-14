@@ -104,6 +104,20 @@ pub enum StructOp {
         /// New column count.
         cols: usize,
     },
+    /// Reorder a cell WITHIN its column: the cell bubbles from flow index
+    /// `from` to `to` (same column under the grid's `cols`), passed
+    /// same-column cells shift one row, and every other flow index — the
+    /// other columns — is untouched. A plain splice cannot do this under
+    /// row-major flow.
+    #[serde(rename_all = "camelCase")]
+    MoveCellInColumn {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// The cell's current flow index.
+        from: usize,
+        /// The target flow index (`from ≡ to (mod cols)`).
+        to: usize,
+    },
     /// Write or clear a `{key=value}` header token on the GROUP container
     /// (grid or directive tabs) at `path` — e.g. `colw` fractions.
     #[serde(rename_all = "camelCase")]
@@ -340,6 +354,7 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             *open_line = format!("{c}grid {{{attrs}}}\n");
             true
         }
+        StructOp::MoveCellInColumn { path, from, to } => move_cell_in_column(cst, path, *from, *to),
         StructOp::SetGroupAttr { path, key, value } => {
             set_group_attr(cst, path, key, value.as_deref())
         }
@@ -360,6 +375,7 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             };
             let at = (*at).min(children.len());
             children.insert(at, group);
+            guard_friendly_glue(children, at);
             true
         }
         StructOp::InsertLeaf { path, at, text } => {
@@ -372,6 +388,7 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             }
             let at = (*at).min(children.len());
             children.splice(at..at, nodes);
+            guard_friendly_glue(children, at);
             true
         }
         StructOp::DeleteNode { path } => remove_node_at(cst, path),
@@ -397,6 +414,7 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
                 return false;
             };
             children.insert(last + 1, copy);
+            guard_friendly_glue(children, last + 1);
             true
         }
         StructOp::MoveNode {
@@ -521,6 +539,40 @@ fn compose_title(display: &str, attrs: &str) -> String {
     } else {
         format!("{display} {{{attrs}}}")
     }
+}
+
+/// Column-preserving cell reorder: a chain of same-column swaps bubbles the
+/// cell from `from` to `to`; each swap touches exactly two same-column flow
+/// indices, so the other columns cannot move.
+fn move_cell_in_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
+    let cols = match node_at(cst, path) {
+        Some(Node::Container { name, title, .. }) if name == "grid" => {
+            let (_, attrs) = split_title_attrs(title);
+            attrs
+                .split_whitespace()
+                .find_map(|t| t.strip_prefix("cols="))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(2)
+                .max(1)
+        }
+        _ => return false,
+    };
+    let Some(children) = children_at_mut(cst, path) else {
+        return false;
+    };
+    if from == to || from >= children.len() || to >= children.len() || from % cols != to % cols {
+        return false;
+    }
+    if !is_container_named(&children[from], "cell") || !is_container_named(&children[to], "cell") {
+        return false;
+    }
+    let mut i = from;
+    while i != to {
+        let j = if to > from { i + cols } else { i - cols };
+        children.swap(i, j);
+        i = j;
+    }
+    true
 }
 
 /// Set / replace / remove a `key=value` token in an attrs string.
@@ -708,6 +760,22 @@ fn directivize_group(group: &mut Node) {
     }
 }
 
+/// Anything inserted after a closer-free `tab:` group at the same level
+/// would re-parse INTO the group's last tab (the friendly form absorbs until
+/// EOF or an ancestor closer). Directivize the nearest preceding container if
+/// it is a friendly tabs group — leaves in between don't break the hazard.
+fn guard_friendly_glue(children: &mut [Node], at: usize) {
+    for i in (0..at.min(children.len())).rev() {
+        match &children[i] {
+            Node::Leaf { .. } => continue,
+            Node::Container { .. } => {
+                directivize_group(&mut children[i]);
+                return;
+            }
+        }
+    }
+}
+
 /// The full `MoveNode` implementation: validate, detach, re-path, conform, insert, prune.
 fn move_node(cst: &mut Cst, from: &[usize], to_parent: &[usize], to_index: usize) -> bool {
     let Some((&from_idx, from_parent)) = from.split_last() else {
@@ -808,6 +876,7 @@ fn move_node(cst: &mut Cst, from: &[usize], to_parent: &[usize], to_index: usize
     };
     let at = at.min(dest_children.len());
     dest_children.insert(at, moved);
+    guard_friendly_glue(dest_children, at);
 
     // Prune the source group if the move emptied it (path adjusted for the
     // insertion: indices inside dest_path at depth dest_path.len() shifted).
@@ -899,6 +968,7 @@ fn move_region(
     };
     let at = at.min(dest_children.len());
     dest_children.splice(at..at, run);
+    guard_friendly_glue(dest_children, at);
     true
 }
 
@@ -1670,6 +1740,124 @@ mod tests {
         assert_eq!(
             out,
             ":::grid {cols=2}\n:::cell\nc\n:::tabs\n:::tab A\na\n:::\n:::\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn move_cell_in_column_bubbles_without_touching_the_other_column() {
+        // 2-col grid, row-major flow: [a b / c d / e f]. Column 0 = a,c,e.
+        // Bubble a (flow 0) to the bottom of ITS column (flow 4): column 0
+        // becomes c,e,a; column 1 (b,d,f) must be byte-identical.
+        let src = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\ne\n:::\n:::cell\nf\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveCellInColumn {
+                path: vec![0],
+                from: 0,
+                to: 4,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2}\n:::cell\nc\n:::\n:::cell\nb\n:::\n:::cell\ne\n:::\n:::cell\nd\n:::\n:::cell\na\n:::\n:::cell\nf\n:::\n:::\n"
+        );
+        // And back up one row: a (flow 4) above e (now flow 2).
+        let (ok2, out2) = apply(
+            &out,
+            StructOp::MoveCellInColumn {
+                path: vec![0],
+                from: 4,
+                to: 2,
+            },
+        );
+        assert!(ok2);
+        assert_eq!(
+            out2,
+            ":::grid {cols=2}\n:::cell\nc\n:::\n:::cell\nb\n:::\n:::cell\na\n:::\n:::cell\nd\n:::\n:::cell\ne\n:::\n:::cell\nf\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn move_cell_in_column_rejects_cross_column_and_bad_targets() {
+        let src = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n";
+        for (from, to) in [(0usize, 1usize), (0, 3), (0, 0), (0, 9)] {
+            let (ok, _) = apply(
+                src,
+                StructOp::MoveCellInColumn {
+                    path: vec![0],
+                    from,
+                    to,
+                },
+            );
+            assert!(!ok, "should reject from={from} to={to}");
+        }
+    }
+
+    #[test]
+    fn move_node_after_friendly_tabs_directivizes_the_group() {
+        // tab: A holds a grid; move the grid to root AFTER the friendly group.
+        let src = "tab: A\n:::grid {cols=1}\n:::cell\nx\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveNode {
+                from: vec![0, 0, 0],
+                to_parent: vec![],
+                to_index: 1,
+            },
+        );
+        assert!(ok);
+        let reparsed = parse_block_impl(&out);
+        assert_eq!(
+            reparsed.children.len(),
+            2,
+            "grid must stay at root: {out:?}"
+        );
+        assert!(matches!(&reparsed.children[1], Node::Container { name, .. } if name == "grid"));
+    }
+
+    #[test]
+    fn move_region_after_friendly_tabs_directivizes_the_group() {
+        // A leaf run dropped AFTER a closer-free `tab:` group would re-parse
+        // into the group's last tab (the friendly form has no closer). The
+        // reducer must directivize the group so the run stays at root.
+        let src = "tab: A\nalpha\ntab: B\nbeta\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveRegion {
+                path: vec![0, 0],
+                start: 0,
+                end: 1,
+                to_parent: vec![],
+                to_index: 1,
+            },
+        );
+        assert!(ok);
+        let reparsed = parse_block_impl(&out);
+        assert_eq!(reparsed.children.len(), 2, "run must stay at root: {out:?}");
+        assert!(
+            matches!(&reparsed.children[1], Node::Leaf { text, .. } if text == "alpha\n"),
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn insert_leaf_after_friendly_tabs_directivizes_the_group() {
+        let src = "tab: A\nalpha\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::InsertLeaf {
+                path: vec![],
+                at: 1,
+                text: "\nnew section\n".into(),
+            },
+        );
+        assert!(ok);
+        let reparsed = parse_block_impl(&out);
+        assert_eq!(
+            reparsed.children.len(),
+            2,
+            "leaf must stay at root: {out:?}"
         );
     }
 

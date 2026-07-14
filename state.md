@@ -7,8 +7,8 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - **Daily-driver validation of the v0.2 rebuild** in the real vault: live with the
   quick editor / lightbox / pointer DnD (now incl. per-callout region drags) /
   versions timeline / block header for a few sessions. The automated gate
-  (174 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
-  37 e2e tests incl. DnD stress + feature suites in a real Obsidian) is green;
+  (179 Rust tests incl. CLI end-to-end, Node smoke, strict typecheck+lint+clippy,
+  40 e2e tests incl. DnD stress + feature suites in a real Obsidian) is green;
   lived-in feel is the remaining unknown.
 - **Callout-split signature churn (one-time)**: the parser now gives callouts
   their own leaf, so the content signature of blocks containing callouts changes

@@ -38,7 +38,10 @@ interface Slot {
 	cx: number;
 	cy: number;
 	/** The owning container's bounds (pointer gating) and nesting depth. */
-	container: { left: number; top: number; right: number; bottom: number; depth: number };
+	container: { el: HTMLElement; left: number; top: number; right: number; bottom: number; depth: number };
+	/** Grid column metadata (cell drags): the flow indices of this column's
+	 *  cells plus the same-column landing indices above/below this gap. */
+	col?: { up?: number; down?: number; members: number[] };
 }
 
 /** A drop container captured once per drag. Structure (elements, indices,
@@ -64,6 +67,7 @@ interface ActiveDrag {
 	current: Slot | null;
 	offsetX: number;
 	offsetY: number;
+	markedEl: HTMLElement | null;
 	springEl: HTMLElement | null;
 	springTimer: number | null;
 	scrollRaf: number | null;
@@ -163,6 +167,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		containers,
 		slots: computeSlots(containers, spec),
 		current: null,
+		markedEl: null,
 		offsetX: e.clientX - rect.left,
 		offsetY: e.clientY - rect.top,
 		springEl: null,
@@ -172,6 +177,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 			window.removeEventListener("keydown", onKey, true);
 			ghost.remove();
 			indicator.remove();
+			active?.markedEl?.removeClass("mica-drop-inside");
 			item.removeClass("mica-dragging");
 			document.body.removeClass("mica-dnd-active");
 		},
@@ -199,8 +205,12 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 		// Never offer slots inside the dragged node's own subtree (regions are
 		// leaves — they have no subtree to exclude).
 		if (!spec.region && fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
+		// A kid belongs to THIS container only if its nearest container ancestor
+		// is `el`. Match via the parent (cells are containers themselves, and a
+		// region nested in a cell must never count as a grid child — its idx
+		// would poison column membership and the no-op exclusion).
 		const kids = Array.from(el.querySelectorAll<HTMLElement>(":scope [data-mica-idx]"))
-			.filter((k) => k.closest(`[data-mica-container="${wanted}"]`) === el)
+			.filter((k) => k.parentElement?.closest("[data-mica-container]") === el)
 			.map((k) => ({ el: k, idx: Number(k.dataset.micaIdx ?? "0") }));
 		containers.push({
 			el,
@@ -233,12 +243,17 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 
 	/** Drop the slots that would be NO-OPS — an indicator must never promise a
 	 *  move that changes nothing (the gaps hugging the dragged item itself). */
-	const isNoop = (parentPath: number[], index: number): boolean => {
-		const pk = parentPath.join(".");
+	const isNoop = (s: Slot): boolean => {
+		const pk = s.parentPath.join(".");
 		if (spec.region) {
-			return pk === fromKey && index >= spec.region.start && index <= spec.region.end;
+			return pk === fromKey && s.index >= spec.region.start && s.index <= spec.region.end;
 		}
-		return pk === fromParentKey && (index === fromIdx || index === fromIdx + 1);
+		if (pk !== fromParentKey) return false;
+		// Same-column gaps hugging the dragged cell (column semantics).
+		if (s.col?.members.includes(fromIdx)) {
+			return s.col.up === fromIdx || s.col.down === fromIdx;
+		}
+		return s.index === fromIdx || s.index === fromIdx + 1;
 	};
 
 	for (const entry of cached) {
@@ -246,6 +261,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 		const rect = entry.el.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) continue; // hidden panel
 		const container = {
+			el: entry.el,
 			left: rect.left,
 			top: rect.top,
 			right: rect.right,
@@ -296,6 +312,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 				list.sort((a, b) => a.r.top - b.r.top);
 				const colLeft = Math.min(...list.map((c) => c.r.left));
 				const colWidth = Math.max(...list.map((c) => c.r.width));
+				const members = list.map((c) => c.idx);
 				// Before each cell in the column…
 				for (let i = 0; i < list.length; i++) {
 					const gapTop = i === 0 ? list[i].r.top - 5 : (list[i - 1].r.bottom + list[i].r.top) / 2;
@@ -309,6 +326,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 						cx: colLeft + colWidth / 2,
 						cy: gapTop,
 						container,
+						col: { up: list[i].idx, down: i > 0 ? list[i - 1].idx : undefined, members },
 					});
 				}
 				// …and after the last one.
@@ -323,6 +341,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 					cx: colLeft + colWidth / 2,
 					cy: last.r.bottom + 5,
 					container,
+					col: { down: last.idx, members },
 				});
 			}
 			continue;
@@ -400,7 +419,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 					})(),
 		);
 	}
-	return slots.filter((s) => !isNoop(s.parentPath, s.index));
+	return slots.filter((s) => !isNoop(s));
 }
 
 function dragMove(e: PointerEvent): void {
@@ -441,6 +460,14 @@ function dragMove(e: PointerEvent): void {
 		d.indicator.toggleClass("is-into", best.w > 8 && best.h > 8);
 	} else {
 		d.indicator.style.display = "none";
+	}
+	// Content drags (regions, groups): outline the receiving container so an
+	// indicator INSIDE a cell can't be confused with a gap BETWEEN cells.
+	const wantMark = (d.spec.kind === "region" || d.spec.kind === "group") && best ? best.container.el : null;
+	if (d.markedEl !== wantMark) {
+		d.markedEl?.removeClass("mica-drop-inside");
+		wantMark?.addClass("mica-drop-inside");
+		d.markedEl = wantMark;
 	}
 
 	springLoad(e);
@@ -500,6 +527,8 @@ function finishDrag(commit: boolean): void {
 	active = null;
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
 	if (d.scrollRaf !== null) window.cancelAnimationFrame(d.scrollRaf);
+	d.markedEl?.removeClass("mica-drop-inside");
+	d.markedEl = null;
 	d.cleanup();
 	if (!commit || !d.current) return;
 	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => void }).apply;
@@ -512,6 +541,21 @@ function finishDrag(commit: boolean): void {
 			toParent: d.current.parentPath,
 			toIndex: d.current.index,
 		});
+		return;
+	}
+	const fromIdx = d.spec.fromPath[d.spec.fromPath.length - 1] ?? -1;
+	const fromParent = d.spec.fromPath.slice(0, -1).join(".");
+	const col = d.current.col;
+	if (
+		d.spec.kind === "cell" &&
+		col?.members.includes(fromIdx) &&
+		d.current.parentPath.join(".") === fromParent
+	) {
+		// Same column: bubble within it — the other columns must not move.
+		const to = col.up !== undefined && fromIdx > col.up ? col.up : col.down;
+		if (to !== undefined && to !== fromIdx) {
+			apply?.({ op: "moveCellInColumn", path: d.current.parentPath, from: fromIdx, to });
+		}
 		return;
 	}
 	apply?.({

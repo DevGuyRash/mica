@@ -303,3 +303,127 @@ describe("drag & drop stress", function () {
 		expect(after).toBe(before);
 	});
 });
+
+describe("round 7: column integrity + friendly-form safety", function () {
+	it("same-column reorder bubbles within the column — the other column is untouched", async function () {
+		await seedAndOpen(
+			"ColBubble.md",
+			"Intro.\n\n```mica id=cb-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\ne\n:::\n:::cell\nf\n:::\n:::\n```\n",
+		);
+		await waitForSelector(".mica-lp .mica-cell", 6);
+		await browser.executeObsidian(async () => {
+			const cells = Array.from(document.querySelectorAll(".mica-lp .mica-cell")) as HTMLElement[];
+			const a = cells[0]; // col 0, row 0
+			const e5 = cells[4]; // "e": col 0, row 2
+			const handle = a.querySelector(".mica-cell-tool") as HTMLElement;
+			const ra = a.getBoundingClientRect();
+			const re = e5.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			handle.dispatchEvent(new PointerEvent("pointerdown", opts(ra.left + 10, ra.top + 10)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(ra.left + 30, ra.top + 40)));
+			await new Promise((r) => setTimeout(r, 30));
+			// Below e, inside e's column band.
+			window.dispatchEvent(new PointerEvent("pointermove", opts(re.left + 20, re.bottom + 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(re.left + 20, re.bottom + 2)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const doc = await docContains("");
+				const order = [...doc.matchAll(/:::cell\n(\w)\n/g)].map((m) => m[1]).join("");
+				return order === "cbedaf";
+			},
+			{ timeout: 8000, timeoutMsg: "expected flow order c,b,e,d,a,f after the column bubble" },
+		);
+	});
+
+	it("a region dropped below a friendly tabs group stays at root (group directivized)", async function () {
+		await seedAndOpen(
+			"FriendlyGlue.md",
+			"Intro.\n\n```mica id=fg-1\ntab: One\n> [!note] Mover\n\nkeeper prose\n```\n",
+		);
+		await waitForSelector(".mica-lp .mica-region", 2);
+		await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Mover"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const wrap = document.querySelector(".mica-lp .mica-tabs") as HTMLElement;
+			const rr = region.getBoundingClientRect();
+			const rw = wrap.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 20)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rw.left + 40, rw.bottom + 6)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rw.left + 40, rw.bottom + 6)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				// The group must be directivized and the callout must sit at ROOT
+				// (after the closing :::), not inside the last tab.
+				const close = v.lastIndexOf(":::");
+				const mover = v.indexOf("[!note] Mover");
+				return v.includes(":::tabs") && mover > 0 && close > 0 && mover > close;
+			},
+			{ timeout: 8000, timeoutMsg: "the region glued into the friendly group instead of staying at root" },
+		);
+	});
+
+	it("a sole-region cell's content drags OUT into a sibling cell", async function () {
+		await seedAndOpen(
+			"SoleOut.md",
+			"Intro.\n\n```mica id=so-1\n:::grid {cols=2}\n:::cell\n> [!tip] Nomad\n:::\n:::cell\nhost text\n:::\n:::\n```\n",
+		);
+		await waitForSelector(".mica-lp .mica-cell", 2);
+		await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Nomad"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const cells = Array.from(document.querySelectorAll(".mica-lp .mica-cell")) as HTMLElement[];
+			const host = cells[1];
+			const rr = region.getBoundingClientRect();
+			const rh = host.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 30)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 50)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rh.left + rh.width / 2, rh.bottom - 10)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rh.left + rh.width / 2, rh.bottom - 10)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				const host = v.indexOf("host text");
+				const nomad = v.indexOf("[!tip] Nomad");
+				return host > 0 && nomad > host;
+			},
+			{ timeout: 8000, timeoutMsg: "the sole region never moved into the sibling cell" },
+		);
+	});
+});

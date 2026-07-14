@@ -1083,8 +1083,10 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-region.is-editing > .mica-region-tools {
 	display: none;
 }
+/* A cell's sole region keeps its tools (dragging content OUT of a cell needs
+   the grip) — offset below the cell bar so the two clusters never overlap. */
 .mica-cell > .mica-region.is-sole > .mica-region-tools {
-	display: none !important;
+	top: 32px;
 }
 .mica-region-grip,
 .mica-minitool {
@@ -1196,6 +1198,17 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-qe-tools {
 	display: flex;
 	align-items: center;
+	flex: 1 1 0;
+	min-width: 0;
+	overflow: hidden;
+}
+.mica-qe-tools .mica-toolbar {
+	flex: 1;
+	min-width: 0;
+}
+.mica-qe-bar {
+	min-width: 0;
+	flex-wrap: nowrap;
 }
 .mica-qe-expand {
 	display: inline-flex;
@@ -1483,6 +1496,12 @@ body[data-mica-grip="left"] .mica-region-tools {
 	background: var(--mica-accent);
 	border-radius: 2px;
 	box-shadow: 0 0 0 1px color-mix(in srgb, var(--mica-accent) 40%, transparent);
+}
+/* The container a content drag would drop INTO (regions/groups). */
+.mica-drop-inside {
+	outline: 2px dashed color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	outline-offset: -3px;
+	border-radius: var(--mica-ctrl-radius, 7px);
 }
 .mica-drop-indicator.is-into {
 	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
@@ -2092,6 +2111,9 @@ body[data-mica-grip="left"] .mica-cell-bar {
 .mica-grid-wrap.is-folded,
 .mica-tabs.is-folded {
 	margin: 3px 0;
+}
+body[data-mica-grip="left"] .mica-fold-bar {
+	flex-direction: row-reverse;
 }
 
 /* ---------- Grid hover tools + column resizers ---------- */

@@ -368,6 +368,12 @@ function renderFoldBar(
 	});
 	if (ctx.editable && drag) {
 		bar.createDiv({ cls: "mica-footer-spacer" });
+		// The unfold toggle mirrors the fold button's corner, so the cursor
+		// that just folded lands directly on the control that reverses it.
+		iconButton(bar, "mica-minitool", "chevrons-up-down", "Unfold").addEventListener("click", (e) => {
+			e.stopPropagation();
+			toggleFold(ctx, key);
+		});
 		const grip = iconButton(bar, "mica-region-grip mica-fold-grip", "grip-vertical", "Drag to move");
 		grip.addEventListener("click", (e) => e.stopPropagation());
 		makeDraggable(
@@ -1196,6 +1202,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	grid.setAttribute("data-path", path.join("."));
 	grid.setAttribute("data-len", String(node.children.length));
 	grid.setAttribute("data-axis", "x");
+	grid.setAttribute("data-cols", String(Number(titleAttr(node.title, "cols") ?? "2") || 2));
 	const cols = Number(titleAttr(node.title, "cols") ?? "2") || 2;
 	grid.style.setProperty("--mica-cols", String(cols));
 	// Per-column fractions (fence-persisted via the shared reducer).
