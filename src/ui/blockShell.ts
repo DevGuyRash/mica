@@ -465,6 +465,17 @@ function revealNode(root: HTMLElement, path: number[], kind: string): void {
 }
 
 /** Per-block appearance popover — writes fence attrs via the edit hooks. */
+/** The block's effective accent as #rrggbb (for the color input's initial). */
+function resolveAccentHex(el: HTMLElement): string {
+	const probe = el.createSpan();
+	probe.style.color = "var(--mica-accent)";
+	const rgb = getComputedStyle(probe).color;
+	probe.remove();
+	const m = rgb.match(/\d+/g);
+	if (!m || m.length < 3) return "#8b5cf6";
+	return `#${m.slice(0, 3).map((x) => Number(x).toString(16).padStart(2, "0")).join("")}`;
+}
+
 function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 	el.querySelector(".mica-appearance")?.remove();
 	const pop = el.createDiv({ cls: "mica-appearance" });
@@ -481,13 +492,21 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 
 	pop.createDiv({ cls: "mica-appearance-title", text: "This block's appearance" });
 
-	// Accent.
+	// Accent. An override here SHADOWS the global setting for this block —
+	// say so explicitly, or the global control looks broken.
+	const overridden = Boolean(ctx.blockAttrs?.["accent"]);
 	const accentRow = pop.createDiv({ cls: "mica-appearance-row" });
 	accentRow.createSpan({ text: "Accent" });
+	if (overridden) accentRow.createSpan({ cls: "mica-appearance-override", text: "overrides global" });
 	const color = accentRow.createEl("input", { attr: { type: "color" } });
-	color.value = ctx.blockAttrs?.["accent"] ?? "#8b5cf6";
+	color.value = ctx.blockAttrs?.["accent"] ?? resolveAccentHex(el);
 	color.addEventListener("change", () => ctx.editable?.setAttr("accent", color.value));
-	const clearAccent = iconButton(accentRow, "mica-head-btn", "rotate-ccw", "Follow the theme accent");
+	const clearAccent = iconButton(
+		accentRow,
+		`mica-head-btn ${overridden ? "is-override" : ""}`,
+		"rotate-ccw",
+		overridden ? "Remove this block's override (follow the global accent)" : "Follow the theme accent",
+	);
 	clearAccent.addEventListener("click", () => ctx.editable?.setAttr("accent", null));
 
 	// Density + tab style segments.

@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { setEditorBehavior } from "./ui/quickEdit";
+import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
 import { micaLivePreview } from "./cm/micaLivePreview";
 import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
@@ -192,6 +193,22 @@ export default class MicaPlugin extends Plugin {
 	 * inline CSS variables (which win over the theme preset). One accent drives
 	 * the whole palette (chrome + borders retint from it in CSS).
 	 */
+	/**
+	 * Rebuild every open mica widget. Needed for settings that are read at
+	 * RENDER time (header mode, version chip) — CSS-variable settings apply
+	 * instantly without this, and calling it is safe (drafts reopen).
+	 */
+	refreshViews(): void {
+		bumpConfigEpoch();
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const view = leaf.view;
+			if (!(view instanceof MarkdownView)) continue;
+			const cm = (view.editor as unknown as { cm?: { dispatch(spec: unknown): void } }).cm;
+			cm?.dispatch({ effects: micaRefreshEffect.of(null) });
+			view.previewMode?.rerender(true);
+		}
+	}
+
 	applyStyleVars(): void {
 		const s = this.settings;
 		const b = document.body;

@@ -334,6 +334,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.blockHeaderMode)
 					.onChange(async (v) => {
 						s.blockHeaderMode = v as MicaSettings["blockHeaderMode"];
+						this.micaPlugin.refreshViews();
 						await save();
 					}),
 			);
@@ -390,6 +391,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.showVersionChip).onChange(async (v) => {
 					s.showVersionChip = v;
+					this.micaPlugin.refreshViews();
 					await save();
 				}),
 			);

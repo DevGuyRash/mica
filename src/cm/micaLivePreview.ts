@@ -1,5 +1,5 @@
 import { editorInfoField, editorLivePreviewField, MarkdownRenderChild } from "obsidian";
-import { Prec, StateField } from "@codemirror/state";
+import { Prec, StateEffect, StateField } from "@codemirror/state";
 import type { EditorState, Extension, Text, Transaction } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
@@ -17,8 +17,13 @@ import { applyOp, revealFor, type StructOp } from "../cst/ops";
  * focus target, editor draft, collapse) lives on the plugin, keyed by id, so
  * it survives the rebuild each edit triggers AND reading⇄editing mode flips.
  */
+/** Bumped when render-affecting settings change (header mode, version chip):
+ *  it participates in widget identity, so a refresh dispatch rebuilds DOM. */
+let configEpoch = 0;
+
 class MicaWidget extends WidgetType {
 	private child: MarkdownRenderChild | null = null;
+	private readonly epoch = configEpoch;
 
 	constructor(
 		private readonly plugin: MicaPlugin,
@@ -31,7 +36,12 @@ class MicaWidget extends WidgetType {
 	}
 
 	eq(other: MicaWidget): boolean {
-		return other.id === this.id && other.content === this.content && sameAttrs(other.attrs, this.attrs);
+		return (
+			other.epoch === this.epoch &&
+			other.id === this.id &&
+			other.content === this.content &&
+			sameAttrs(other.attrs, this.attrs)
+		);
 	}
 
 	toDOM(view: EditorView): HTMLElement {
@@ -235,6 +245,15 @@ function revealUnchanged(tr: Transaction): boolean {
 	return true;
 }
 
+/** Dispatched into open editors after render-affecting settings change:
+ *  bumps the widget epoch (done by the caller) and forces a rebuild. */
+export const micaRefreshEffect = StateEffect.define<null>();
+
+/** Bump the widget identity epoch (pair with dispatching the effect). */
+export function bumpConfigEpoch(): void {
+	configEpoch++;
+}
+
 /** The Live Preview editor extension. Registered via `registerEditorExtension`. */
 export function micaLivePreview(plugin: MicaPlugin): Extension {
 	const field = StateField.define<DecorationSet>({
@@ -244,7 +263,8 @@ export function micaLivePreview(plugin: MicaPlugin): Extension {
 		update(deco, tr) {
 			const modeFlipped =
 				tr.state.field(editorLivePreviewField, false) !== tr.startState.field(editorLivePreviewField, false);
-			if (tr.docChanged || modeFlipped) return build(plugin, tr.state);
+			const refresh = tr.effects.some((e) => e.is(micaRefreshEffect));
+			if (tr.docChanged || modeFlipped || refresh) return build(plugin, tr.state);
 			if (!tr.selection) return deco;
 			// Outside Live Preview `deco` is already Decoration.none (mode flips
 			// always rebuild), which is exactly what build() would return.

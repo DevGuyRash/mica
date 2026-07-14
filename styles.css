@@ -1827,6 +1827,17 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	width: 52px;
 	flex-shrink: 0;
 }
+.mica-appearance-override {
+	font-size: var(--font-ui-smaller);
+	color: var(--mica-accent);
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 45%, transparent);
+	border-radius: 8px;
+	padding: 0 6px;
+	white-space: nowrap;
+}
+.mica-head-btn.is-override {
+	color: var(--mica-accent);
+}
 .mica-appearance-hint {
 	color: var(--text-faint);
 	font-size: var(--font-ui-smaller);
