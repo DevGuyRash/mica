@@ -52,7 +52,7 @@ pub enum Node {
 pub fn parse_block_impl(content: &str) -> Cst {
     let src = Src::new(content);
     let mut pos = 0;
-    let (children, _stop) = parse_children(&src, &mut pos, None, false);
+    let (children, _stop) = parse_children(&src, &mut pos, None, false, false);
     Cst { children }
 }
 
@@ -162,6 +162,7 @@ fn parse_children(
     pos: &mut usize,
     close_colons: Option<usize>,
     in_tab_body: bool,
+    in_tabs_group: bool,
 ) -> (Vec<Node>, Stop) {
     let mut children = Vec::new();
     // First line of the currently open prose run, if any.
@@ -191,7 +192,13 @@ fn parse_children(
             if in_tab_body {
                 return (children, Stop::NextTab); // end this tab; leave the delimiter
             }
-            children.push(collect_delim_tabs(src, pos, close_colons));
+            // Inside an explicit `:::tabs`, delimiters ARE the group's tabs —
+            // wrapping them in a second tabs group hides them from renderers.
+            if in_tabs_group {
+                children.extend(collect_delim_tab_nodes(src, pos, close_colons));
+            } else {
+                children.push(collect_delim_tabs(src, pos, close_colons));
+            }
             continue;
         }
 
@@ -200,7 +207,7 @@ fn parse_children(
             flush_md(&mut children, src, &mut md_start, *pos);
             let open_line = line.to_string();
             *pos += 1;
-            let (kids, stop) = parse_children(src, pos, Some(colons), false);
+            let (kids, stop) = parse_children(src, pos, Some(colons), false, name == "tabs");
             let close_line = if let Stop::Closed(l) = stop {
                 l
             } else {
@@ -274,7 +281,12 @@ fn parse_children(
 /// closer, or at end of block — no closing fence required. The `tabs` group
 /// and each `tab` are synthetic (empty open/close lines), so serialization
 /// reproduces exactly the original `tab:` lines and bodies.
-fn collect_delim_tabs(src: &Src<'_>, pos: &mut usize, close_colons: Option<usize>) -> Node {
+/// Consume consecutive `tab:` sections into bare `tab` containers.
+fn collect_delim_tab_nodes(
+    src: &Src<'_>,
+    pos: &mut usize,
+    close_colons: Option<usize>,
+) -> Vec<Node> {
     let mut tabs = Vec::new();
     while *pos < src.line_count() {
         let line = src.line(*pos);
@@ -283,7 +295,7 @@ fn collect_delim_tabs(src: &Src<'_>, pos: &mut usize, close_colons: Option<usize
         };
         let open_line = line.to_string();
         *pos += 1;
-        let (body, stop) = parse_children(src, pos, close_colons, true);
+        let (body, stop) = parse_children(src, pos, close_colons, true, false);
         tabs.push(Node::Container {
             name: "tab".to_string(),
             title: name.to_string(),
@@ -296,12 +308,17 @@ fn collect_delim_tabs(src: &Src<'_>, pos: &mut usize, close_colons: Option<usize
             break; // Eof or an ancestor's closer ends the group
         }
     }
+    tabs
+}
+
+/// Wrap a run of `tab:` sections in the implicit (friendly-form) tabs group.
+fn collect_delim_tabs(src: &Src<'_>, pos: &mut usize, close_colons: Option<usize>) -> Node {
     Node::Container {
         name: "tabs".to_string(),
         title: String::new(),
         colons: 0,
         open_line: String::new(),
-        children: tabs,
+        children: collect_delim_tab_nodes(src, pos, close_colons),
         close_line: String::new(),
     }
 }
@@ -637,6 +654,24 @@ mod tests {
         let cst = parse_block_impl("```md\n:::tab Nope\n```\n");
         assert_eq!(cst.children.len(), 1);
         assert!(matches!(&cst.children[0], Node::Leaf { is_code: true, .. }));
+    }
+
+    #[test]
+    fn friendly_tabs_inside_directive_tabs_are_direct_children() {
+        // `tab:` delimiters inside an explicit `:::tabs` must NOT wrap
+        // themselves in a second tabs group — the double wrap rendered as
+        // silently invisible content (renderers list direct `tab` children).
+        let src = ":::tabs\ntab: Alpha\nbody\n:::\n";
+        let cst = parse_block_impl(src);
+        let Node::Container { name, children, .. } = &cst.children[0] else {
+            panic!("expected tabs container")
+        };
+        assert_eq!(name, "tabs");
+        assert!(
+            matches!(&children[0], Node::Container { name, .. } if name == "tab"),
+            "tab must be a DIRECT child: {children:?}"
+        );
+        assert_eq!(serialize_impl(&cst), src);
     }
 
     #[test]

@@ -23,6 +23,11 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
   `obsidian eval` cannot await promises and console.log does not come back — chain
   `.then(r => app.vault.adapter.write("out.json", …))` and read the file instead.
 
+- **e2e pointer-timing flakiness**: two dnd-stress tests (below-sibling
+  indicator probe, spring-loading) each failed once across three otherwise
+  green full runs — pointer-event timing under Xvfb. If it recurs, bump the
+  30ms settle waits or gate the indicator probe behind a waitUntil.
+
 ## Remaining scope
 
 - **Mobile pass**: the new chrome degrades via CSS but has had no dedicated

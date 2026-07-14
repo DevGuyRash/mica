@@ -6,6 +6,7 @@ import type { Reveal, StructOp } from "../cst/ops";
 import { makeDraggable } from "./dnd";
 import { draftKey, openLightboxFor, openQuickEdit, type RegionTarget } from "./quickEdit";
 import { openCalloutEditor, parseCallout } from "./calloutEditor";
+import { calloutCatalog } from "./calloutCatalog";
 import { EditorLightbox } from "./lightbox";
 import { VersionsModal } from "./versionsModal";
 
@@ -262,7 +263,7 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 
 	// Navigator.
 	iconButton(head, "mica-head-btn", "list-tree", "Block navigator").addEventListener("click", (e) => {
-		openNavigator(cst, el, e);
+		openNavigator(cst, el, ctx, e);
 	});
 
 	// Overflow menu.
@@ -405,30 +406,62 @@ function rerender(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 }
 
 /** The tree popover: jump to any tab/cell; shows per-tab word counts. */
-function openNavigator(cst: Cst, root: HTMLElement, e: MouseEvent): void {
+function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e: MouseEvent): void {
 	const menu = new Menu();
+	const ICONS: Record<string, string> = {
+		tabs: "app-window",
+		tab: "corner-down-right",
+		grid: "layout-grid",
+		cell: "square",
+	};
+	const addSection = (parent: number[], u: { start: number; end: number; md: string }, depth: number): void => {
+		if (!u.md.trim()) return;
+		const pad = "    ".repeat(depth);
+		const callout = parseCallout(u.md);
+		let icon = "text";
+		let label: string;
+		if (callout) {
+			icon = calloutCatalog(ctx.app).find((t) => t.id === callout.type || t.aliases.includes(callout.type))?.icon ?? "megaphone";
+			label = callout.title || `[!${callout.type}]`;
+		} else if (u.md.trimStart().startsWith("\u0060\u0060\u0060")) {
+			icon = "square-code";
+			label = u.md.trimStart().slice(3).split("\n")[0].trim() || "code";
+		} else {
+			label = foldSummary(u.md);
+			if (label.length > 34) label = `${label.slice(0, 34)}…`;
+		}
+		menu.addItem((item) => {
+			item.setTitle(`${pad}${label}`);
+			item.setIcon(icon);
+			item.onClick(() => revealNode(ctx, root, { path: parent, kind: "region", start: u.start }));
+		});
+	};
 	const walk = (nodes: MicaNode[], path: number[], depth: number): void => {
-		nodes.forEach((n, i) => {
-			if (n.kind !== "container") return;
+		let i = 0;
+		while (i < nodes.length) {
+			const n = nodes[i];
+			if (n.kind === "leaf") {
+				const units = leafUnits(nodes, i);
+				for (const u of units) addSection(path, u, depth);
+				i = units.length ? units[units.length - 1].end : i + 1;
+				continue;
+			}
 			const p = [...path, i];
 			if (n.name === "tab" || n.name === "cell" || n.name === "tabs" || n.name === "grid") {
 				const [display] = splitTitleAttrs(n.title);
 				const words = wordCount(n.children);
-				const label = `${"    ".repeat(depth)}${iconFor(n.name)} ${display || n.name}${words ? `  ·  ${words}w` : ""}`;
 				menu.addItem((item) => {
-					item.setTitle(label);
-					item.onClick(() => revealNode(root, p, n.name));
+					item.setTitle(`${"    ".repeat(depth)}${display || n.name}${words ? `  ·  ${words}w` : ""}`);
+					item.setIcon(ICONS[n.name] ?? "square");
+					item.onClick(() => revealNode(ctx, root, { path: p, kind: n.name }));
 				});
 			}
 			walk(n.children, p, depth + 1);
-		});
+			i++;
+		}
 	};
 	walk(cst.children, [], 0);
 	menu.showAtMouseEvent(e);
-}
-
-function iconFor(name: string): string {
-	return name === "tabs" ? "▤" : name === "tab" ? "▸" : name === "grid" ? "▦" : "▢";
 }
 
 function wordCount(nodes: MicaNode[]): number {
@@ -444,21 +477,53 @@ function wordCount(nodes: MicaNode[]): number {
  * Take the reader TO a node: activate every ancestor tab, scroll it into
  * view, and flash its bounds so the eye lands where the click meant.
  */
-function revealNode(root: HTMLElement, path: number[], kind: string): void {
+interface RevealSpec {
+	path: number[];
+	kind: string;
+	/** Region targets: the unit's start index within `path`'s children. */
+	start?: number;
+}
+
+function revealNode(ctx: RenderCtx, root: HTMLElement, spec: RevealSpec): void {
+	// Folded ancestors (or a folded target) hide the destination entirely —
+	// unfold first, re-render, THEN locate elements in the fresh DOM.
+	if (ctx.ui) {
+		let changed = false;
+		for (let depth = 1; depth <= spec.path.length; depth++) {
+			if (ctx.ui.folded.delete(nodeFoldKey(spec.path.slice(0, depth)))) changed = true;
+		}
+		if (spec.kind !== "region" && ctx.ui.folded.delete(nodeFoldKey(spec.path))) changed = true;
+		if (spec.start !== undefined && ctx.ui.folded.delete(regionFoldKey(spec.path, spec.start))) changed = true;
+		if (changed) ctx.rerenderBlock?.();
+	}
 	// Activate the ancestor tab chain (chips carry their comma-joined path).
-	for (let depth = 1; depth <= path.length; depth++) {
-		const prefix = path.slice(0, depth);
+	for (let depth = 1; depth <= spec.path.length; depth++) {
+		const prefix = spec.path.slice(0, depth);
 		const chip = root.querySelector<HTMLElement>(`.mica-tab-btn[data-mica-tab="${prefix.join(",")}"]`);
 		chip?.click();
 	}
-	const dotted = path.join(".");
-	// Tabs highlight their BODY (the panel content); containers highlight themselves.
-	const target =
-		kind === "tab"
-			? (root.querySelector<HTMLElement>(`[data-mica-container="group"][data-path="${dotted}"]`) ??
-				root.querySelector<HTMLElement>(`[data-mica-node="${dotted}"]`))
-			: (root.querySelector<HTMLElement>(`[data-mica-node="${dotted}"]`) ??
-				root.querySelector<HTMLElement>(`[data-path="${dotted}"]`));
+	const dotted = spec.path.join(".");
+	let target: HTMLElement | null;
+	if (spec.kind === "region" && spec.start !== undefined) {
+		// Structural membership: the unit's element is the [data-mica-idx]
+		// whose nearest container is the region's parent container.
+		const parent = root.querySelector<HTMLElement>(`[data-mica-container="group"][data-path="${dotted}"]`);
+		target =
+			parent
+				? (Array.from(parent.querySelectorAll<HTMLElement>(`[data-mica-idx="${spec.start}"]`)).find(
+						(k) => k.parentElement?.closest("[data-mica-container]") === parent,
+					) ?? null)
+				: null;
+	} else if (spec.kind === "tab") {
+		// Tabs highlight their BODY (the panel content).
+		target =
+			root.querySelector<HTMLElement>(`[data-mica-container="group"][data-path="${dotted}"]`) ??
+			root.querySelector<HTMLElement>(`[data-mica-node="${dotted}"]`);
+	} else {
+		target =
+			root.querySelector<HTMLElement>(`[data-mica-node="${dotted}"]`) ??
+			root.querySelector<HTMLElement>(`[data-path="${dotted}"]`);
+	}
 	if (!target) return;
 	target.scrollIntoView({ block: "center", behavior: "smooth" });
 	target.addClass("mica-flash");
@@ -560,6 +625,30 @@ interface NodesOpts {
 	autoOpen?: boolean;
 }
 
+/**
+ * Split a leaf RUN starting at `from` into display units: leading spacing +
+ * one content leaf + trailing spacing per unit. The renderer's regions and
+ * the navigator's section rows both derive from this, so their `start`
+ * indices (= `data-mica-idx`) can never disagree.
+ */
+function leafUnits(nodes: MicaNode[], from: number): { start: number; end: number; md: string }[] {
+	const isLeaf = (n: number): boolean => n < nodes.length && nodes[n].kind === "leaf";
+	const isWs = (n: number): boolean => isLeaf(n) && !(nodes[n] as Leaf).text.trim();
+	const units: { start: number; end: number; md: string }[] = [];
+	let i = from;
+	while (isLeaf(i)) {
+		let j = i;
+		while (isWs(j)) j++;
+		if (isLeaf(j)) j++;
+		while (isWs(j)) j++;
+		let md = "";
+		for (let k = i; k < j; k++) md += (nodes[k] as Leaf).text;
+		units.push({ start: i, end: j, md });
+		i = j;
+	}
+	return units;
+}
+
 function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: number[], opts: NodesOpts = {}): void {
 	let i = 0;
 	let opened = false;
@@ -569,22 +658,18 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 			// each becomes its own region (grip + pencil). Whitespace-only
 			// leaves glue to the PRECEDING unit so spacing between sections
 			// never renders as a phantom empty region.
-			const isWsLeaf = (n: number): boolean =>
-				n < nodes.length && nodes[n].kind === "leaf" && !(nodes[n] as Leaf).text.trim();
-			const isLeaf = (n: number): boolean => n < nodes.length && nodes[n].kind === "leaf";
-			while (isLeaf(i)) {
-				// One unit = leading spacing + one content leaf + trailing spacing.
-				let j = i;
-				while (isWsLeaf(j)) j++;
-				if (isLeaf(j)) j++;
-				while (isWsLeaf(j)) j++;
-				let md = "";
-				for (let k = i; k < j; k++) md += (nodes[k] as Leaf).text;
-				if (ctx.editable && i > 0) renderInsertZone(el, ctx, path, i);
+			for (const u of leafUnits(nodes, i)) {
+				if (ctx.editable && u.start > 0) renderInsertZone(el, ctx, path, u.start);
 				const auto: boolean = Boolean(opts.autoOpen) && !opened;
-				renderRegion(el, ctx, { path, start: i, end: j, original: md }, auto, i === 0 && j === nodes.length);
+				renderRegion(
+					el,
+					ctx,
+					{ path, start: u.start, end: u.end, original: u.md },
+					auto,
+					u.start === 0 && u.end === nodes.length,
+				);
 				opened = opened || auto;
-				i = j;
+				i = u.end;
 			}
 		} else {
 			// Insert-between zones — including BEFORE the first section.

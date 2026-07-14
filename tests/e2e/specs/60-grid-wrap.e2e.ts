@@ -299,3 +299,50 @@ describe("grid row resize", function () {
 		);
 	});
 });
+
+describe("block navigator", function () {
+	it("lists sections and reveals a target inside a FOLDED group (auto-unfold)", async function () {
+		await seedAndOpen(
+			"NavFold.md",
+			"Intro.\n\n```mica id=nav-1\n:::tabs\ntab: Alpha\n> [!tip] Buried treasure\n> the payload\n:::\n\nroot outro prose\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length >= 1),
+			{ timeout: 8000, timeoutMsg: "tabs never rendered" },
+		);
+		// Fold the whole tabs group.
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-group-fold") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-fold-bar").length === 1),
+			{ timeout: 8000, timeoutMsg: "the group never folded" },
+		);
+		// Navigator → click the buried callout's row.
+		await browser.executeObsidian(() => {
+			(document.querySelector('.mica-lp .mica-head-btn[aria-label="Block navigator"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".menu .menu-item").length >= 2),
+			{ timeout: 8000, timeoutMsg: "the navigator menu never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const row = Array.from(document.querySelectorAll(".menu .menu-item")).find((m) =>
+				m.textContent?.includes("Buried treasure"),
+			) as HTMLElement;
+			row.click();
+		});
+		// The group must have unfolded and the target section flashed.
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() =>
+						document.querySelectorAll(".mica-lp .mica-fold-bar").length === 0 &&
+						Array.from(document.querySelectorAll(".mica-lp .mica-region")).some(
+							(r) => r.textContent?.includes("Buried treasure") && r.classList.contains("mica-flash"),
+						),
+				),
+			{ timeout: 8000, timeoutMsg: "the navigator did not unfold + flash the target" },
+		);
+	});
+});
