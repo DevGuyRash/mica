@@ -5,6 +5,7 @@ import { readObject } from "../storage/sidecar";
 import type { Reveal, StructOp } from "../cst/ops";
 import { makeDraggable } from "./dnd";
 import { draftKey, openLightboxFor, openQuickEdit, type RegionTarget } from "./quickEdit";
+import { openCalloutEditor, parseCallout } from "./calloutEditor";
 import { EditorLightbox } from "./lightbox";
 import { VersionsModal } from "./versionsModal";
 
@@ -765,6 +766,14 @@ function renderRegion(
 					.setIcon("maximize-2")
 					.onClick(() => openLightboxFor(ctx, target)),
 			);
+			if (parseCallout(target.original)) {
+				menu.addItem((i) =>
+					i
+						.setTitle("Edit callout (structured)…")
+						.setIcon("megaphone")
+						.onClick(() => openCalloutEditor(ctx, target)),
+				);
+			}
 			menu.showAtMouseEvent(e);
 		});
 	}
@@ -808,6 +817,15 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 				(op) => ctx.editable?.apply(op),
 				region,
 			);
+			if (parseCallout(target.original)) {
+				iconButton(tools, "mica-minitool", "maximize-2", "Edit callout (type, title, body)").addEventListener(
+					"click",
+					(e) => {
+						e.stopPropagation();
+						openCalloutEditor(ctx, target);
+					},
+				);
+			}
 			iconButton(tools, "mica-minitool", "chevrons-down-up", "Fold this section").addEventListener(
 				"click",
 				(e) => {

@@ -15,6 +15,12 @@ async function seedAndOpen(path: string, content: string): Promise<void> {
 	);
 }
 
+async function docContains(_pred: string): Promise<string> {
+	return browser.executeObsidian(({ app, obsidian }) => {
+		return app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+	});
+}
+
 describe("grid column resize + wrap toggle", function () {
 	it("dragging the column divider persists colw fractions into the grid header", async function () {
 		await seedAndOpen(
@@ -184,6 +190,56 @@ describe("round 6: folds, click-outside, region delete", function () {
 					return !v.includes("Delete me") && v.includes("keep me");
 				}),
 			{ timeout: 8000, timeoutMsg: "the section was not deleted" },
+		);
+	});
+});
+
+describe("structured callout editor", function () {
+	it("edits type/title/fold and re-quotes the body — nested callouts nest automatically", async function () {
+		await seedAndOpen(
+			"CalloutEdit.md",
+			"Intro.\n\n```mica id=ce-1\ntab: Main\n> [!note] Old title\n> Original body line.\n\ntrailing prose\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
+			{ timeout: 8000, timeoutMsg: "regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Old title"),
+			) as HTMLElement;
+			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-callout-editor").length === 1),
+			{ timeout: 8000, timeoutMsg: "the callout editor never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const modal = document.querySelector(".mica-callout-editor") as HTMLElement;
+			const type = modal.querySelector(".mica-coedit-type") as HTMLInputElement;
+			type.value = "warning";
+			const title = modal.querySelector(".mica-coedit-title") as HTMLInputElement;
+			title.value = "New title";
+			(Array.from(modal.querySelectorAll(".mica-pop-seg")).find((b) => b.textContent === "Closed") as HTMLElement).click();
+			const host = modal.querySelector(".mica-mdeditor") as HTMLElement & {
+				micaEditor?: { setValue(v: string): void };
+			};
+			// A callout typed INSIDE the body — must come out nested (> >).
+			host.micaEditor?.setValue("Edited body.\n\n> [!tip] Inner\n> nested body");
+			(Array.from(modal.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				return (
+					v.includes("> [!warning]- New title") &&
+					v.includes("> Edited body.") &&
+					v.includes("> > [!tip] Inner") &&
+					v.includes("> > nested body") &&
+					v.includes("trailing prose")
+				);
+			},
+			{ timeout: 8000, timeoutMsg: "the callout round-trip did not land" },
 		);
 	});
 });

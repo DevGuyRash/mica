@@ -1084,10 +1084,8 @@ body[data-mica-grip="left"] .mica-region-tools {
 	display: none;
 }
 /* A cell's sole region keeps its tools (dragging content OUT of a cell needs
-   the grip) — offset below the cell bar so the two clusters never overlap. */
-.mica-cell > .mica-region.is-sole > .mica-region-tools {
-	top: 32px;
-}
+   the grip); the cell bar hides while inner content is hovered, so the same
+   corner serves both clusters without stacking. */
 .mica-region-grip,
 .mica-minitool {
 	width: 22px;
@@ -1594,7 +1592,7 @@ body.mica-dnd-active * {
 	padding: 1px;
 	box-shadow: var(--shadow-s);
 }
-.mica-cell:hover > .mica-cell-bar {
+.mica-cell:hover:not(:has(.mica-region:hover, .mica-grid-wrap:hover, .mica-tabs:hover)) > .mica-cell-bar {
 	display: inline-flex;
 }
 body[data-mica-grip="left"] .mica-cell-bar {
@@ -2080,6 +2078,41 @@ body[data-mica-grip="left"] .mica-cell-bar {
 }
 .mica-grid {
 	position: relative;
+}
+
+/* ---------- Structured callout editor ---------- */
+.mica-callout-editor {
+	width: min(680px, 92vw);
+}
+.mica-coedit-root {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.mica-coedit-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.mica-coedit-type {
+	width: 150px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+}
+.mica-coedit-title {
+	width: 100%;
+}
+.mica-coedit-body {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	min-height: 120px;
+	max-height: 50vh;
+	overflow: auto;
+}
+.mica-coedit-footer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 /* ---------- Folded sections / groups ---------- */
