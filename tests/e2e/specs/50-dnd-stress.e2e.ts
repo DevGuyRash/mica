@@ -67,8 +67,13 @@ describe("drag & drop stress", function () {
 			await new Promise((r) => setTimeout(r, 30));
 			// Point BELOW Gamma: the promised landing spot must be below it too.
 			window.dispatchEvent(new PointerEvent("pointermove", opts(rg.left + 40, rg.bottom + 4)));
-			await new Promise((r) => setTimeout(r, 30));
-			const ind = document.querySelector(".mica-drop-indicator") as HTMLElement | null;
+			// Gate on the indicator actually SHOWING (timing under Xvfb varies).
+			let ind: HTMLElement | null = null;
+			for (let tries = 0; tries < 20; tries++) {
+				ind = document.querySelector(".mica-drop-indicator");
+				if (ind && ind.style.display !== "none") break;
+				await new Promise((r) => setTimeout(r, 50));
+			}
 			const indTop = ind ? ind.getBoundingClientRect().top : -1;
 			window.dispatchEvent(new PointerEvent("pointerup", opts(rg.left + 40, rg.bottom + 4)));
 			return { ok: true, indTop, gammaBottom: rg.bottom };
@@ -155,8 +160,13 @@ describe("drag & drop stress", function () {
 			await new Promise((r) => setTimeout(r, 30));
 			// Hover tab Two's chip long enough to spring-load it…
 			window.dispatchEvent(new PointerEvent("pointermove", opts(rc.left + rc.width / 2, rc.top + rc.height / 2)));
-			await new Promise((r) => setTimeout(r, 650));
-			const springed = two.querySelector(".mica-tab-btn")?.classList.contains("is-active") ?? false;
+			// Gate on the spring actually firing (450ms timer + Xvfb jitter).
+			let springed = false;
+			for (let tries = 0; tries < 30; tries++) {
+				await new Promise((r) => setTimeout(r, 100));
+				springed = two.querySelector(".mica-tab-btn")?.classList.contains("is-active") ?? false;
+				if (springed) break;
+			}
 			// …then drop inside the now-visible panel body.
 			const body = document.querySelector(".mica-lp .mica-tab-panel.is-active .mica-tab-body") as HTMLElement;
 			const rbody = body.getBoundingClientRect();
