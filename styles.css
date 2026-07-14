@@ -2257,3 +2257,22 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	gap: 4px;
 	max-width: 320px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Floating-overlay opacity guarantee
+   Glassy themes define --background-primary with alpha and pair it with a
+   backdrop blur we don't inherit — leaving popovers/tool clusters see-through
+   over text. Keep the theme's hue, strip the alpha (relative color syntax).
+   In-flow surfaces (the card, editors) keep the theme's translucency.
+   ═══════════════════════════════════════════════════════════════════════ */
+.mica-popover,
+.mica-region-tools,
+.mica-cell-bar,
+.mica-grid-tools,
+.mica-appearance,
+.mica-drag-ghost,
+.mica-insert-plus,
+.mica-colzone-plus {
+	/* `/ 1` is load-bearing: an omitted alpha INHERITS the origin's alpha. */
+	background: rgb(from var(--background-primary) r g b / 1);
+}
