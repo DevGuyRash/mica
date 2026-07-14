@@ -71,6 +71,8 @@ export interface MicaSettings {
 	toolbarDefaults: Record<string, string>;
 	/** User-defined template buttons (espanso-style placeholders). */
 	customTools: CustomTool[];
+	/** Persisted fold keys per block id (folds survive restarts). */
+	foldState: Record<string, string[]>;
 }
 
 export const DEFAULT_SETTINGS: MicaSettings = {
@@ -101,6 +103,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
 	toolbarDefaults: {},
 	customTools: [],
+	foldState: {},
 };
 
 export class MicaSettingTab extends PluginSettingTab {

@@ -2300,3 +2300,109 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	/* `/ 1` is load-bearing: an omitted alpha INHERITS the origin's alpha. */
 	background: rgb(from var(--background-primary) r g b / 1);
 }
+
+/* ---------- Navigator popover (tree + drag-to-reorder) ---------- */
+.mica-navpop {
+	position: absolute;
+	z-index: 30;
+	min-width: 240px;
+	max-width: 340px;
+	max-height: 50vh;
+	overflow-y: auto;
+	padding: 4px;
+}
+.mica-nav-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 4px 8px;
+	border-radius: 6px;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+	border-top: 2px solid transparent;
+	border-bottom: 2px solid transparent;
+}
+.mica-nav-row:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+.mica-nav-row.mica-nav-dragging {
+	opacity: 0.45;
+}
+.mica-nav-row.mica-nav-dropbefore {
+	border-top-color: var(--mica-accent);
+}
+.mica-nav-row.mica-nav-dropafter {
+	border-bottom-color: var(--mica-accent);
+}
+.mica-nav-ico {
+	display: inline-flex;
+	flex-shrink: 0;
+	opacity: 0.8;
+}
+.mica-nav-ico .svg-icon {
+	width: 13px !important;
+	height: 13px !important;
+}
+.mica-nav-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.mica-nav-count {
+	margin-left: auto;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+
+.mica-vrow-cmp.is-on {
+	color: var(--mica-accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Touch / coarse-pointer pass
+   Hover-revealed affordances must be reachable without hover; targets grow
+   toward the 40px comfort zone; resize strips widen.
+   ═══════════════════════════════════════════════════════════════════════ */
+@media (hover: none), (pointer: coarse) {
+	.mica-region.is-editable > .mica-region-tools,
+	.mica-cell > .mica-cell-bar,
+	.mica-grid-wrap > .mica-grid-tools {
+		display: inline-flex;
+	}
+	.mica-region.is-editing > .mica-region-tools {
+		display: none;
+	}
+	.mica-head {
+		opacity: 1;
+	}
+	.mica-region-grip,
+	.mica-minitool,
+	.mica-cell-tool,
+	.mica-head-btn {
+		width: 32px;
+		height: 32px;
+	}
+	.mica-region-grip .svg-icon,
+	.mica-minitool .svg-icon,
+	.mica-cell-tool .svg-icon {
+		width: 16px !important;
+		height: 16px !important;
+	}
+	.mica-col-resizer {
+		width: 20px;
+	}
+	.mica-row-resizer {
+		height: 20px;
+	}
+	.mica-insert-zone,
+	.mica-cell-colzone,
+	.mica-grid-colzone-end {
+		opacity: 0.6;
+	}
+	.mica-tab-btn {
+		min-height: 36px;
+	}
+}

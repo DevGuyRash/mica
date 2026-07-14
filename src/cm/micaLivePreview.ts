@@ -87,6 +87,18 @@ class MicaWidget extends WidgetType {
 			return ui;
 		}
 		ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
+		// Folds survive restarts: restore from plugin data, write back on change.
+		const saved = this.plugin.settings.foldState[key];
+		if (saved) for (const k of saved) ui.folded.add(k);
+		const plugin = this.plugin;
+		ui.persistFolds = () => {
+			if (ui!.folded.size) plugin.settings.foldState[key] = [...ui!.folded];
+			else delete plugin.settings.foldState[key];
+			// The store is user data — cap it like the UI store itself.
+			const keys = Object.keys(plugin.settings.foldState);
+			if (keys.length > 256) for (const k of keys.slice(0, keys.length - 256)) delete plugin.settings.foldState[k];
+			void plugin.saveSettings();
+		};
 		store.set(key, ui);
 		// The store is otherwise unbounded and pins draft strings for every
 		// block ever rendered — evict the stalest draft-free entries.

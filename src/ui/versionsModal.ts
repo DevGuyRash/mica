@@ -9,7 +9,7 @@ import {
 	type VersionMeta,
 } from "../wasm/bridge";
 import { appendEvents, readObject } from "../storage/sidecar";
-import { renderDiff, renderPatch } from "../diff/diffView";
+import { renderDiff, renderNUp, renderPatch } from "../diff/diffView";
 import { EditorLightbox } from "./lightbox";
 
 interface Row {
@@ -37,6 +37,8 @@ export class VersionsModal extends Modal {
 	private hideSyntax: boolean;
 	private ignoreWs: boolean;
 	private layout: "inline" | "side-by-side" | "patch";
+	/** Hashes picked for the n-up multi-compare (≥2 switches the surface). */
+	private readonly compareSet = new Set<string>();
 	private surface: HTMLElement | null = null;
 	private listEl: HTMLElement | null = null;
 	private initialized = false;
@@ -206,6 +208,16 @@ export class VersionsModal extends Modal {
 			row.addEventListener("contextmenu", (e) => {
 				e.preventDefault();
 				this.versionMenu(e, r);
+			});
+			const cmp = row.createEl("button", {
+				cls: `clickable-icon mica-vrow-more mica-vrow-cmp ${this.compareSet.has(r.meta.hash) ? "is-on" : ""}`,
+				attr: { type: "button", "aria-label": "Toggle in multi-compare (2+ shows all side by side)" },
+			});
+			setIcon(cmp, "columns-3");
+			cmp.addEventListener("click", (e) => {
+				e.stopPropagation();
+				if (!this.compareSet.delete(r.meta.hash)) this.compareSet.add(r.meta.hash);
+				this.render();
 			});
 			const more = row.createEl("button", {
 				cls: "clickable-icon mica-vrow-more",
@@ -389,6 +401,18 @@ export class VersionsModal extends Modal {
 			},
 		);
 
+		if (this.compareSet.size) {
+			const chip = bar.createEl("button", {
+				cls: "mica-base-pick",
+				text: `n-up: ${this.compareSet.size} picked · clear`,
+				attr: { type: "button", "aria-label": "Clear the multi-compare selection" },
+			});
+			chip.addEventListener("click", () => {
+				this.compareSet.clear();
+				this.render();
+			});
+		}
+
 		bar.createDiv({ cls: "mica-footer-spacer" });
 		const copyPatch = bar.createEl("button", {
 			cls: "mica-base-pick",
@@ -420,6 +444,22 @@ export class VersionsModal extends Modal {
 			this.selected === WORKING ? "working copy" : this.nameOf(this.selected)
 		}`;
 		const body = surface.createDiv();
+		if (this.compareSet.size >= 2) {
+			// N-up: every picked version diffed against the SAME base, column each.
+			const gran = this.refine === "char" ? "line-char" : "line";
+			const picked = this.rows.filter((r) => this.compareSet.has(r.meta.hash));
+			caption.setText(`${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${picked.length} versions`);
+			renderNUp(
+				body,
+				{ label: this.nameOf(bk), text: base },
+				picked.map((r) => {
+					const result = diffText(base, this.prep(this.text(r.meta.hash)), gran, 3);
+					if (this.refine === "none") for (const h of result.hunks) for (const c of h.changes) c.inline = [];
+					return { label: `v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`, result };
+				}),
+			);
+			return;
+		}
 		if (this.layout === "patch") {
 			caption.setText(names);
 			renderPatch(body, makePatch(base, to, 3));

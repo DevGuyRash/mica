@@ -323,14 +323,25 @@ describe("block navigator", function () {
 			(document.querySelector('.mica-lp .mica-head-btn[aria-label="Block navigator"]') as HTMLElement).click();
 		});
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".menu .menu-item").length >= 2),
-			{ timeout: 8000, timeoutMsg: "the navigator menu never opened" },
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-navpop .mica-nav-row").length >= 2),
+			{ timeout: 8000, timeoutMsg: "the navigator popover never opened" },
 		);
 		await browser.executeObsidian(() => {
-			const row = Array.from(document.querySelectorAll(".menu .menu-item")).find((m) =>
+			const row = Array.from(document.querySelectorAll(".mica-navpop .mica-nav-row")).find((m) =>
 				m.textContent?.includes("Buried treasure"),
 			) as HTMLElement;
-			row.click();
+			const r = row.getBoundingClientRect();
+			const opts = (t: string): PointerEvent =>
+				new PointerEvent(t, {
+					bubbles: true,
+					cancelable: true,
+					clientX: r.left + 20,
+					clientY: r.top + r.height / 2,
+					button: 0,
+					pointerId: 3,
+				});
+			row.dispatchEvent(opts("pointerdown"));
+			window.dispatchEvent(opts("pointerup"));
 		});
 		// The group must have unfolded and the target section flashed.
 		await browser.waitUntil(
@@ -343,6 +354,53 @@ describe("block navigator", function () {
 						),
 				),
 			{ timeout: 8000, timeoutMsg: "the navigator did not unfold + flash the target" },
+		);
+	});
+
+	it("dragging a navigator row reorders the section in the document", async function () {
+		await seedAndOpen(
+			"NavReorder.md",
+			"Intro.\n\n```mica id=nav-2\ntab: Main\n> [!note] First\n\n> [!tip] Second\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
+			{ timeout: 8000, timeoutMsg: "regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector('.mica-lp .mica-head-btn[aria-label="Block navigator"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-navpop .mica-nav-row").length >= 3),
+			{ timeout: 8000, timeoutMsg: "the navigator popover never opened" },
+		);
+		await browser.executeObsidian(async () => {
+			const rows = Array.from(document.querySelectorAll(".mica-navpop .mica-nav-row")) as HTMLElement[];
+			const first = rows.find((m) => m.textContent?.includes("First")) as HTMLElement;
+			const second = rows.find((m) => m.textContent?.includes("Second")) as HTMLElement;
+			const rf = first.getBoundingClientRect();
+			const rs = second.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 4,
+			});
+			first.dispatchEvent(new PointerEvent("pointerdown", opts(rf.left + 20, rf.top + rf.height / 2)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rf.left + 20, rf.top + 30)));
+			await new Promise((r) => setTimeout(r, 30));
+			// Bottom half of the LAST sibling row = drop AFTER it.
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rs.left + 20, rs.bottom - 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rs.left + 20, rs.bottom - 2)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				return v.indexOf("[!tip] Second") >= 0 && v.indexOf("[!tip] Second") < v.indexOf("[!note] First");
+			},
+			{ timeout: 8000, timeoutMsg: "the tree drag did not reorder the sections" },
 		);
 	});
 });

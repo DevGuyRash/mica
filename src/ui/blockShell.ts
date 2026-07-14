@@ -40,6 +40,8 @@ export interface BlockUi {
 	collapsed: boolean;
 	/** Folded sections/groups (keys: `r:<path>:<start>` and `n:<path>`). */
 	folded: Set<string>;
+	/** Persist the fold set (folds survive restarts). Set by the host. */
+	persistFolds?: () => void;
 }
 
 export interface RenderCtx {
@@ -344,6 +346,7 @@ function toggleFold(ctx: RenderCtx, key: string): void {
 	if (!ctx.ui) return;
 	if (ctx.ui.folded.has(key)) ctx.ui.folded.delete(key);
 	else ctx.ui.folded.add(key);
+	ctx.ui.persistFolds?.();
 	ctx.rerenderBlock?.();
 }
 
@@ -406,22 +409,80 @@ function rerender(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 }
 
 /** The tree popover: jump to any tab/cell; shows per-tab word counts. */
+interface NavRow {
+	kind: "container" | "region";
+	path: number[];
+	parentPath: number[];
+	/** CST index within the parent (containers: own idx; regions: start). */
+	index: number;
+	/** Regions: one past the unit's last child index. */
+	end?: number;
+	/** The parent's child-list length (for end-of-parent drops). */
+	parentLen: number;
+	revealKind: string;
+	el: HTMLElement;
+}
+
+/**
+ * The block navigator: a tree popover of every container and section. Click
+ * reveals (unfolding + switching tabs as needed); dragging a row reorders it
+ * among its SIBLINGS — drop before a sibling, or after the parent's last row.
+ */
 function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e: MouseEvent): void {
-	const menu = new Menu();
+	root.querySelector(".mica-navpop")?.remove();
+	const pop = root.createDiv({ cls: "mica-popover mica-navpop" });
+	const rootRect = root.getBoundingClientRect();
+	pop.style.left = `${Math.max(8, e.clientX - rootRect.left - 260)}px`;
+	pop.style.top = `${e.clientY - rootRect.top + 12}px`;
+	const dismiss = (): void => {
+		pop.remove();
+		document.removeEventListener("pointerdown", onOut, true);
+	};
+	const onOut = (ev: PointerEvent): void => {
+		if (!pop.contains(ev.target as Node)) dismiss();
+	};
+	document.addEventListener("pointerdown", onOut, true);
+
 	const ICONS: Record<string, string> = {
 		tabs: "app-window",
 		tab: "corner-down-right",
 		grid: "layout-grid",
 		cell: "square",
 	};
-	const addSection = (parent: number[], u: { start: number; end: number; md: string }, depth: number): void => {
+	const rows: NavRow[] = [];
+
+	const addRow = (
+		depth: number,
+		icon: string,
+		label: string,
+		count: number,
+		nav: Omit<NavRow, "el">,
+	): void => {
+		const el = pop.createDiv({ cls: "mica-nav-row" });
+		el.style.paddingLeft = `${8 + depth * 16}px`;
+		const ico = el.createSpan({ cls: "mica-nav-ico" });
+		setIcon(ico, icon);
+		el.createSpan({ cls: "mica-nav-label", text: label });
+		if (count) el.createSpan({ cls: "mica-nav-count", text: `${count}w` });
+		const row: NavRow = { ...nav, el };
+		rows.push(row);
+		wireNavRow(row, rows, ctx, root, dismiss);
+	};
+
+	const addSection = (
+		parent: number[],
+		parentLen: number,
+		u: { start: number; end: number; md: string },
+		depth: number,
+	): void => {
 		if (!u.md.trim()) return;
-		const pad = "    ".repeat(depth);
 		const callout = parseCallout(u.md);
 		let icon = "text";
 		let label: string;
 		if (callout) {
-			icon = calloutCatalog(ctx.app).find((t) => t.id === callout.type || t.aliases.includes(callout.type))?.icon ?? "megaphone";
+			icon =
+				calloutCatalog(ctx.app).find((t) => t.id === callout.type || t.aliases.includes(callout.type))?.icon ??
+				"megaphone";
 			label = callout.title || `[!${callout.type}]`;
 		} else if (u.md.trimStart().startsWith("\u0060\u0060\u0060")) {
 			icon = "square-code";
@@ -430,30 +491,37 @@ function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e: MouseEven
 			label = foldSummary(u.md);
 			if (label.length > 34) label = `${label.slice(0, 34)}…`;
 		}
-		menu.addItem((item) => {
-			item.setTitle(`${pad}${label}`);
-			item.setIcon(icon);
-			item.onClick(() => revealNode(ctx, root, { path: parent, kind: "region", start: u.start }));
+		addRow(depth, icon, label, 0, {
+			kind: "region",
+			path: parent,
+			parentPath: parent,
+			index: u.start,
+			end: u.end,
+			parentLen,
+			revealKind: "region",
 		});
 	};
+
 	const walk = (nodes: MicaNode[], path: number[], depth: number): void => {
 		let i = 0;
 		while (i < nodes.length) {
 			const n = nodes[i];
 			if (n.kind === "leaf") {
 				const units = leafUnits(nodes, i);
-				for (const u of units) addSection(path, u, depth);
+				for (const u of units) addSection(path, nodes.length, u, depth);
 				i = units.length ? units[units.length - 1].end : i + 1;
 				continue;
 			}
 			const p = [...path, i];
 			if (n.name === "tab" || n.name === "cell" || n.name === "tabs" || n.name === "grid") {
 				const [display] = splitTitleAttrs(n.title);
-				const words = wordCount(n.children);
-				menu.addItem((item) => {
-					item.setTitle(`${"    ".repeat(depth)}${display || n.name}${words ? `  ·  ${words}w` : ""}`);
-					item.setIcon(ICONS[n.name] ?? "square");
-					item.onClick(() => revealNode(ctx, root, { path: p, kind: n.name }));
+				addRow(depth, ICONS[n.name] ?? "square", display || n.name, wordCount(n.children), {
+					kind: "container",
+					path: p,
+					parentPath: path,
+					index: i,
+					parentLen: nodes.length,
+					revealKind: n.name,
 				});
 			}
 			walk(n.children, p, depth + 1);
@@ -461,7 +529,102 @@ function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e: MouseEven
 		}
 	};
 	walk(cst.children, [], 0);
-	menu.showAtMouseEvent(e);
+	if (!rows.length) pop.createDiv({ cls: "mica-pop-empty", text: "Nothing here yet" });
+}
+
+/** Click = reveal; drag (5px threshold) = reorder among same-parent rows. */
+function wireNavRow(
+	row: NavRow,
+	rows: NavRow[],
+	ctx: RenderCtx,
+	root: HTMLElement,
+	dismiss: () => void,
+): void {
+	row.el.addEventListener("pointerdown", (down: PointerEvent) => {
+		if (down.button !== 0) return;
+		down.preventDefault();
+		const startX = down.clientX;
+		const startY = down.clientY;
+		let dragging = false;
+		let target: { row: NavRow; after: boolean } | null = null;
+		const pk = row.parentPath.join(".");
+		const siblings = rows.filter((r) => r.parentPath.join(".") === pk);
+		const last = siblings[siblings.length - 1];
+
+		const clearMarks = (): void => {
+			for (const r of siblings) r.el.removeClass("mica-nav-dropbefore", "mica-nav-dropafter");
+		};
+		const isNoop = (t: { row: NavRow; after: boolean }): boolean => {
+			const toIndex = t.after ? t.row.parentLen : t.row.index;
+			if (row.kind === "region") return toIndex >= row.index && toIndex <= (row.end ?? row.index);
+			return toIndex === row.index || toIndex === row.index + 1;
+		};
+
+		const move = (ev: PointerEvent): void => {
+			if (!dragging) {
+				if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
+				dragging = true;
+				row.el.addClass("mica-nav-dragging");
+			}
+			clearMarks();
+			target = null;
+			let bestDist = Number.POSITIVE_INFINITY;
+			for (const r of siblings) {
+				const rect = r.el.getBoundingClientRect();
+				const mid = rect.top + rect.height / 2;
+				const after = r === last && ev.clientY > mid;
+				const cand = { row: r, after };
+				if (isNoop(cand)) continue;
+				const gapY = after ? rect.bottom : rect.top;
+				const dist = Math.abs(ev.clientY - gapY);
+				if (dist < bestDist) {
+					bestDist = dist;
+					target = cand;
+				}
+			}
+			if (target) target.row.el.addClass(target.after ? "mica-nav-dropafter" : "mica-nav-dropbefore");
+		};
+		const up = (ev: PointerEvent): void => {
+			window.removeEventListener("pointermove", move, true);
+			window.removeEventListener("pointerup", up, true);
+			window.removeEventListener("pointercancel", up, true);
+			clearMarks();
+			row.el.removeClass("mica-nav-dragging");
+			if (!dragging) {
+				// Plain click: reveal the thing (unfold + switch tabs as needed).
+				dismiss();
+				revealNode(ctx, root, {
+					path: row.path,
+					kind: row.revealKind,
+					start: row.kind === "region" ? row.index : undefined,
+				});
+				return;
+			}
+			if (ev.type !== "pointerup" || !target) return;
+			const toIndex = target.after ? target.row.parentLen : target.row.index;
+			dismiss();
+			if (row.kind === "region") {
+				ctx.editable?.apply({
+					op: "moveRegion",
+					path: row.parentPath,
+					start: row.index,
+					end: row.end ?? row.index + 1,
+					toParent: row.parentPath,
+					toIndex,
+				});
+			} else {
+				ctx.editable?.apply({
+					op: "moveNode",
+					from: row.path,
+					toParent: row.parentPath,
+					toIndex,
+				});
+			}
+		};
+		window.addEventListener("pointermove", move, true);
+		window.addEventListener("pointerup", up, true);
+		window.addEventListener("pointercancel", up, true);
+	});
 }
 
 function wordCount(nodes: MicaNode[]): number {
@@ -494,7 +657,10 @@ function revealNode(ctx: RenderCtx, root: HTMLElement, spec: RevealSpec): void {
 		}
 		if (spec.kind !== "region" && ctx.ui.folded.delete(nodeFoldKey(spec.path))) changed = true;
 		if (spec.start !== undefined && ctx.ui.folded.delete(regionFoldKey(spec.path, spec.start))) changed = true;
-		if (changed) ctx.rerenderBlock?.();
+		if (changed) {
+			ctx.ui.persistFolds?.();
+			ctx.rerenderBlock?.();
+		}
 	}
 	// Activate the ancestor tab chain (chips carry their comma-joined path).
 	for (let depth = 1; depth <= spec.path.length; depth++) {
