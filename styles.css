@@ -1519,6 +1519,7 @@ body.mica-dnd-active .mica-cell-bar,
 body.mica-dnd-active .mica-cell-colzone,
 body.mica-dnd-active .mica-grid-tools,
 body.mica-dnd-active .mica-col-resizer,
+body.mica-dnd-active .mica-row-resizer,
 body.mica-dnd-active .mica-grid-colzone-end {
 	opacity: 0 !important;
 	pointer-events: none !important;
@@ -2211,6 +2212,29 @@ body[data-mica-grip="left"] .mica-grid-tools {
 }
 .mica-col-resizer:hover .mica-col-resizer-line,
 .mica-col-resizer:active .mica-col-resizer-line {
+	background: color-mix(in srgb, var(--mica-accent) 55%, transparent);
+}
+.mica-row-resizer {
+	position: absolute;
+	left: 6px;
+	right: 6px;
+	height: 9px;
+	cursor: row-resize;
+	z-index: 4;
+	display: flex;
+	align-items: center;
+	justify-content: stretch;
+	touch-action: none;
+}
+.mica-row-resizer-line {
+	height: 3px;
+	width: 100%;
+	border-radius: 2px;
+	background: transparent;
+	transition: background 100ms ease;
+}
+.mica-row-resizer:hover .mica-row-resizer-line,
+.mica-row-resizer:active .mica-row-resizer-line {
 	background: color-mix(in srgb, var(--mica-accent) 55%, transparent);
 }
 

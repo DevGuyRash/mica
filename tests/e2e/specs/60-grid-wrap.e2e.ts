@@ -248,3 +248,54 @@ describe("structured callout editor", function () {
 		);
 	});
 });
+
+describe("grid row resize", function () {
+	it("dragging the row divider persists rowh; double-click clears it", async function () {
+		await seedAndOpen(
+			"RowResize.md",
+			"Intro.\n\n```mica id=rr-2\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-row-resizer").length >= 1),
+			{ timeout: 8000, timeoutMsg: "the row resizer never rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const strip = document.querySelector(".mica-lp .mica-row-resizer") as HTMLElement;
+			const r = strip.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			const cx = r.left + r.width / 2;
+			strip.dispatchEvent(new PointerEvent("pointerdown", opts(cx, r.top + 4)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(cx, r.top + 80)));
+			await new Promise((res) => setTimeout(res, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(cx, r.top + 80)));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return /:::grid \{cols=2 rowh=\d+\}/.test(v);
+				}),
+			{ timeout: 8000, timeoutMsg: "rowh never landed in the grid header" },
+		);
+		// Double-click the divider → back to auto → attr removed entirely.
+		await browser.executeObsidian(() => {
+			const strip = document.querySelector(".mica-lp .mica-row-resizer") as HTMLElement;
+			strip.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes(":::grid {cols=2}") && !v.includes("rowh");
+				}),
+			{ timeout: 8000, timeoutMsg: "rowh was not cleared by double-click" },
+		);
+	});
+});

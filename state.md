@@ -28,9 +28,6 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - **Mobile pass**: the new chrome degrades via CSS but has had no dedicated
   touch/small-screen tuning (drag handles, hover-revealed affordances need
   touch equivalents beyond long-press-free pointerdown).
-- **Row height resizing**: column widths ship (colw fractions + dividers);
-  per-row heights were deliberately skipped (rows are content-sized) — revisit
-  only if asked.
 - **Fold persistence**: folds are session-state (per-block UI store). If users
   want folds to survive restarts, persist keys into fence attrs or data.json.
 - **Cell-level collapse**: deliberately skipped (a folded cell buys nothing in

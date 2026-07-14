@@ -1119,17 +1119,37 @@ function startRename(
  * adjacent columns' fr fractions live; release persists `colw` into the
  * grid's header via the shared reducer (double-click resets to equal).
  */
-function mountColResizers(
+/** Write the grid's row template: per-row MIN heights, `null` = content. */
+function applyRowTemplate(grid: HTMLElement, rows: (number | null)[]): void {
+	if (rows.some((h) => h !== null)) {
+		grid.style.gridTemplateRows = rows.map((h) => (h ? `minmax(${h}px, auto)` : "auto")).join(" ");
+	} else {
+		grid.style.removeProperty("grid-template-rows");
+	}
+}
+
+/** Serialize row heights for the header attr (trailing autos trimmed). */
+function rowhValue(rows: (number | null)[]): string | null {
+	const trimmed = [...rows];
+	while (trimmed.length && trimmed[trimmed.length - 1] === null) trimmed.pop();
+	if (!trimmed.length) return null;
+	return trimmed.map((h) => (h === null ? "auto" : String(h))).join(",");
+}
+
+function mountGridResizers(
 	grid: HTMLElement,
 	ctx: RenderCtx,
 	path: number[],
 	cols: number,
 	widths: number[],
+	rowHeights: (number | null)[],
 ): void {
 	const strips: HTMLElement[] = [];
+	const rowStrips: HTMLElement[] = [];
 	// The direct cells are fixed for this mount — any structural change
 	// re-renders the whole block — so query once, not per layout pass.
 	const cells = Array.from(grid.querySelectorAll<HTMLElement>(":scope > .mica-cell"));
+	const rowCount = Math.ceil(cells.length / cols);
 	const layout = (): void => {
 		if (!grid.isConnected) return;
 		const g = grid.getBoundingClientRect();
@@ -1146,12 +1166,24 @@ function mountColResizers(
 			strip.style.display = "";
 			strip.style.left = `${(left.right + right.left) / 2 - g.left - 4}px`;
 		}
+		// Row boundaries: the first cell of each row carries the row's box.
+		for (let r = 0; r + 1 < rowCount; r++) {
+			const strip = rowStrips[r];
+			const above = cells[r * cols]?.getBoundingClientRect();
+			const below = cells[(r + 1) * cols]?.getBoundingClientRect();
+			if (!above || !below || below.top <= above.bottom - 1) {
+				strip.style.display = "none";
+				continue;
+			}
+			strip.style.display = "";
+			strip.style.top = `${(above.bottom + below.top) / 2 - g.top - 4}px`;
+		}
 	};
 	const live = (w: number[]): void => {
 		grid.style.gridTemplateColumns = w.map((x) => `minmax(0, ${x.toFixed(3)}fr)`).join(" ");
 	};
 
-	for (let b = 1; b < cols; b++) {
+	for (let b = 1; b < cols && cells.length > 1; b++) {
 		const strip = grid.createDiv({ cls: "mica-col-resizer" });
 		strip.createDiv({ cls: "mica-col-resizer-line" });
 		strips.push(strip);
@@ -1212,6 +1244,44 @@ function mountColResizers(
 			window.addEventListener("pointercancel", up, true);
 		});
 	}
+	// Row dividers: dragging sets the UPPER row's minimum height in px.
+	for (let r = 0; r + 1 < rowCount; r++) {
+		const strip = grid.createDiv({ cls: "mica-row-resizer" });
+		strip.createDiv({ cls: "mica-row-resizer-line" });
+		rowStrips.push(strip);
+		strip.addEventListener("dblclick", (e) => {
+			e.stopPropagation();
+			rowHeights[r] = null;
+			ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
+		});
+		strip.addEventListener("pointerdown", (down) => {
+			if (down.button !== 0) return;
+			down.preventDefault();
+			down.stopPropagation();
+			const startY = down.clientY;
+			const startH = rowHeights[r] ?? Math.round(cells[r * cols]?.getBoundingClientRect().height ?? 80);
+			let lastH: number | null = null;
+			const move = (e: PointerEvent): void => {
+				lastH = Math.max(40, Math.round(startH + (e.clientY - startY)));
+				const live = [...rowHeights];
+				live[r] = lastH;
+				applyRowTemplate(grid, live);
+				layout();
+			};
+			const up = (e: PointerEvent): void => {
+				window.removeEventListener("pointermove", move, true);
+				window.removeEventListener("pointerup", up, true);
+				window.removeEventListener("pointercancel", up, true);
+				if (e.type !== "pointerup" || lastH === null || Math.abs(e.clientY - startY) < 3) return;
+				rowHeights[r] = lastH;
+				ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
+			};
+			window.addEventListener("pointermove", move, true);
+			window.addEventListener("pointerup", up, true);
+			window.addEventListener("pointercancel", up, true);
+		});
+	}
+
 	// Track layout: cells resize as content changes; keep dividers glued.
 	const ro = new ResizeObserver(() => layout());
 	ro.observe(grid);
@@ -1251,6 +1321,15 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	if (colwRaw.length === cols) {
 		grid.style.gridTemplateColumns = widths.map((w) => `minmax(0, ${w}fr)`).join(" ");
 	}
+	// Per-row MIN heights ("rowh=140,auto,200"): rows can be spaced out but
+	// never clip content (minmax(Xpx, auto)).
+	const rowHeights: (number | null)[] = (titleAttr(node.title, "rowh") ?? "")
+		.split(",")
+		.map((t) => {
+			const n = Number(t);
+			return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+		});
+	applyRowTemplate(grid, rowHeights);
 
 	node.children.forEach((c, idx) => {
 		if (c.kind !== "container" || c.name !== "cell") return;
@@ -1306,8 +1385,8 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted");
 		});
 
-		// Column resizers: one draggable divider per interior column boundary.
-		if (cols > 1) mountColResizers(grid, ctx, path, cols, widths);
+		// Grid resizers: dividers between columns (fr shares) and rows (min px).
+		mountGridResizers(grid, ctx, path, cols, widths, rowHeights);
 
 		// Ghost tile: add a cell where the next one would land.
 		const ghost = grid.createEl("button", {
