@@ -76,6 +76,10 @@ interface ActiveDrag {
 	spec: DragSpec;
 	sourceRoot: HTMLElement;
 	source: HTMLElement;
+	/** The dragged item's bounds at drag start — its "home". While the
+	 *  pointer stays inside, NO slot is offered: a wiggle must never commit
+	 *  the nearest real move just because the no-op gaps are excluded. */
+	home: DOMRect;
 	ghost: HTMLElement;
 	indicator: HTMLElement;
 	scroller: HTMLElement | null;
@@ -179,6 +183,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		spec,
 		sourceRoot: root,
 		source: item,
+		home: rect,
 		ghost,
 		indicator,
 		scroller: root.closest(".cm-scroller, .markdown-preview-view") as HTMLElement | null,
@@ -223,8 +228,7 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 	// collide across blocks, so subtree/no-op exclusions stay source-scoped.
 	const crossable = Boolean(spec.text) && (kind === "region" || kind === "group");
 	const scope = root.closest(".cm-editor, .markdown-preview-view");
-	const roots: HTMLElement[] =
-		crossable && scope ? Array.from(scope.querySelectorAll<HTMLElement>(".mica")) : [root];
+	const roots: HTMLElement[] = crossable && scope ? Array.from(scope.querySelectorAll<HTMLElement>(".mica")) : [root];
 	for (const rootEl of roots) {
 		for (const el of Array.from(rootEl.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
 			if (el.closest(".mica") !== rootEl) continue; // nested block safety
@@ -484,26 +488,32 @@ function dragMove(e: PointerEvent): void {
 		if (r.width > 0 && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom)
 			deepestUnder = c.depth;
 	}
+	// Home zone: inside the item's own starting bounds the drag is inert —
+	// leaving the item is what expresses intent to move it.
+	const home = d.home;
+	const inHome =
+		e.clientX >= home.left && e.clientX <= home.right && e.clientY >= home.top && e.clientY <= home.bottom;
 	let best: Slot | null = null;
 	let bestDist = Number.POSITIVE_INFINITY;
 	let bestDepth = -1;
-	for (const s of d.slots) {
-		const c = s.container;
-		if (e.clientX < c.left - M || e.clientX > c.right + M || e.clientY < c.top - M || e.clientY > c.bottom + M)
-			continue;
-		if (c.depth < deepestUnder) continue;
-		if (c.depth < bestDepth) continue;
-		if (c.depth > bestDepth) {
-			bestDepth = c.depth;
-			best = null;
-			bestDist = Number.POSITIVE_INFINITY;
+	if (!inHome)
+		for (const s of d.slots) {
+			const c = s.container;
+			if (e.clientX < c.left - M || e.clientX > c.right + M || e.clientY < c.top - M || e.clientY > c.bottom + M)
+				continue;
+			if (c.depth < deepestUnder) continue;
+			if (c.depth < bestDepth) continue;
+			if (c.depth > bestDepth) {
+				bestDepth = c.depth;
+				best = null;
+				bestDist = Number.POSITIVE_INFINITY;
+			}
+			const dist = Math.hypot(e.clientX - s.cx, e.clientY - s.cy);
+			if (dist < bestDist) {
+				best = s;
+				bestDist = dist;
+			}
 		}
-		const dist = Math.hypot(e.clientX - s.cx, e.clientY - s.cy);
-		if (dist < bestDist) {
-			best = s;
-			bestDist = dist;
-		}
-	}
 	d.current = best;
 	if (best) {
 		d.indicator.style.display = "block";
@@ -626,11 +636,7 @@ function finishDrag(commit: boolean): void {
 	const fromIdx = d.spec.fromPath[d.spec.fromPath.length - 1] ?? -1;
 	const fromParent = d.spec.fromPath.slice(0, -1).join(".");
 	const col = d.current.col;
-	if (
-		d.spec.kind === "cell" &&
-		col?.members.includes(fromIdx) &&
-		d.current.parentPath.join(".") === fromParent
-	) {
+	if (d.spec.kind === "cell" && col?.members.includes(fromIdx) && d.current.parentPath.join(".") === fromParent) {
 		// Same column: bubble within it — the other columns must not move.
 		const to = col.up !== undefined && fromIdx > col.up ? col.up : col.down;
 		if (to !== undefined && to !== fromIdx) {

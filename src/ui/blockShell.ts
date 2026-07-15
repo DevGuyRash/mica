@@ -574,6 +574,7 @@ function wireNavRow(
 			return toIndex === row.index || toIndex === row.index + 1;
 		};
 
+		const home = row.el.getBoundingClientRect();
 		const move = (ev: PointerEvent): void => {
 			if (!dragging) {
 				if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
@@ -582,6 +583,14 @@ function wireNavRow(
 			}
 			clearMarks();
 			target = null;
+			// Home zone: wiggling within the row's own bounds offers nothing.
+			if (
+				ev.clientX >= home.left &&
+				ev.clientX <= home.right &&
+				ev.clientY >= home.top &&
+				ev.clientY <= home.bottom
+			)
+				return;
 			let bestDist = Number.POSITIVE_INFINITY;
 			for (const r of siblings) {
 				const rect = r.el.getBoundingClientRect();

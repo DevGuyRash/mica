@@ -589,3 +589,82 @@ describe("round 10: sole-item safety + cross-block moves", function () {
 		);
 	});
 });
+
+describe("round 11: home-zone inertness", function () {
+	it("a wiggle inside the item's own bounds never commits a move", async function () {
+		const fixture =
+			"Intro.\n\n```mica id=hz-1\ntab: Main\n> [!note] Alpha keeps its spot\n\n> [!tip] Beta below\n```\n";
+		await seedAndOpen("HomeZone.md", fixture);
+		await waitForSelector(".mica-lp .mica-region", 2);
+		const before = await docContains("");
+		const probe = await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Alpha"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const rr = region.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
+			// Past the 5px threshold but well WITHIN the region's own bounds.
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 24, rr.top + 14)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.left + rr.width / 2, rr.top + rr.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			const ind = document.querySelector(".mica-drop-indicator") as HTMLElement | null;
+			const shown = Boolean(ind && ind.style.display !== "none");
+			window.dispatchEvent(
+				new PointerEvent("pointerup", opts(rr.left + rr.width / 2, rr.top + rr.height / 2)),
+			);
+			return { shown };
+		});
+		expect(probe.shown).toBe(false); // nothing promised inside the home zone
+		await new Promise((r) => setTimeout(r, 400));
+		const after = await docContains("");
+		expect(after).toBe(before);
+	});
+
+	it("leaving the home zone re-arms the drop (the drag still works)", async function () {
+		await seedAndOpen(
+			"HomeZone2.md",
+			"Intro.\n\n```mica id=hz-2\ntab: Main\n> [!note] Mover\n\n> [!tip] Anchor\n```\n",
+		);
+		await waitForSelector(".mica-lp .mica-region", 2);
+		await browser.executeObsidian(async () => {
+			const regions = Array.from(document.querySelectorAll(".mica-lp .mica-region")) as HTMLElement[];
+			const mover = regions.find((r) => r.textContent?.includes("Mover")) as HTMLElement;
+			const anchor = regions.find((r) => r.textContent?.includes("Anchor")) as HTMLElement;
+			const grip = mover.querySelector(".mica-region-grip") as HTMLElement;
+			const rm = mover.getBoundingClientRect();
+			const ra = anchor.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rm.right - 10, rm.top + 6)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rm.left + 40, rm.top + 20)));
+			await new Promise((r) => setTimeout(r, 30));
+			// Leave home: below the anchor.
+			window.dispatchEvent(new PointerEvent("pointermove", opts(ra.left + 40, ra.bottom + 4)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(ra.left + 40, ra.bottom + 4)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				return v.indexOf("[!tip] Anchor") < v.indexOf("[!note] Mover");
+			},
+			{ timeout: 8000, timeoutMsg: "leaving the home zone should still allow the move" },
+		);
+	});
+});
