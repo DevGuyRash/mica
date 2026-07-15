@@ -435,9 +435,6 @@ describe("syntax highlighting", function () {
 	});
 
 	it("revealed raw source tints mica structure lines", async function () {
-		// Known-flaky under full-suite load (reveal timing in Xvfb); always
-		// passes on retry and standalone. Bounded retries keep the signal.
-		this.retries(2);
 		await seedAndOpen("SrcHl.md", "Intro.\n\n```mica id=hl-2\ntab: Main\nbody text\n```\n");
 		// Keep the cursor INSIDE the block while polling: Obsidian restores a
 		// remembered cursor shortly after open, which would un-reveal it.
@@ -448,6 +445,13 @@ describe("syntax highlighting", function () {
 					// Reassert only when Obsidian's late cursor-restore moved it —
 					// hammering setCursor every poll churns the very updates we
 					// are waiting for.
+					// A real user's in-block cursor always implies editor FOCUS —
+					// Obsidian's own code-fence preview widget only reveals for a
+					// focused editor, so an unfocused programmatic cursor leaves
+					// its widget covering the range ours correctly released
+					// (root-caused via DOM capture: cm-preview-code-block held
+					// the lines in every failing run).
+					view?.editor.focus();
 					const cur = view?.editor.getCursor();
 					if (cur && cur.line !== 3) view?.editor.setCursor({ line: 3, ch: 0 });
 					return (
@@ -456,7 +460,47 @@ describe("syntax highlighting", function () {
 					);
 				}),
 			{ timeout: 12000, timeoutMsg: "structure lines never tinted in source view" },
-		);
+		).catch(async (err: Error) => {
+			const diag = await browser.executeObsidian(({ app, obsidian }) => {
+				const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+				const lines = Array.from(document.querySelectorAll(".cm-line")).map((l) =>
+					(l.textContent ?? "").slice(0, 24),
+				);
+				const vc = view?.contentEl;
+				const sc = vc?.querySelector(".cm-scroller") as HTMLElement | null;
+				const cnt = vc?.querySelector(".cm-content") as HTMLElement | null;
+				return JSON.stringify({
+					file: view?.file?.path,
+					cursor: view?.editor.getCursor(),
+					lp: document.querySelectorAll(".mica-lp").length,
+					srcClasses: document.querySelectorAll("[class*=mica-src]").length,
+					cmLines: lines.length,
+					lines: lines.slice(0, 8),
+					vcRect: vc ? `${Math.round(vc.getBoundingClientRect().top)}h${Math.round(vc.getBoundingClientRect().height)}` : "n/a",
+					vcTransform: vc ? getComputedStyle(vc).transform : "n/a",
+					scRect: sc ? `${Math.round(sc.getBoundingClientRect().top)}h${Math.round(sc.getBoundingClientRect().height)}` : "n/a",
+					contentH: cnt ? Math.round(cnt.getBoundingClientRect().height) : -1,
+					scrollTop: sc?.scrollTop ?? -1,
+					kids: cnt
+						? Array.from(cnt.children).map(
+								(c) =>
+									`${c.tagName.toLowerCase()}.${(c.className.toString().split(" ")[0] || "?").slice(0, 22)}@h${(c as HTMLElement).offsetHeight}`,
+							)
+						: [],
+				});
+			});
+			console.log("TINT FAIL DIAG:", diag);
+			try {
+				const logs = (await browser.getLogs("browser")) as { level: string; message: string }[];
+				const bad = logs
+					.filter((l) => /error|Error|mica/.test(l.message))
+					.map((l) => l.message.slice(0, 300));
+				console.log("TINT FAIL CONSOLE:", JSON.stringify(bad.slice(-8)));
+			} catch (logErr) {
+				console.log("TINT FAIL CONSOLE: unavailable", String(logErr).slice(0, 120));
+			}
+			throw err;
+		});
 	});
 });
 

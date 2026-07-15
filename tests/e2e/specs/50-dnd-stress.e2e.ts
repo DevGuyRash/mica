@@ -65,18 +65,24 @@ describe("drag & drop stress", function () {
 			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rb.right - 10, rb.top + 6)));
 			window.dispatchEvent(new PointerEvent("pointermove", opts(rb.right - 20, rb.top + 30)));
 			await new Promise((r) => setTimeout(r, 30));
-			// Point BELOW Gamma: the promised landing spot must be below it too.
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rg.left + 40, rg.bottom + 4)));
-			// Gate on the indicator actually SHOWING (timing under Xvfb varies).
+			// Re-dispatch the targeting move with FRESH rects until the indicator
+			// shows — layout can shift under full-suite load, so a fire-once
+			// coordinate goes stale.
 			let ind: HTMLElement | null = null;
-			for (let tries = 0; tries < 20; tries++) {
+			let gb = rg.bottom;
+			let dropX = rg.left + 40;
+			for (let tries = 0; tries < 30; tries++) {
+				const fresh = gamma.getBoundingClientRect();
+				gb = fresh.bottom;
+				dropX = fresh.left + 40;
+				window.dispatchEvent(new PointerEvent("pointermove", opts(dropX, gb + 4)));
 				ind = document.querySelector(".mica-drop-indicator");
 				if (ind && ind.style.display !== "none") break;
-				await new Promise((r) => setTimeout(r, 50));
+				await new Promise((r) => setTimeout(r, 100));
 			}
 			const indTop = ind ? ind.getBoundingClientRect().top : -1;
-			window.dispatchEvent(new PointerEvent("pointerup", opts(rg.left + 40, rg.bottom + 4)));
-			return { ok: true, indTop, gammaBottom: rg.bottom };
+			window.dispatchEvent(new PointerEvent("pointerup", opts(dropX, gb + 4)));
+			return { ok: true, indTop, gammaBottom: gb };
 		});
 		expect(probe.ok).toBe(true);
 		// The round-4 bug: pointing below Gamma showed the line ABOVE Gamma.
@@ -158,12 +164,16 @@ describe("drag & drop stress", function () {
 			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
 			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 20)));
 			await new Promise((r) => setTimeout(r, 30));
-			// Hover tab Two's chip long enough to spring-load it…
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rc.left + rc.width / 2, rc.top + rc.height / 2)));
-			// Gate on the spring actually firing (450ms timer + Xvfb jitter).
+			// Hover tab Two's chip until the spring fires — the hover is
+			// re-dispatched with a FRESH rect each step so layout shifts under
+			// load can't leave the pointer besides the chip.
 			let springed = false;
 			for (let tries = 0; tries < 30; tries++) {
-				await new Promise((r) => setTimeout(r, 100));
+				const fresh = two.getBoundingClientRect();
+				window.dispatchEvent(
+					new PointerEvent("pointermove", opts(fresh.left + fresh.width / 2, fresh.top + fresh.height / 2)),
+				);
+				await new Promise((r) => setTimeout(r, 120));
 				springed = two.querySelector(".mica-tab-btn")?.classList.contains("is-active") ?? false;
 				if (springed) break;
 			}
@@ -339,10 +349,19 @@ describe("round 7: column integrity + friendly-form safety", function () {
 			handle.dispatchEvent(new PointerEvent("pointerdown", opts(ra.left + 10, ra.top + 10)));
 			window.dispatchEvent(new PointerEvent("pointermove", opts(ra.left + 30, ra.top + 40)));
 			await new Promise((r) => setTimeout(r, 30));
-			// Below e, inside e's column band.
-			window.dispatchEvent(new PointerEvent("pointermove", opts(re.left + 20, re.bottom + 2)));
-			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointerup", opts(re.left + 20, re.bottom + 2)));
+			// Below e, inside e's column band — refreshed until the drop is live.
+			let dropX = re.left + 20;
+			let dropY = re.bottom + 2;
+			for (let tries = 0; tries < 30; tries++) {
+				const fresh = e5.getBoundingClientRect();
+				dropX = fresh.left + 20;
+				dropY = fresh.bottom + 2;
+				window.dispatchEvent(new PointerEvent("pointermove", opts(dropX, dropY)));
+				const ind = document.querySelector(".mica-drop-indicator") as HTMLElement | null;
+				if (ind && ind.style.display !== "none") break;
+				await new Promise((r) => setTimeout(r, 100));
+			}
+			window.dispatchEvent(new PointerEvent("pointerup", opts(dropX, dropY)));
 		});
 		await browser.waitUntil(
 			async () => {
