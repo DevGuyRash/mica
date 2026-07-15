@@ -68,49 +68,62 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 	const hidden: HTMLElement[] = [];
 	more.addEventListener("mousedown", (e) => e.preventDefault());
 	more.addEventListener("click", () => {
-		openPopover(bar, (panel) => {
-			panel.addClass("mica-overflow-panel");
-			// Relocate the real elements (their handlers travel with them); they
-			// return to the bar on the next relayout.
-			for (const el of hidden) panel.appendChild(el);
-		});
+		openPopover(
+			bar,
+			(panel) => {
+				panel.addClass("mica-overflow-panel");
+				// Relocate the REAL elements (their handlers travel with them).
+				for (const el of hidden) {
+					el.style.display = "";
+					panel.appendChild(el);
+				}
+			},
+			() => {
+				// The panel is about to be removed — bring the pieces home
+				// (still overflowed, so hidden until the bar grows).
+				for (const el of hidden) {
+					el.style.display = "none";
+					bar.insertBefore(el, more);
+				}
+			},
+		);
 	});
 
 	let relayoutQueued = false;
+	let lastAvail = -1;
+	// Piece widths are constant — measure ONCE (first laid-out pass) so the
+	// relayout never mutates the DOM to measure. Mutating during measurement
+	// fed the ResizeObserver its own changes: the "…" button visibly slid
+	// and flickered while the loop chased itself.
+	const widths: number[] = [];
 	const relayout = (): void => {
 		if (relayoutQueued) return;
 		relayoutQueued = true;
 		window.requestAnimationFrame(() => {
 			relayoutQueued = false;
-			// Restore everything, measure, then trim from the tail.
-			bar.querySelector(".mica-popover")?.remove();
-			for (const el of pieces) {
-				el.style.display = "";
-				bar.insertBefore(el, more);
-			}
-			hidden.length = 0;
+			if (!bar.isConnected) return;
 			const avail = bar.clientWidth;
 			if (avail === 0) return; // not laid out yet
+			if (avail === lastAvail) return; // nothing changed — no churn
+			lastAvail = avail;
+			if (!widths.length) {
+				for (const el of pieces) widths.push(el.offsetWidth);
+			}
+			document.body.querySelector(".mica-tb-popover")?.remove();
+			hidden.length = 0;
 			let used = 34; // reserve room for the "more" button
 			let overflowing = false;
-			for (const el of pieces) {
+			pieces.forEach((el, i) => {
 				if (!overflowing) {
-					used += el.offsetWidth + 5;
+					used += widths[i] + 5;
 					if (used > avail) overflowing = true;
 				}
-				if (overflowing) {
-					el.style.display = "none";
-					if (!el.hasClass("mica-tool-sep")) hidden.push(el);
-				}
-			}
+				el.style.display = overflowing ? "none" : "";
+				if (overflowing && !el.hasClass("mica-tool-sep")) hidden.push(el);
+			});
 			more.style.display = hidden.length ? "" : "none";
 		});
 	};
-	// Editors open and close constantly, and nothing ever tears a toolbar down
-	// explicitly — so the observer must release itself. Removing the bar from
-	// the DOM collapses its box, which fires one final observation; seeing the
-	// bar disconnected, we disconnect, so the observer never pins the toolbar
-	// subtree (or the EditorView its closures reach) after the host is gone.
 	const ro = new ResizeObserver(() => {
 		if (!bar.isConnected) {
 			ro.disconnect();
@@ -220,13 +233,26 @@ function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item:
 // ---------------------------------------------------------------------------
 
 /** A dismissable popover anchored inside the toolbar. */
-function openPopover(bar: HTMLElement, build: (panel: HTMLElement, close: () => void) => void): void {
+function openPopover(
+	bar: HTMLElement,
+	build: (panel: HTMLElement, close: () => void) => void,
+	onClose?: () => void,
+): void {
 	// A hover timer can fire after its toolbar was destroyed; never build a
 	// panel (and register a document listener) on a disconnected bar.
 	if (!bar.isConnected) return;
-	bar.querySelector(".mica-popover")?.remove();
-	const panel = bar.createDiv({ cls: "mica-popover" });
+	// BODY-level and fixed: no ancestor overflow (narrow cells, the quick
+	// bar's shrink container) can clip the panel.
+	document.body.querySelector(".mica-tb-popover")?.remove();
+	const panel = document.body.createDiv({ cls: "mica-popover mica-tb-popover" });
+	const r = bar.getBoundingClientRect();
+	panel.style.position = "fixed";
+	panel.style.left = `${Math.min(Math.max(8, r.left), window.innerWidth - 356)}px`;
+	panel.style.top = `${Math.min(r.bottom + 4, window.innerHeight - 120)}px`;
+	panel.style.maxHeight = `${Math.max(120, window.innerHeight - r.bottom - 20)}px`;
+	panel.style.overflowY = "auto";
 	const close = (): void => {
+		onClose?.();
 		panel.remove();
 		document.removeEventListener("pointerdown", onOutside, true);
 		document.removeEventListener("keydown", onEsc, true);
@@ -249,11 +275,11 @@ function openPopover(bar: HTMLElement, build: (panel: HTMLElement, close: () => 
 }
 
 /** Nudge the open popover to sit under `anchor` (variant groups). */
-function positionPopoverUnder(bar: HTMLElement, anchor: HTMLElement): void {
-	const panel = bar.querySelector<HTMLElement>(".mica-popover");
+function positionPopoverUnder(_bar: HTMLElement, anchor: HTMLElement): void {
+	const panel = document.body.querySelector<HTMLElement>(".mica-tb-popover");
 	if (!panel) return;
-	const left = anchor.getBoundingClientRect().left - bar.getBoundingClientRect().left;
-	panel.style.left = `${Math.max(0, left)}px`;
+	const left = anchor.getBoundingClientRect().left;
+	panel.style.left = `${Math.min(Math.max(8, left), window.innerWidth - 356)}px`;
 }
 
 // ---------------------------------------------------------------------------

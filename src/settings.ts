@@ -65,6 +65,10 @@ export interface MicaSettings {
 	dragHandlePosition: "left" | "right";
 	/** What clicking outside an inline editor does. */
 	editorClickOutside: "nothing" | "cancel" | "save";
+	/** Show line numbers in the markdown editors. */
+	editorLineNumbers: boolean;
+	/** Render whitespace characters in the markdown editors. */
+	editorWhitespace: boolean;
 	/** Ordered editor-toolbar item ids ("|" = separator). */
 	toolbarLayout: string[];
 	/** Variant-group defaults (group id → variant id), following last use. */
@@ -100,6 +104,8 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	blockHeaderMode: "hover",
 	dragHandlePosition: "right",
 	editorClickOutside: "nothing",
+	editorLineNumbers: false,
+	editorWhitespace: false,
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
 	toolbarDefaults: {},
 	customTools: [],

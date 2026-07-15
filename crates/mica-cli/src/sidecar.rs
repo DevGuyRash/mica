@@ -27,7 +27,6 @@ pub fn ledger_path(note: &Path) -> PathBuf {
     sidecar_dir(note).join("ledger.jsonl")
 }
 
-/// Object path for `hash` (`b3:abcd` → `objects/b3-abcd.mica.md`).
 /// Compressed-object variant path (large objects). Hash is over PLAINTEXT.
 pub fn object_path_gz(note: &Path, hash: &str) -> PathBuf {
     objects_dir(note).join(format!("{}.mica.gz", hash.replace(':', "-")))
@@ -37,6 +36,7 @@ pub fn object_path_gz(note: &Path, hash: &str) -> PathBuf {
 /// Shared rule with the plugin — both sides read either form.
 pub const COMPRESS_MIN_BYTES: usize = 4096;
 
+/// Object path for `hash` (`b3:abcd` → `objects/b3-abcd.mica.md`).
 pub fn object_path(note: &Path, hash: &str) -> PathBuf {
     objects_dir(note).join(format!("{}.mica.md", hash.replace(':', "-")))
 }
@@ -362,9 +362,15 @@ mod tests {
         assert!(object_path(&note, "b3:aaaa").is_file(), "small stays .md");
         let large = "L".repeat(COMPRESS_MIN_BYTES + 100);
         write_object(&note, "b3:bbbb", &large).expect("large write");
-        assert!(object_path_gz(&note, "b3:bbbb").is_file(), "large becomes .gz");
+        assert!(
+            object_path_gz(&note, "b3:bbbb").is_file(),
+            "large becomes .gz"
+        );
         assert!(!object_path(&note, "b3:bbbb").exists());
-        assert_eq!(read_object(&note, "b3:aaaa").expect("r1"), Some(small.to_string()));
+        assert_eq!(
+            read_object(&note, "b3:aaaa").expect("r1"),
+            Some(small.to_string())
+        );
         assert_eq!(read_object(&note, "b3:bbbb").expect("r2"), Some(large));
         assert_eq!(read_object(&note, "b3:none").expect("r3"), None);
     }

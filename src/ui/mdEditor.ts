@@ -1,10 +1,46 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { Compartment } from "@codemirror/state";
+import { highlightWhitespace, lineNumbers } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { resolveCodeLanguage } from "./codeLangs";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState } from "@codemirror/state";
+import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+
+/** Editor view options (line numbers, whitespace) — persisted by the host
+ *  plugin and applied to every editor, live-toggleable per instance. */
+export interface EditorViewPrefs {
+	lineNumbers: boolean;
+	whitespace: boolean;
+}
+
+let viewPrefs: EditorViewPrefs = { lineNumbers: false, whitespace: false };
+let persistPrefs: ((prefs: EditorViewPrefs) => void) | null = null;
+const openInstances = new Set<MdEditor>();
+
+/** Push new prefs to all open editors and future ones. */
+export function setEditorViewPrefs(prefs: EditorViewPrefs): void {
+	viewPrefs = prefs;
+	for (const ed of openInstances) ed.applyViewPrefs();
+}
+
+/** The host registers how toggled prefs persist (plugin settings). */
+export function registerViewPrefsPersistence(cb: (prefs: EditorViewPrefs) => void): void {
+	persistPrefs = cb;
+}
+
+/** Toggle + persist (the lightbox toolbar buttons). */
+export function toggleViewPref(key: keyof EditorViewPrefs): EditorViewPrefs {
+	const next = { ...viewPrefs, [key]: !viewPrefs[key] };
+	setEditorViewPrefs(next);
+	persistPrefs?.(next);
+	return next;
+}
+
+export function editorViewPrefs(): EditorViewPrefs {
+	return viewPrefs;
+}
 
 export interface MdEditorOpts {
 	initial: string;
@@ -62,6 +98,7 @@ const mdHighlight = HighlightStyle.define([
  */
 const micaEditorTheme = EditorView.theme({
 	"&": {
+		height: "100%",
 		backgroundColor: "transparent",
 		fontSize: "var(--font-text-size, 16px)",
 		color: "var(--text-normal, #ddd)",
@@ -125,6 +162,7 @@ export class MdEditor {
 	readonly view: EditorView;
 	/** The light-DOM host (carries `.mica-mdeditor` for layout + tests). */
 	readonly host: HTMLElement;
+	private readonly viewOpts = new Compartment();
 
 	constructor(parent: HTMLElement, opts: MdEditorOpts) {
 		this.host = parent.createDiv({ cls: "mica-mdeditor" });
@@ -161,6 +199,7 @@ export class MdEditor {
 					markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage }),
 					syntaxHighlighting(mdHighlight),
 					micaEditorTheme,
+					this.viewOpts.of(viewPrefsExtensions()),
 					EditorView.lineWrapping,
 					cmPlaceholder(opts.placeholder ?? "Write markdown…"),
 					EditorView.updateListener.of((u) => {
@@ -171,14 +210,17 @@ export class MdEditor {
 			}),
 		});
 		// Clicking the empty space BELOW the last line should behave like
-		// clicking the end of the document — focus + caret to the end.
-		mount.addEventListener("mousedown", (e) => {
-			const t = e.target as HTMLElement;
-			if (t.closest(".cm-content")) return; // real content clicks are CM's
+		// clicking the end of the document. Listen on the LIGHT-DOM host:
+		// clicks below the shadow's content never reach a shadow-internal
+		// listener, and composedPath() still lets us skip real content hits.
+		this.host.addEventListener("mousedown", (e) => {
+			const path = e.composedPath() as HTMLElement[];
+			if (path.some((n) => n instanceof HTMLElement && n.classList?.contains("cm-content"))) return;
 			e.preventDefault();
 			this.view.dispatch({ selection: { anchor: this.view.state.doc.length } });
 			this.view.focus();
 		});
+		openInstances.add(this);
 		// The test/debug handle lives on the light-DOM host.
 		(this.host as unknown as { micaEditor?: MdEditor }).micaEditor = this;
 		if (opts.autofocus ?? true) {
@@ -202,8 +244,21 @@ export class MdEditor {
 		this.view.focus();
 	}
 
+	/** Re-apply the shared view prefs (line numbers / whitespace) live. */
+	applyViewPrefs(): void {
+		this.view.dispatch({ effects: this.viewOpts.reconfigure(viewPrefsExtensions()) });
+	}
+
 	destroy(): void {
+		openInstances.delete(this);
 		this.view.destroy();
 		this.host.remove();
 	}
+}
+
+function viewPrefsExtensions(): Extension[] {
+	const exts: Extension[] = [];
+	if (viewPrefs.lineNumbers) exts.push(lineNumbers());
+	if (viewPrefs.whitespace) exts.push(highlightWhitespace());
+	return exts;
 }

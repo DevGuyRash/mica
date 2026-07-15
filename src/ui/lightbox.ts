@@ -1,5 +1,5 @@
 import { MarkdownRenderChild, MarkdownRenderer, Modal, setIcon, type App } from "obsidian";
-import { MdEditor } from "./mdEditor";
+import { editorViewPrefs, MdEditor, toggleViewPref } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
 
 export interface LightboxOpts {
@@ -74,9 +74,27 @@ export class EditorLightbox extends Modal {
 
 		buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
 
-		// Right side of the toolbar: preview toggle.
+		// Right side of the toolbar: view toggles + preview.
 		const spacer = toolbarRow.createDiv({ cls: "mica-toolbar-spacer" });
 		void spacer;
+		const viewToggle = (icon: string, label: string, get: () => boolean, flip: () => void): void => {
+			const b = toolbarRow.createEl("button", {
+				cls: `clickable-icon mica-tool ${get() ? "is-on" : ""}`,
+				attr: { type: "button", "aria-label": label },
+			});
+			setIcon(b, icon);
+			b.addEventListener("click", () => {
+				flip();
+				b.toggleClass("is-on", get());
+			});
+		};
+		viewToggle("list-ordered", "Line numbers", () => editorViewPrefs().lineNumbers, () => toggleViewPref("lineNumbers"));
+		viewToggle(
+			"pilcrow",
+			"Show whitespace characters",
+			() => editorViewPrefs().whitespace,
+			() => toggleViewPref("whitespace"),
+		);
 		const previewBtn = toolbarRow.createEl("button", {
 			cls: "clickable-icon mica-tool mica-tool-preview",
 			attr: { type: "button", "aria-label": "Toggle live preview pane" },

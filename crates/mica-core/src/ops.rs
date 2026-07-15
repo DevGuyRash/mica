@@ -118,6 +118,25 @@ pub enum StructOp {
         /// The target flow index (`from ≡ to (mod cols)`).
         to: usize,
     },
+    /// Insert an empty COLUMN at column index `at`: one empty cell splices
+    /// into every row, `cols` bumps, and a `colw` list (if present) gains a
+    /// `1` share at the same position — all atomically.
+    InsertColumn {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Column index (`0..=cols`).
+        at: usize,
+    },
+    /// Insert an empty ROW at row index `at_row`: `cols` empty cells splice
+    /// in at that flow position; a `rowh` list (if present) gains an `auto`
+    /// slot at the same position.
+    #[serde(rename_all = "camelCase")]
+    InsertRow {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Row index (`0..=rows`).
+        at_row: usize,
+    },
     /// Write or clear a `{key=value}` header token on the GROUP container
     /// (grid or directive tabs) at `path` — e.g. `colw` fractions.
     #[serde(rename_all = "camelCase")]
@@ -355,6 +374,8 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
             true
         }
         StructOp::MoveCellInColumn { path, from, to } => move_cell_in_column(cst, path, *from, *to),
+        StructOp::InsertColumn { path, at } => insert_column(cst, path, *at),
+        StructOp::InsertRow { path, at_row } => insert_row(cst, path, *at_row),
         StructOp::SetGroupAttr { path, key, value } => {
             set_group_attr(cst, path, key, value.as_deref())
         }
@@ -544,6 +565,94 @@ fn compose_title(display: &str, attrs: &str) -> String {
 /// Column-preserving cell reorder: a chain of same-column swaps bubbles the
 /// cell from `from` to `to`; each swap touches exactly two same-column flow
 /// indices, so the other columns cannot move.
+/// Read a grid container's column count from its header attrs.
+fn grid_cols(node: &Node) -> Option<usize> {
+    match node {
+        Node::Container { name, title, .. } if name == "grid" => {
+            let (_, attrs) = split_title_attrs(title);
+            Some(
+                attrs
+                    .split_whitespace()
+                    .find_map(|t| t.strip_prefix("cols="))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(2)
+                    .max(1),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Insert one `key=value` list entry at `pos` in a comma list attr, if the
+/// attr exists (missing attrs stay missing — defaults already apply).
+fn insert_list_attr(cst: &mut Cst, path: &[usize], key: &str, pos: usize, entry: &str) {
+    let Some(Node::Container { title, .. }) = node_at(cst, path) else {
+        return;
+    };
+    let (_, attrs) = split_title_attrs(title);
+    let Some(current) = attrs
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix(&format!("{key}=")).map(str::to_string))
+    else {
+        return;
+    };
+    let mut parts: Vec<&str> = current.split(',').collect();
+    if pos > parts.len() {
+        return;
+    }
+    parts.insert(pos, entry);
+    let joined = parts.join(",");
+    set_group_attr(cst, path, key, Some(&joined));
+}
+
+/// The `InsertColumn` implementation: splice bottom-up so earlier rows'
+/// indices stay valid, then bump `cols` and the `colw` list.
+fn insert_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
+    let Some(cols) = node_at(cst, path).and_then(grid_cols) else {
+        return false;
+    };
+    if at > cols {
+        return false;
+    }
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        let rows = children.len().div_ceil(cols).max(1);
+        for r in (0..rows).rev() {
+            let idx = (r * cols + at).min(children.len());
+            children.insert(idx, new_cell());
+        }
+    }
+    let next = cols + 1;
+    if !set_group_attr(cst, path, "cols", Some(&next.to_string())) {
+        return false;
+    }
+    insert_list_attr(cst, path, "colw", at, "1");
+    true
+}
+
+/// The `InsertRow` implementation: `cols` empty cells at the row's flow
+/// position, plus an `auto` slot in the `rowh` list.
+fn insert_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
+    let Some(cols) = node_at(cst, path).and_then(grid_cols) else {
+        return false;
+    };
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        let rows = children.len().div_ceil(cols);
+        if at_row > rows {
+            return false;
+        }
+        let idx = (at_row * cols).min(children.len());
+        children.splice(idx..idx, (0..cols).map(|_| new_cell()));
+    }
+    insert_list_attr(cst, path, "rowh", at_row, "auto");
+    true
+}
+
 fn move_cell_in_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
     let cols = match node_at(cst, path) {
         Some(Node::Container { name, title, .. }) if name == "grid" => {
@@ -1740,6 +1849,69 @@ mod tests {
         assert_eq!(
             out,
             ":::grid {cols=2}\n:::cell\nc\n:::tabs\n:::tab A\na\n:::\n:::\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn insert_column_splices_a_cell_per_row_and_adjusts_attrs() {
+        // 2-col [a b / c d] + column at index 1 → 3-col [a _ b / c _ d],
+        // cols bumped, colw gains a 1 share at the same position.
+        let src = ":::grid {cols=2 colw=1.5,0.5}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::InsertColumn {
+                path: vec![0],
+                at: 1,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=3 colw=1.5,1,0.5}\n:::cell\na\n:::\n:::cell\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\n:::\n:::cell\nd\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn insert_column_at_edges_and_rejects_bad_targets() {
+        let src = ":::grid {cols=1}\n:::cell\nx\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::InsertColumn {
+                path: vec![0],
+                at: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2}\n:::cell\n:::\n:::cell\nx\n:::\n:::\n"
+        );
+        let (ok2, _) = apply(
+            src,
+            StructOp::InsertColumn {
+                path: vec![0],
+                at: 5,
+            },
+        );
+        assert!(!ok2, "past-the-end column index must be rejected");
+    }
+
+    #[test]
+    fn insert_row_splices_cols_cells_and_adjusts_rowh() {
+        // 2-col [a b / c d] with rowh → new middle row of empty cells,
+        // rowh gains an auto slot at the same position.
+        let src = ":::grid {cols=2 rowh=100,200}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::InsertRow {
+                path: vec![0],
+                at_row: 1,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2 rowh=100,auto,200}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\n:::\n:::cell\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n"
         );
     }
 

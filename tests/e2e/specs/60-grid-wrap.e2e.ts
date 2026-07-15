@@ -670,3 +670,149 @@ describe("round 12: chip ✕, nested callout tools", function () {
 		);
 	});
 });
+
+describe("round 13: boundary adds, editor click-to-end, body popovers", function () {
+	it("clicking a column boundary inserts a column; an edge click adds at the left", async function () {
+		await seedAndOpen(
+			"BoundaryCol.md",
+			"Intro.\n\n```mica id=bc-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-col-resizer").length >= 1),
+			{ timeout: 8000, timeoutMsg: "boundary strip never rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const strip = document.querySelector(".mica-lp .mica-col-resizer") as HTMLElement;
+			const r = strip.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			// A CLICK: down + up with no movement.
+			strip.dispatchEvent(new PointerEvent("pointerdown", opts(r.left + 4, r.top + r.height / 2)));
+			await new Promise((res) => setTimeout(res, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(r.left + 4, r.top + r.height / 2)));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("{cols=3}") && (v.match(/:::cell/g) ?? []).length === 3;
+				}),
+			{ timeout: 8000, timeoutMsg: "the boundary click did not insert a column" },
+		);
+		// Edge add on the LEFT.
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-edge-add.is-left") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("{cols=4}") && (v.match(/:::cell/g) ?? []).length === 4;
+				}),
+			{ timeout: 8000, timeoutMsg: "the left edge did not add a column" },
+		);
+	});
+
+	it("clicking a row boundary inserts a full row of cells", async function () {
+		await seedAndOpen(
+			"BoundaryRow.md",
+			"Intro.\n\n```mica id=br-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-row-resizer").length >= 1),
+			{ timeout: 8000, timeoutMsg: "row boundary never rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const strip = document.querySelector(".mica-lp .mica-row-resizer") as HTMLElement;
+			const r = strip.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			strip.dispatchEvent(new PointerEvent("pointerdown", opts(r.left + r.width / 2, r.top + 4)));
+			await new Promise((res) => setTimeout(res, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(r.left + r.width / 2, r.top + 4)));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return (v.match(/:::cell/g) ?? []).length === 6;
+				}),
+			{ timeout: 8000, timeoutMsg: "the row boundary click did not insert a row" },
+		);
+	});
+
+	it("clicking below the lightbox text places the caret at the end", async function () {
+		await seedAndOpen("ClickEnd.md", "Intro.\n\n```mica id=cke-1\ntab: Main\nshort text\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			{ timeout: 8000, timeoutMsg: "region never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = document.querySelector(".mica-lp .mica-region.is-editable") as HTMLElement;
+			region.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lightbox .mica-mdeditor").length === 1),
+			{ timeout: 8000, timeoutMsg: "lightbox never opened" },
+		);
+		const at = await browser.executeObsidian(() => {
+			const host = document.querySelector(".mica-lightbox .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { view: { state: { selection: { main: { head: number } }; doc: { length: number } } } };
+			};
+			const r = host.getBoundingClientRect();
+			host.dispatchEvent(
+				new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.bottom - 10 }),
+			);
+			const view = host.micaEditor?.view;
+			return view ? `${view.state.selection.main.head}/${view.state.doc.length}` : "no view";
+		});
+		const [head, len] = at.split("/").map(Number);
+		expect(head).toBe(len);
+		await browser.executeObsidian(() => {
+			(Array.from(document.querySelectorAll(".mica-lightbox button")).find(
+				(b) => b.textContent === "Cancel",
+			) as HTMLElement)?.click();
+		});
+	});
+
+	it("the toolbar overflow popover opens at body level (never clipped)", async function () {
+		await seedAndOpen("Overflow.md", "Intro.\n\n```mica id=ov-1\ntab: Main\nsome text\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			{ timeout: 8000, timeoutMsg: "region never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-region.is-editable") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-toolbar .mica-tool").length >= 1),
+			{ timeout: 8000, timeoutMsg: "quick toolbar never appeared" },
+		);
+		const state = await browser.executeObsidian(() => {
+			// Open a picker popover from the toolbar (callout button exists in
+			// the default layout) — it must mount on BODY and have real size.
+			const btn = Array.from(
+				document.querySelectorAll(".mica-lp .mica-toolbar .mica-tool"),
+			).find((b) => b.getAttribute("aria-label")?.toLowerCase().includes("callout")) as HTMLElement | undefined;
+			if (!btn) return "no callout button (overflowed)";
+			btn.click();
+			const pop = document.body.querySelector(":scope > .mica-tb-popover") as HTMLElement | null;
+			if (!pop) return "no popover";
+			const r = pop.getBoundingClientRect();
+			return r.width > 100 && r.height > 60 ? "ok" : `too small ${Math.round(r.width)}x${Math.round(r.height)}`;
+		});
+		expect(["ok", "no callout button (overflowed)"]).toContain(state);
+	});
+});

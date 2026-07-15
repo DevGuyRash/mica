@@ -152,7 +152,6 @@ describe("drag & drop stress", function () {
 			const two = chips.find((c) => c.textContent?.includes("Two"));
 			if (!region || !grip || !two) return;
 			const rr = region.getBoundingClientRect();
-			const rc = two.getBoundingClientRect();
 			const opts = (x: number, y: number): PointerEventInit => ({
 				bubbles: true,
 				cancelable: true,

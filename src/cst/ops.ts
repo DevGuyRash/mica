@@ -18,6 +18,8 @@ export type StructOp =
 	| { op: "deleteCell"; path: number[]; index: number }
 	| { op: "setCols"; path: number[]; cols: number }
 	| { op: "moveCellInColumn"; path: number[]; from: number; to: number }
+	| { op: "insertColumn"; path: number[]; at: number }
+	| { op: "insertRow"; path: number[]; atRow: number }
 	| { op: "setGroupAttr"; path: number[]; key: string; value: string | null }
 	| { op: "insertGroup"; path: number[]; at: number; kind: "tabs" | "grid" }
 	| { op: "insertLeaf"; path: number[]; at: number; text: string }

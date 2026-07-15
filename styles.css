@@ -1524,11 +1524,9 @@ body.mica-dnd-active {
 body.mica-dnd-active .mica-insert-zone,
 body.mica-dnd-active .mica-region-tools,
 body.mica-dnd-active .mica-cell-bar,
-body.mica-dnd-active .mica-cell-colzone,
 body.mica-dnd-active .mica-grid-tools,
 body.mica-dnd-active .mica-col-resizer,
-body.mica-dnd-active .mica-row-resizer,
-body.mica-dnd-active .mica-grid-colzone-end {
+body.mica-dnd-active .mica-row-resizer {
 	opacity: 0 !important;
 	pointer-events: none !important;
 	visibility: hidden !important;
@@ -2023,68 +2021,6 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	height: 100%;
 }
 
-/* ---------- Grid column strips (add cell / column left-right) ---------- */
-.mica-cell-colzone {
-	position: absolute;
-	top: 0;
-	bottom: 0;
-	left: -7px;
-	width: 14px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	opacity: 0;
-	transition: opacity 100ms ease;
-	z-index: 2;
-}
-.mica-grid-colzone-end {
-	position: absolute;
-	top: 0;
-	bottom: 0;
-	/* Fully INSIDE the grid box — an overhang gets clipped by the body's
-	   overflow-x guard (the strip lives in the grid's right padding). */
-	right: 0;
-	width: 13px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	opacity: 0;
-	transition: opacity 100ms ease;
-	z-index: 2;
-}
-.mica-cell-colzone:hover,
-.mica-grid-colzone-end:hover {
-	opacity: 1;
-}
-.mica-colzone-line {
-	position: absolute;
-	top: 4px;
-	bottom: 4px;
-	left: 50%;
-	width: 2px;
-	transform: translateX(-50%);
-	border-radius: 1px;
-	background: color-mix(in srgb, var(--mica-accent) 45%, transparent);
-}
-.mica-colzone-plus {
-	position: relative;
-	width: 18px;
-	height: 18px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0;
-	border: 1px solid color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
-	border-radius: 50%;
-	background: var(--background-primary);
-	color: var(--mica-accent);
-	cursor: pointer;
-	box-shadow: none;
-}
-.mica-colzone-plus .svg-icon {
-	width: 11px;
-	height: 11px;
-}
 .mica-grid {
 	position: relative;
 }
@@ -2307,7 +2243,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-appearance,
 .mica-drag-ghost,
 .mica-insert-plus,
-.mica-colzone-plus {
+.mica-boundary-plus {
 	/* `/ 1` is load-bearing: an omitted alpha INHERITS the origin's alpha. */
 	background: rgb(from var(--background-primary) r g b / 1);
 }
@@ -2412,8 +2348,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 		height: 20px;
 	}
 	.mica-insert-zone,
-	.mica-cell-colzone,
-	.mica-grid-colzone-end {
+	.mica-boundary-plus {
 		opacity: 0.6;
 	}
 	.mica-tab-btn {
@@ -2457,7 +2392,6 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-cell-ghost,
 .mica-insert-zone,
 .mica-insert-plus,
-.mica-colzone-plus,
 .mica-tab-add {
 	cursor: pointer;
 }
@@ -2521,6 +2455,14 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 7px;
 	padding: 2px 8px;
+	overflow: hidden;
+}
+.mica-diff-check input[type="checkbox"] {
+	width: 13px;
+	height: 13px;
+	margin: 0;
+	flex-shrink: 0;
+	accent-color: var(--mica-accent);
 }
 .mica-diff-check.is-on {
 	border-color: color-mix(in srgb, var(--mica-accent) 55%, transparent);
@@ -2537,4 +2479,119 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	border-radius: 7px;
 	padding: 0 5px;
 	margin-left: 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Grid boundary language
+   Thin accent line + ⊕ pill = ADD here (click); the line turns SOLID while
+   dragging = RESIZE. Edge strips are click-only adds. Section-level insert
+   zones keep their own thinner treatment — three visual levels, one glance.
+   ═══════════════════════════════════════════════════════════════════════ */
+.mica-boundary-plus {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: 18px;
+	height: 18px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
+	border-radius: 50%;
+	color: var(--mica-accent);
+	opacity: 0;
+	transition: opacity 100ms ease;
+}
+.mica-boundary-plus .svg-icon {
+	width: 11px !important;
+	height: 11px !important;
+}
+.mica-col-resizer:hover .mica-boundary-plus,
+.mica-row-resizer:hover .mica-boundary-plus,
+.mica-edge-add:hover .mica-boundary-plus {
+	opacity: 1;
+}
+/* Add-state: dashed line. Resize-state (while actively dragging): solid. */
+.mica-col-resizer:hover .mica-col-resizer-line {
+	background: none;
+	border-left: 2px dashed color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	width: 0;
+}
+.mica-row-resizer:hover .mica-row-resizer-line {
+	background: none;
+	border-top: 2px dashed color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	height: 0;
+}
+.mica-col-resizer:active .mica-col-resizer-line {
+	border-left: none;
+	width: 3px;
+	background: var(--mica-accent);
+}
+.mica-row-resizer:active .mica-row-resizer-line {
+	border-top: none;
+	height: 3px;
+	background: var(--mica-accent);
+}
+.mica-col-resizer:active .mica-boundary-plus,
+.mica-row-resizer:active .mica-boundary-plus {
+	opacity: 0;
+}
+/* Edge strips: slim hover zones along the grid box. */
+.mica-edge-add {
+	position: absolute;
+	z-index: 4;
+	cursor: pointer;
+}
+.mica-edge-add.is-left {
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 10px;
+}
+.mica-edge-add.is-right {
+	right: 0;
+	top: 0;
+	bottom: 0;
+	width: 10px;
+}
+.mica-edge-add.is-top {
+	top: 0;
+	left: 12px;
+	right: 12px;
+	height: 10px;
+}
+.mica-edge-add.is-bottom {
+	bottom: 0;
+	left: 12px;
+	right: 12px;
+	height: 10px;
+}
+.mica-edge-add .mica-edge-line {
+	position: absolute;
+	inset: 4px;
+	border: 0;
+	opacity: 0;
+	transition: opacity 100ms ease;
+}
+.mica-edge-add.is-left .mica-edge-line,
+.mica-edge-add.is-right .mica-edge-line {
+	border-left: 2px dashed color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	left: 50%;
+	width: 0;
+}
+.mica-edge-add.is-top .mica-edge-line,
+.mica-edge-add.is-bottom .mica-edge-line {
+	border-top: 2px dashed color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	top: 50%;
+	height: 0;
+}
+.mica-edge-add:hover .mica-edge-line {
+	opacity: 1;
+}
+body.mica-dnd-active .mica-edge-add {
+	opacity: 0 !important;
+	pointer-events: none !important;
+	visibility: hidden !important;
 }

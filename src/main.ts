@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { setEditorBehavior } from "./ui/quickEdit";
+import { registerViewPrefsPersistence, setEditorViewPrefs } from "./ui/mdEditor";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
 import { micaSourceHighlight } from "./cm/micaSourceHighlight";
 import { micaLivePreview } from "./cm/micaLivePreview";
@@ -239,6 +240,12 @@ export default class MicaPlugin extends Plugin {
 		b.setAttribute("data-mica-tabstyle", s.tabStyle);
 		b.setAttribute("data-mica-grip", s.dragHandlePosition);
 		setEditorBehavior(s.editorClickOutside);
+		setEditorViewPrefs({ lineNumbers: s.editorLineNumbers, whitespace: s.editorWhitespace });
+		registerViewPrefsPersistence((p) => {
+			this.settings.editorLineNumbers = p.lineNumbers;
+			this.settings.editorWhitespace = p.whitespace;
+			void this.saveSettings();
+		});
 		b.toggleClass("mica-animate", s.animations);
 		const set = (k: string, v: string | null): void => {
 			if (v === null) b.style.removeProperty(k);

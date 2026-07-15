@@ -1588,9 +1588,33 @@ function mountGridResizers(
 		grid.style.gridTemplateColumns = w.map((x) => `minmax(0, ${x.toFixed(3)}fr)`).join(" ");
 	};
 
+	/** Click vs drag on one strip: <5px release = click (insert). */
+	const armClickOrDrag = (strip: HTMLElement, onClick: () => void): ((moved: boolean) => void) => {
+		let clickArmed = false;
+		strip.addEventListener("pointerdown", () => {
+			clickArmed = true;
+		});
+		return (moved: boolean): void => {
+			if (clickArmed && !moved) onClick();
+			clickArmed = false;
+		};
+	};
+	const plusPill = (strip: HTMLElement, tip: string): void => {
+		const pill = iconButton(strip, "mica-boundary-plus", "plus", tip);
+		pill.style.pointerEvents = "none"; // the STRIP owns the gesture
+	};
+
 	for (let b = 1; b < cols && cells.length > 1; b++) {
 		const strip = grid.createDiv({ cls: "mica-col-resizer" });
 		strip.createDiv({ cls: "mica-col-resizer-line" });
+		strip.setAttribute(
+			"aria-label",
+			"Click: new column here · drag: resize · double-click: reset widths",
+		);
+		plusPill(strip, "New column here");
+		const settle = armClickOrDrag(strip, () =>
+			ctx.editable?.apply({ op: "insertColumn", path, at: b }),
+		);
 		strips.push(strip);
 		strip.addEventListener("dblclick", (e) => {
 			e.stopPropagation();
@@ -1646,7 +1670,9 @@ function mountGridResizers(
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
-				if (e.type !== "pointerup" || Math.abs(e.clientX - startX) < 3) return;
+				const moved = Math.abs(e.clientX - startX) >= 5;
+				settle(e.type === "pointerup" ? moved : true);
+				if (e.type !== "pointerup" || !moved) return;
 				widths.splice(0, widths.length, ...lastW);
 				const rounded = lastW.map((x) => Math.round(x * 100) / 100);
 				const uniform = rounded.every((x) => Math.abs(x - rounded[0]) < 0.03);
@@ -1666,6 +1692,11 @@ function mountGridResizers(
 	for (let r = 0; r + 1 < rowCount; r++) {
 		const strip = grid.createDiv({ cls: "mica-row-resizer" });
 		strip.createDiv({ cls: "mica-row-resizer-line" });
+		strip.setAttribute("aria-label", "Click: new row here · drag: resize · double-click: reset heights");
+		plusPill(strip, "New row here");
+		const settleRow = armClickOrDrag(strip, () =>
+			ctx.editable?.apply({ op: "insertRow", path, atRow: r + 1 }),
+		);
 		rowStrips.push(strip);
 		strip.addEventListener("dblclick", (e) => {
 			e.stopPropagation();
@@ -1714,7 +1745,9 @@ function mountGridResizers(
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
-				if (e.type !== "pointerup" || lastA === null || Math.abs(e.clientY - startY) < 3) return;
+				const movedRow = Math.abs(e.clientY - startY) >= 5;
+				settleRow(e.type === "pointerup" ? movedRow : true);
+				if (e.type !== "pointerup" || lastA === null || !movedRow) return;
 				rowHeights[r] = lastA;
 				rowHeights[r + 1] = lastB;
 				ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
@@ -1724,6 +1757,24 @@ function mountGridResizers(
 			window.addEventListener("pointercancel", up, true);
 		});
 	}
+
+	// Edge strips: one-click add at the grid's four edges (no resize there).
+	const edge = (cls: string, tip: string, run: () => void): void => {
+		const strip = grid.createDiv({ cls: `mica-edge-add ${cls}` });
+		strip.setAttribute("aria-label", tip);
+		strip.createDiv({ cls: "mica-col-resizer-line mica-edge-line" });
+		plusPill(strip, tip);
+		strip.addEventListener("click", (e) => {
+			e.stopPropagation();
+			run();
+		});
+	};
+	edge("is-left", "New column on the left", () => ctx.editable?.apply({ op: "insertColumn", path, at: 0 }));
+	edge("is-right", "New column on the right", () => ctx.editable?.apply({ op: "insertColumn", path, at: cols }));
+	edge("is-top", "New row on top", () => ctx.editable?.apply({ op: "insertRow", path, atRow: 0 }));
+	edge("is-bottom", "New row at the bottom", () =>
+		ctx.editable?.apply({ op: "insertRow", path, atRow: rowCount }),
+	);
 
 	// Track layout: cells resize as content changes; keep dividers glued.
 	const ro = new ResizeObserver(() => layout());
@@ -1784,15 +1835,6 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		markGroupContainer(cell, cellPath, c.children.length);
 		renderNodes(c.children, cell, ctx, cellPath, { autoOpen: takeRegionReveal(ctx, cellPath) });
 		if (ctx.editable) {
-			// Vertical column strip on the cell's left edge: insert a cell (typed)
-			// at this flow position — the "add to the left" affordance.
-			const colzone = cell.createDiv({ cls: "mica-cell-colzone" });
-			colzone.createDiv({ cls: "mica-colzone-line" });
-			const colplus = iconButton(colzone, "mica-colzone-plus", "plus", "Insert a cell here (column-wise)");
-			colplus.addEventListener("click", (e) => {
-				e.stopPropagation();
-				showCellTypeMenu(ctx, path, idx, e);
-			});
 			const bar = cell.createDiv({ cls: "mica-cell-bar" });
 			const drag = iconButton(bar, "mica-cell-tool", "grip-vertical", "Drag to move this cell");
 			makeDraggable(drag, "cell", cellPath, (op) => ctx.editable?.apply(op), cell);
@@ -1838,32 +1880,18 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		// Grid resizers: dividers between columns (fr shares) and rows (min px).
 		mountGridResizers(grid, ctx, path, cols, widths, rowHeights);
 
-		// Ghost tile: add a cell where the next one would land.
-		const ghost = grid.createEl("button", {
-			cls: "clickable-icon mica-cell-ghost",
-			attr: { type: "button", "aria-label": "Add a cell (choose its content)" },
-		});
-		setIcon(ghost.createSpan(), "plus");
-		ghost.addEventListener("click", (e) => {
-			showCellTypeMenu(ctx, path, node.children.length, e);
-		});
-
-		// Right-edge strip: append a cell, or grow the grid by a column.
-		const endzone = grid.createDiv({ cls: "mica-grid-colzone-end" });
-		endzone.createDiv({ cls: "mica-colzone-line" });
-		const endplus = iconButton(endzone, "mica-colzone-plus", "plus", "Add a cell or a new column");
-		endplus.addEventListener("click", (e) => {
-			e.stopPropagation();
-			showCellTypeMenu(ctx, path, node.children.length, e, (menu) => {
-				menu.addSeparator();
-				menu.addItem((i) =>
-					i
-						.setTitle(`New column (${cols} → ${cols + 1})`)
-						.setIcon("columns-3")
-						.onClick(() => ctx.editable?.apply({ op: "setCols", path, cols: cols + 1 })),
-				);
+		// Ghost tile: only when the grid is EMPTY or its last row is ragged —
+		// full rectangular grids grow via the boundary/edge strips instead.
+		if (node.children.length === 0 || node.children.length % cols !== 0) {
+			const ghost = grid.createEl("button", {
+				cls: "clickable-icon mica-cell-ghost",
+				attr: { type: "button", "aria-label": "Add a cell (choose its content)" },
 			});
-		});
+			setIcon(ghost.createSpan(), "plus");
+			ghost.addEventListener("click", (e) => {
+				showCellTypeMenu(ctx, path, node.children.length, e);
+			});
+		}
 
 		const bar = wrap.createDiv({ cls: "mica-grid-actions" });
 		const colStep = (delta: number, icon: string, label: string): void => {
