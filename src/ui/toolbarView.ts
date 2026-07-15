@@ -229,17 +229,22 @@ function openPopover(bar: HTMLElement, build: (panel: HTMLElement, close: () => 
 	const close = (): void => {
 		panel.remove();
 		document.removeEventListener("pointerdown", onOutside, true);
+		document.removeEventListener("keydown", onEsc, true);
 	};
 	const onOutside = (e: PointerEvent): void => {
 		if (!panel.contains(e.target as Node)) close();
 	};
-	document.addEventListener("pointerdown", onOutside, true);
-	panel.addEventListener("keydown", (e) => {
+	// Document-level: variant menus hold no focus, so a panel listener
+	// would never hear the key.
+	const onEsc = (e: KeyboardEvent): void => {
 		if (e.key === "Escape") {
+			e.preventDefault();
 			e.stopPropagation();
 			close();
 		}
-	});
+	};
+	document.addEventListener("pointerdown", onOutside, true);
+	document.addEventListener("keydown", onEsc, true);
 	build(panel, close);
 }
 

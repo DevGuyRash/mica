@@ -607,10 +607,25 @@ function wireNavRow(
 			}
 			if (target) target.row.el.addClass(target.after ? "mica-nav-dropafter" : "mica-nav-dropbefore");
 		};
+		const onEsc = (ke: KeyboardEvent): void => {
+			if (ke.key !== "Escape") return;
+			ke.preventDefault();
+			ke.stopPropagation();
+			window.removeEventListener("pointermove", move, true);
+			window.removeEventListener("pointerup", up, true);
+			window.removeEventListener("pointercancel", up, true);
+			window.removeEventListener("keydown", onEsc, true);
+			clearMarks();
+			row.el.removeClass("mica-nav-dragging");
+			dragging = false;
+			target = null;
+		};
+		window.addEventListener("keydown", onEsc, true);
 		const up = (ev: PointerEvent): void => {
 			window.removeEventListener("pointermove", move, true);
 			window.removeEventListener("pointerup", up, true);
 			window.removeEventListener("pointercancel", up, true);
+			window.removeEventListener("keydown", onEsc, true);
 			clearMarks();
 			row.el.removeClass("mica-nav-dragging");
 			if (!dragging) {
@@ -741,11 +756,20 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 	const done = (): void => {
 		pop.remove();
 		document.removeEventListener("pointerdown", onOut, true);
+		document.removeEventListener("keydown", onEsc, true);
 	};
 	function onOut(ev: PointerEvent): void {
 		if (!pop.contains(ev.target as Node)) done();
 	}
+	function onEsc(ev: KeyboardEvent): void {
+		if (ev.key === "Escape") {
+			ev.preventDefault();
+			ev.stopPropagation();
+			done();
+		}
+	}
 	document.addEventListener("pointerdown", onOut, true);
+	document.addEventListener("keydown", onEsc, true);
 
 	pop.createDiv({ cls: "mica-appearance-title", text: "This block's appearance" });
 
@@ -1524,10 +1548,23 @@ function mountGridResizers(
 				live(w);
 				layout();
 			};
+			const onEsc = (ke: KeyboardEvent): void => {
+				if (ke.key !== "Escape") return;
+				ke.preventDefault();
+				ke.stopPropagation();
+				window.removeEventListener("pointermove", move, true);
+				window.removeEventListener("pointerup", up, true);
+				window.removeEventListener("pointercancel", up, true);
+				window.removeEventListener("keydown", onEsc, true);
+				live(startW);
+				layout();
+			};
+			window.addEventListener("keydown", onEsc, true);
 			const up = (e: PointerEvent): void => {
 				window.removeEventListener("pointermove", move, true);
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
+				window.removeEventListener("keydown", onEsc, true);
 				if (e.type !== "pointerup" || Math.abs(e.clientX - startX) < 3) return;
 				widths.splice(0, widths.length, ...lastW);
 				const rounded = lastW.map((x) => Math.round(x * 100) / 100);
@@ -1579,10 +1616,23 @@ function mountGridResizers(
 				applyRowTemplate(grid, live);
 				layout();
 			};
+			const onEsc = (ke: KeyboardEvent): void => {
+				if (ke.key !== "Escape") return;
+				ke.preventDefault();
+				ke.stopPropagation();
+				window.removeEventListener("pointermove", move, true);
+				window.removeEventListener("pointerup", up, true);
+				window.removeEventListener("pointercancel", up, true);
+				window.removeEventListener("keydown", onEsc, true);
+				applyRowTemplate(grid, rowHeights);
+				layout();
+			};
+			window.addEventListener("keydown", onEsc, true);
 			const up = (e: PointerEvent): void => {
 				window.removeEventListener("pointermove", move, true);
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
+				window.removeEventListener("keydown", onEsc, true);
 				if (e.type !== "pointerup" || lastA === null || Math.abs(e.clientY - startY) < 3) return;
 				rowHeights[r] = lastA;
 				rowHeights[r + 1] = lastB;

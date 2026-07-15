@@ -36,6 +36,8 @@ interface OpenEditor {
 	applyOp: (value: string) => void;
 	/** Destroy the editor locally (no doc change, draft cleared). */
 	closeLocal: () => void;
+	/** The editor's own cancel path (dirty editors arm "Discard?"). */
+	cancel: () => void;
 }
 
 const openEditors = new Set<OpenEditor>();
@@ -91,6 +93,24 @@ function onDocPointerDown(e: PointerEvent): void {
 	}
 }
 document.addEventListener("pointerdown", onDocPointerDown, true);
+
+/** Escape cancels the most recent open editor even when focus is elsewhere
+ *  (the editor's own keymap only sees Esc while focused). Modals, menus,
+ *  and suggesters keep their own Esc. */
+function onDocKeydown(e: KeyboardEvent): void {
+	if (e.key !== "Escape" || !openEditors.size) return;
+	sweepDetached();
+	if (!openEditors.size) return;
+	if (document.querySelector(".modal-container, .menu, .suggestion-container, .mica-popover, .mica-navpop")) return;
+	const t = e.target as HTMLElement | null;
+	for (const ed of openEditors) if (t && ed.region.contains(t)) return; // focused: its keymap owns Esc
+	const last = [...openEditors].pop();
+	if (!last) return;
+	e.preventDefault();
+	e.stopPropagation();
+	last.cancel();
+}
+document.addEventListener("keydown", onDocKeydown, true);
 
 /**
  * The inline quick editor: a compact CodeMirror markdown editor with a mini
@@ -157,6 +177,7 @@ export function openQuickEdit(region: HTMLElement, ctx: RenderCtx, target: Regio
 	const entry: OpenEditor = {
 		region,
 		target,
+		cancel: () => requestCancel(),
 		getValue: () => editor.getValue(),
 		applyOp: (value) =>
 			ctx.editable?.apply({
