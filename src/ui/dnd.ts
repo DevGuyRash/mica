@@ -27,6 +27,18 @@ export interface DragSpec {
 	/** The dragged thing's serialization — enables CROSS-BLOCK moves (the
 	 *  target block re-parses it via insertLeaf). Regions/groups only. */
 	text?: string;
+	/** Virtual drags (nested callouts): the payload isn't a leaf run but a
+	 *  text span INSIDE a region — dropping inserts `text` at the target and
+	 *  rewrites the source region to `without` (expected-guarded). */
+	virtualSplice?: {
+		path: number[];
+		start: number;
+		end: number;
+		expected: string;
+		without: string;
+		/** How many CST nodes `text` parses into (same-container index shift). */
+		insertCount: number;
+	};
 }
 
 interface Slot {
@@ -227,6 +239,7 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 	// the drag) — sweep every block in the same editor pane. Numeric paths
 	// collide across blocks, so subtree/no-op exclusions stay source-scoped.
 	const crossable = Boolean(spec.text) && (kind === "region" || kind === "group");
+	// Virtual drags have no leaf-run subtree either.
 	const scope = root.closest(".cm-editor, .markdown-preview-view");
 	const roots: HTMLElement[] = crossable && scope ? Array.from(scope.querySelectorAll<HTMLElement>(".mica")) : [root];
 	for (const rootEl of roots) {
@@ -284,6 +297,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLE
 	/** Drop the slots that would be NO-OPS — an indicator must never promise a
 	 *  move that changes nothing (the gaps hugging the dragged item itself). */
 	const isNoop = (s: Slot): boolean => {
+		if (spec.virtualSplice) return false; // leaving the parent is always a real move
 		if (s.container.rootEl !== sourceRoot) return false; // other block: never a no-op
 		const pk = s.parentPath.join(".");
 		if (spec.region) {
@@ -526,7 +540,10 @@ function dragMove(e: PointerEvent): void {
 	}
 	// Content drags (regions, groups): outline the receiving container so an
 	// indicator INSIDE a cell can't be confused with a gap BETWEEN cells.
-	const wantMark = (d.spec.kind === "region" || d.spec.kind === "group") && best ? best.container.el : null;
+	// An INTO-box already outlines the container itself — never both.
+	const isInto = Boolean(best && best.w > 8 && best.h > 8);
+	const wantMark =
+		(d.spec.kind === "region" || d.spec.kind === "group") && best && !isInto ? best.container.el : null;
 	if (d.markedEl !== wantMark) {
 		d.markedEl?.removeClass("mica-drop-inside");
 		wantMark?.addClass("mica-drop-inside");
@@ -599,6 +616,32 @@ function finishDrag(commit: boolean): void {
 	d.cleanup();
 	if (!commit || !d.current) return;
 	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => void }).apply;
+	const vs = d.spec.virtualSplice;
+	if (vs && d.spec.text) {
+		// Nested-callout drag: insert the dedented callout at the target, then
+		// rewrite the source region without it. Same-container inserts shift
+		// the region's indices — adjust by the payload's parsed node count.
+		const targetApply =
+			d.current.container.rootEl === d.sourceRoot
+				? apply
+				: (d.current.container.rootEl as BlockApplyHost).micaApply;
+		if (!targetApply) return;
+		targetApply({ op: "insertLeaf", path: d.current.parentPath, at: d.current.index, text: d.spec.text });
+		const sameContainer =
+			d.current.container.rootEl === d.sourceRoot &&
+			d.current.parentPath.join(".") === vs.path.join(".") &&
+			d.current.index <= vs.start;
+		const shift = sameContainer ? vs.insertCount : 0;
+		apply?.({
+			op: "saveRegion",
+			path: vs.path,
+			start: vs.start + shift,
+			end: vs.end + shift,
+			expected: vs.expected,
+			text: vs.without,
+		});
+		return;
+	}
 	if (d.current.container.rootEl !== d.sourceRoot) {
 		// CROSS-BLOCK: the serialization rides the drag; the target re-parses
 		// it (insertLeaf handles prose, callouts, code, and whole groups), the

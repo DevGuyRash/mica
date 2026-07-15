@@ -79,7 +79,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	autoSnapshotEnabled: true,
 	snapshotDebounceMs: 5000,
 	diffRefine: "word",
-	diffHideSyntax: false,
+	diffHideSyntax: true,
 	diffIgnoreWs: false,
 	defaultDiffMode: "inline",
 	showVersionChip: true,

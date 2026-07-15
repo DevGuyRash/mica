@@ -226,6 +226,8 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 
 .mica-chip-x {
 	position: absolute;
+	z-index: 3;
+	pointer-events: auto;
 	right: 4px;
 	top: 50%;
 	transform: translateY(-50%);
@@ -1077,7 +1079,13 @@ body[data-mica-grip="left"] .mica-region-tools {
 	right: auto;
 	left: 4px;
 }
-.mica-region.is-editable:hover > .mica-region-tools {
+.mica-region.is-editable:hover:not(:has(.mica-nested-callout:hover)) > .mica-region-tools {
+	display: inline-flex;
+}
+.mica-nested-callout {
+	position: relative;
+}
+.mica-nested-callout:hover:not(:has(.mica-nested-callout:hover)) > .mica-nested-tools {
 	display: inline-flex;
 }
 .mica-region.is-editing > .mica-region-tools {
@@ -2189,7 +2197,10 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	right: auto;
 	left: 4px;
 }
-.mica-grid-wrap:hover > .mica-grid-tools {
+.mica-grid-wrap:hover:not(
+		:has(.mica-cell:hover, .mica-region:hover, .mica-tabs:hover, .mica-grid-wrap .mica-grid-wrap:hover)
+	)
+	> .mica-grid-tools {
 	display: inline-flex;
 }
 .mica-col-resizer {
@@ -2435,4 +2446,95 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	to {
 		box-shadow: 0 0 0 3px color-mix(in srgb, var(--mica-accent) 25%, transparent);
 	}
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Add-affordance SSOT: every "add something here" control shares the same
+   cursor, dashes, and accent hover — insert zones, empty-region ghosts,
+   the grid ghost tile, and the column strips speak one language.
+   ═══════════════════════════════════════════════════════════════════════ */
+.mica-ghost,
+.mica-cell-ghost,
+.mica-insert-zone,
+.mica-insert-plus,
+.mica-colzone-plus,
+.mica-tab-add {
+	cursor: pointer;
+}
+.mica-region.is-editable > .mica-md {
+	cursor: pointer;
+}
+.mica-region.is-editing > .mica-md,
+.mica-region .mica-md .mica-mdeditor {
+	cursor: auto;
+}
+.mica-ghost:hover,
+.mica-region.is-editable:hover .mica-ghost {
+	color: color-mix(in srgb, var(--mica-accent) 60%, var(--text-muted));
+	border-color: color-mix(in srgb, var(--mica-accent) 50%, var(--mica-border));
+	background: color-mix(in srgb, var(--mica-accent) 5%, transparent);
+}
+
+/* Column stepper flanking the "N cols" chip. */
+.mica-col-step {
+	width: 20px;
+	height: 20px;
+}
+.mica-col-step .svg-icon {
+	width: 12px !important;
+	height: 12px !important;
+}
+
+/* The editor surface fills its pane — clicks below the text belong to it. */
+.mica-lightbox-editor .mica-mdeditor,
+.mica-coedit-body .mica-mdeditor {
+	height: 100%;
+	min-height: 100%;
+	display: flex;
+	flex-direction: column;
+}
+
+/* ---------- Versions toolbar: labelled clusters + compare badges ---------- */
+.mica-versions-toolbar {
+	display: flex;
+	align-items: flex-end;
+	flex-wrap: wrap;
+	gap: 12px;
+}
+.mica-vt-group {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+.mica-vt-label {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.mica-vt-body {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.mica-diff-check {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 7px;
+	padding: 2px 8px;
+}
+.mica-diff-check.is-on {
+	border-color: color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	color: var(--text-normal);
+	background: color-mix(in srgb, var(--mica-accent) 10%, transparent);
+}
+.mica-vrow.is-base {
+	border-left: 2px solid color-mix(in srgb, var(--mica-accent) 70%, transparent);
+}
+.mica-vrow-basebadge {
+	font-size: var(--font-ui-smaller);
+	color: var(--mica-accent);
+	border: 1px solid color-mix(in srgb, var(--mica-accent) 45%, transparent);
+	border-radius: 7px;
+	padding: 0 5px;
+	margin-left: 6px;
 }

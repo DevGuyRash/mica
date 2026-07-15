@@ -66,6 +66,29 @@ export function buildCallout(c: ParsedCallout): string {
 export function openCalloutEditor(ctx: RenderCtx, target: RegionTarget): void {
 	const parsed = parseCallout(target.original);
 	if (!parsed) return;
+	openCalloutEditorFor(ctx, parsed, (rebuilt) => {
+		if (rebuilt === target.original) return;
+		ctx.editable?.apply({
+			op: "saveRegion",
+			path: target.path,
+			start: target.start,
+			end: target.end,
+			expected: target.original,
+			text: rebuilt,
+		});
+	});
+}
+
+/**
+ * The editor itself, decoupled from WHERE the callout lives: `commit`
+ * receives the reassembled callout text (nested callouts splice it back
+ * into their parent region; top-level ones saveRegion directly).
+ */
+export function openCalloutEditorFor(
+	ctx: RenderCtx,
+	parsed: ParsedCallout,
+	commit: (rebuilt: string) => void,
+): void {
 	// Mutable field state shared by the header hook and the save/preview paths.
 	const state = { type: parsed.type, fold: parsed.fold, title: parsed.title };
 	const assemble = (body: string): string =>
@@ -145,17 +168,6 @@ export function openCalloutEditor(ctx: RenderCtx, target: RegionTarget): void {
 				refresh();
 			});
 		},
-		onSave: (body) => {
-			const rebuilt = assemble(body);
-			if (rebuilt === target.original) return;
-			ctx.editable?.apply({
-				op: "saveRegion",
-				path: target.path,
-				start: target.start,
-				end: target.end,
-				expected: target.original,
-				text: rebuilt,
-			});
-		},
+		onSave: (body) => commit(assemble(body)),
 	}).open();
 }

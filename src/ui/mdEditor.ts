@@ -170,6 +170,15 @@ export class MdEditor {
 				],
 			}),
 		});
+		// Clicking the empty space BELOW the last line should behave like
+		// clicking the end of the document — focus + caret to the end.
+		mount.addEventListener("mousedown", (e) => {
+			const t = e.target as HTMLElement;
+			if (t.closest(".cm-content")) return; // real content clicks are CM's
+			e.preventDefault();
+			this.view.dispatch({ selection: { anchor: this.view.state.doc.length } });
+			this.view.focus();
+		});
 		// The test/debug handle lives on the light-DOM host.
 		(this.host as unknown as { micaEditor?: MdEditor }).micaEditor = this;
 		if (opts.autofocus ?? true) {

@@ -1,11 +1,12 @@
 import { App, Component, Menu, MarkdownRenderer, Notice, setIcon, TFile } from "obsidian";
 import type MicaPlugin from "../main";
-import { contentSignature, serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
+import { parseBlock, contentSignature, serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
 import { readObject } from "../storage/sidecar";
 import type { Reveal, StructOp } from "../cst/ops";
 import { makeDraggable } from "./dnd";
 import { draftKey, openLightboxFor, openQuickEdit, type RegionTarget } from "./quickEdit";
-import { openCalloutEditor, parseCallout } from "./calloutEditor";
+import { openCalloutEditor, openCalloutEditorFor, parseCallout } from "./calloutEditor";
+import { findNestedCallouts, requoteOnce, spliceLines } from "./nestedCallouts";
 import { calloutCatalog } from "./calloutCatalog";
 import { EditorLightbox } from "./lightbox";
 import { VersionsModal } from "./versionsModal";
@@ -1087,6 +1088,85 @@ function renderRegion(
 	if (autoOpen && ctx.editable) queueMicrotask(() => openQuickEdit(region, ctx, target));
 }
 
+/**
+ * Callouts nested INSIDE a callout are text, not structure — but they still
+ * deserve tools. Each rendered `.callout .callout` is zipped (document
+ * order) with its source line range; edit/delete/drag all run as guarded
+ * text surgery on the parent region.
+ */
+function wireNestedCallouts(view: HTMLElement, ctx: RenderCtx, target: RegionTarget): void {
+	const nested = findNestedCallouts(target.original);
+	if (!nested.length) return;
+	const rendered = Array.from(view.querySelectorAll<HTMLElement>(".callout .callout"));
+	nested.forEach((nc, i) => {
+		const el = rendered[i];
+		if (!el) return;
+		el.addClass("mica-nested-callout");
+		const tools = el.createDiv({ cls: "mica-region-tools mica-nested-tools" });
+		const stop = (e: Event): void => e.stopPropagation();
+
+		const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag this callout out");
+		grip.addEventListener("click", stop);
+		const without = spliceLines(target.original, nc.startLine, nc.endLine, null);
+		makeDraggable(
+			grip,
+			{
+				kind: "region",
+				fromPath: target.path,
+				text: nc.dedented,
+				virtualSplice: {
+					path: target.path,
+					start: target.start,
+					end: target.end,
+					expected: target.original,
+					without,
+					insertCount: parseBlock(nc.dedented).children.length,
+				},
+			},
+			target.path,
+			(op) => ctx.editable?.apply(op),
+			el,
+		);
+
+		iconButton(tools, "mica-minitool", "maximize-2", "Edit this callout (type, title, body)").addEventListener(
+			"click",
+			(e) => {
+				e.stopPropagation();
+				const parsed = parseCallout(nc.dedented);
+				if (!parsed) return;
+				openCalloutEditorFor(ctx, parsed, (rebuilt) => {
+					const next = spliceLines(target.original, nc.startLine, nc.endLine, requoteOnce(rebuilt).trimEnd());
+					if (next === target.original) return;
+					ctx.editable?.apply({
+						op: "saveRegion",
+						path: target.path,
+						start: target.start,
+						end: target.end,
+						expected: target.original,
+						text: next,
+					});
+				});
+			},
+		);
+
+		iconButton(tools, "mica-minitool mica-region-x", "x", "Delete this callout").addEventListener("click", (e) => {
+			e.stopPropagation();
+			deleteWithUndo(
+				ctx,
+				{
+					op: "saveRegion",
+					path: target.path,
+					start: target.start,
+					end: target.end,
+					expected: target.original,
+					text: without,
+				},
+				"Nested callout deleted",
+			);
+		});
+	});
+}
+
 function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): void {
 	region.empty();
 	region.removeClass("is-editing");
@@ -1157,6 +1237,7 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 					);
 				},
 			);
+			wireNestedCallouts(view, ctx, target);
 		}
 	} else if (ctx.editable) {
 		const ghost = view.createDiv({ cls: "mica-ghost" });
@@ -1785,6 +1866,14 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		});
 
 		const bar = wrap.createDiv({ cls: "mica-grid-actions" });
+		const colStep = (delta: number, icon: string, label: string): void => {
+			iconButton(bar, "mica-minitool mica-col-step", icon, label).addEventListener("click", (e) => {
+				e.stopPropagation();
+				const next = Math.max(1, Math.min(24, cols + delta));
+				if (next !== cols) ctx.editable?.apply({ op: "setCols", path, cols: next });
+			});
+		};
+		colStep(-1, "minus", "One column fewer");
 		const colsBtn = bar.createEl("button", {
 			cls: "mica-cols-chip",
 			text: `${cols} col${cols === 1 ? "" : "s"}`,
@@ -1821,11 +1910,8 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			});
 			input.addEventListener("blur", commit);
 		});
+		colStep(1, "plus", "One more column");
 		bar.createDiv({ cls: "mica-nav-spacer" });
-		iconButton(bar, "mica-group-x", "trash-2", "Delete grid").addEventListener("click", (e) => {
-			e.stopPropagation();
-			deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted");
-		});
 	}
 }
 

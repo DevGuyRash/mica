@@ -32,7 +32,7 @@ export class VersionsModal extends Modal {
 	private contents = new Map<string, string>();
 	private working = "";
 	private selected: string = WORKING; // hash or WORKING
-	private baseMode: "previous" | "head" | string = "previous"; // or a hash
+	private baseMode: "previous" | "head" | string = "head"; // or a hash
 	private refine: "none" | "word" | "char";
 	private hideSyntax: boolean;
 	private ignoreWs: boolean;
@@ -138,7 +138,15 @@ export class VersionsModal extends Modal {
 	private baseKey(): string {
 		if (this.baseMode !== "previous" && this.baseMode !== "head") return this.baseMode;
 		const head = this.rows.find((r) => r.head);
-		if (this.baseMode === "head") return head?.meta.hash ?? WORKING;
+		if (this.baseMode === "head") {
+			// Comparing head with itself is meaningless — fall back to the
+			// version just before it so the default view always shows a diff.
+			if (head && this.selected === head.meta.hash) {
+				const idx = this.rows.findIndex((r) => r.meta.hash === head.meta.hash);
+				return this.rows[idx + 1]?.meta.hash ?? head.meta.hash;
+			}
+			return head?.meta.hash ?? WORKING;
+		}
 		// "previous": the version stored just before the selected one.
 		if (this.selected === WORKING) return head?.meta.hash ?? WORKING;
 		const idx = this.rows.findIndex((r) => r.meta.hash === this.selected);
@@ -184,12 +192,16 @@ export class VersionsModal extends Modal {
 			});
 		}
 
+		const baseHash = this.baseKey();
 		for (const r of this.rows) {
 			const row = list.createDiv({
-				cls: `mica-vrow ${this.selected === r.meta.hash ? "is-selected" : ""} ${r.head ? "is-head" : ""}`,
+				cls: `mica-vrow ${this.selected === r.meta.hash ? "is-selected" : ""} ${r.head ? "is-head" : ""} ${
+					baseHash === r.meta.hash ? "is-base" : ""
+				}`,
 			});
 			const title = row.createDiv({ cls: "mica-vrow-title" });
 			title.createSpan({ cls: "mica-vrow-n", text: `v${r.n}` });
+			if (baseHash === r.meta.hash) title.createSpan({ cls: "mica-vrow-basebadge", text: "base" });
 			if (r.meta.label) title.createSpan({ cls: "mica-vrow-label", text: r.meta.label });
 			if (r.head) {
 				const headIco = title.createSpan({ cls: "mica-vrow-head", attr: { "aria-label": "Current head" } });
@@ -309,9 +321,20 @@ export class VersionsModal extends Modal {
 
 	private renderToolbar(main: HTMLElement): void {
 		const bar = main.createDiv({ cls: "mica-versions-toolbar" });
+		/** A labelled control cluster — the toolbar reads as sentences. */
+		const group = (label: string): HTMLElement => {
+			const g = bar.createDiv({ cls: "mica-vt-group" });
+			g.createSpan({ cls: "mica-vt-label", text: label });
+			return g.createDiv({ cls: "mica-vt-body" });
+		};
 
-		const seg = <T extends string>(opts: [T, string][], value: T, pick: (v: T) => void): void => {
-			const wrap = bar.createDiv({ cls: "mica-seg" });
+		const seg = <T extends string>(
+			host: HTMLElement,
+			opts: [T, string][],
+			value: T,
+			pick: (v: T) => void,
+		): void => {
+			const wrap = host.createDiv({ cls: "mica-seg" });
 			for (const [v, label] of opts) {
 				const b = wrap.createEl("button", {
 					cls: `clickable-icon mica-pop-seg ${v === value ? "is-on" : ""}`,
@@ -328,9 +351,10 @@ export class VersionsModal extends Modal {
 		const resolved = bk === WORKING ? "working copy" : this.nameOf(bk);
 		const suffix =
 			this.baseMode === "previous" ? " · auto: before selected" : this.baseMode === "head" ? " · head" : " · pinned";
-		const baseBtn = bar.createEl("button", {
+		const baseHost = group("Compare against");
+		const baseBtn = baseHost.createEl("button", {
 			cls: "mica-base-pick",
-			text: `Base: ${resolved}${suffix}`,
+			text: `${resolved}${suffix}`,
 			attr: { type: "button", "aria-label": "Choose what the selected version is compared against" },
 		});
 		baseBtn.addEventListener("click", (e) => {
@@ -361,34 +385,37 @@ export class VersionsModal extends Modal {
 
 		// Meld-style refinement: word/char highlights are exclusive checkboxes;
 		// both off = plain line colors.
-		const check = (label: string, tip: string, on: boolean, flip: (next: boolean) => void): void => {
-			const lab = bar.createEl("label", { cls: "mica-diff-check", attr: { "aria-label": tip } });
+		const check = (host: HTMLElement, label: string, tip: string, on: boolean, flip: (next: boolean) => void): void => {
+			const lab = host.createEl("label", { cls: `mica-diff-check ${on ? "is-on" : ""}`, attr: { "aria-label": tip } });
 			const box = lab.createEl("input", { attr: { type: "checkbox" } });
 			box.checked = on;
 			lab.createSpan({ text: label });
 			box.addEventListener("change", () => flip(box.checked));
 		};
-		check("Word", "Highlight changed words inside changed lines", this.refine === "word", (next) => {
+		const hlHost = group("Highlight");
+		check(hlHost, "Word", "Highlight changed words inside changed lines", this.refine === "word", (next) => {
 			this.refine = next ? "word" : "none";
 			this.remember({ diffRefine: this.refine });
 			this.render();
 		});
-		check("Char", "Highlight changed characters inside changed lines", this.refine === "char", (next) => {
+		check(hlHost, "Char", "Highlight changed characters inside changed lines", this.refine === "char", (next) => {
 			this.refine = next ? "char" : "none";
 			this.remember({ diffRefine: this.refine });
 			this.render();
 		});
-		check("Hide syntax", "Ignore mica layout lines (:::, tab:) entirely", this.hideSyntax, (next) => {
+		const filterHost = group("Filters");
+		check(filterHost, "Hide syntax", "Ignore mica layout lines (:::, tab:) entirely", this.hideSyntax, (next) => {
 			this.hideSyntax = next;
 			this.remember({ diffHideSyntax: next });
 			this.render();
 		});
-		check("Ignore whitespace", "Collapse runs of spaces/tabs before comparing", this.ignoreWs, (next) => {
+		check(filterHost, "Whitespace", "Collapse runs of spaces/tabs before comparing", this.ignoreWs, (next) => {
 			this.ignoreWs = next;
 			this.remember({ diffIgnoreWs: next });
 			this.render();
 		});
 		seg(
+			group("Layout"),
 			[
 				["inline", "Inline"],
 				["side-by-side", "Split"],

@@ -566,3 +566,107 @@ describe("escape cancels everywhere", function () {
 		expect(after).toBe(before); // no colw written
 	});
 });
+
+describe("round 12: chip ✕, nested callout tools", function () {
+	it("the RIGHTMOST tab's ✕ deletes that tab", async function () {
+		await seedAndOpen(
+			"LastTabX.md",
+			"Intro.\n\n```mica id=ltx-1\ntab: One\na\ntab: Two\nb\ntab: Three\nc\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-chip").length >= 3),
+			{ timeout: 8000, timeoutMsg: "chips never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const chips = Array.from(document.querySelectorAll(".mica-lp .mica-tab-chip")) as HTMLElement[];
+			const last = chips[chips.length - 1];
+			(last.querySelector(".mica-chip-x") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				return !v.includes("tab: Three") && v.includes("tab: Two");
+			},
+			{ timeout: 8000, timeoutMsg: "the rightmost tab's ✕ did not delete it" },
+		);
+	});
+
+	it("nested callouts get tools: ✕ removes just the inner one", async function () {
+		await seedAndOpen(
+			"NestedTools.md",
+			"Intro.\n\n```mica id=nt-1\ntab: Main\n> [!note] Outer stays\n> outer body\n> > [!tip] Inner goes\n> > inner body\n> outer tail\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-nested-callout").length >= 1),
+			{ timeout: 8000, timeoutMsg: "the nested callout was never detected" },
+		);
+		await browser.executeObsidian(() => {
+			const inner = document.querySelector(".mica-lp .mica-nested-callout") as HTMLElement;
+			(inner.querySelector(".mica-region-x") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				return (
+					!v.includes("Inner goes") &&
+					v.includes("Outer stays") &&
+					v.includes("> outer body") &&
+					v.includes("> outer tail")
+				);
+			},
+			{ timeout: 8000, timeoutMsg: "the nested delete did not surgically remove the inner callout" },
+		);
+	});
+
+	it("a nested callout drags OUT beside its parent", async function () {
+		await seedAndOpen(
+			"NestedDrag.md",
+			"Intro.\n\n```mica id=nd-1\ntab: Main\n> [!note] Parent\n> > [!tip] Escapee\n> > freedom\n\nanchor prose below\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-nested-callout").length >= 1),
+			{ timeout: 8000, timeoutMsg: "nested callout never detected" },
+		);
+		await browser.executeObsidian(async () => {
+			const inner = document.querySelector(".mica-lp .mica-nested-callout") as HTMLElement;
+			const grip = inner.querySelector(".mica-region-grip") as HTMLElement;
+			const anchor = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("anchor prose"),
+			) as HTMLElement;
+			const ri = inner.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(ri.right - 10, ri.top + 6)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(ri.left + 40, ri.top + 20)));
+			await new Promise((r) => setTimeout(r, 30));
+			for (let tries = 0; tries < 30; tries++) {
+				const ra = anchor.getBoundingClientRect();
+				window.dispatchEvent(new PointerEvent("pointermove", opts(ra.left + 40, ra.bottom + 2)));
+				const ind = document.querySelector(".mica-drop-indicator") as HTMLElement | null;
+				if (ind && ind.style.display !== "none") break;
+				await new Promise((r) => setTimeout(r, 100));
+			}
+			const ra = anchor.getBoundingClientRect();
+			window.dispatchEvent(new PointerEvent("pointerup", opts(ra.left + 40, ra.bottom + 2)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				// The escapee is now a TOP-LEVEL callout (single >) after the anchor,
+				// and the parent no longer contains it.
+				return (
+					v.includes("\n> [!tip] Escapee") &&
+					v.indexOf("> [!tip] Escapee") > v.indexOf("anchor prose") &&
+					!v.includes("> > [!tip]")
+				);
+			},
+			{ timeout: 8000, timeoutMsg: "the nested callout never escaped to top level" },
+		);
+	});
+});
