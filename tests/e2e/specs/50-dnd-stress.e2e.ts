@@ -437,3 +437,155 @@ describe("round 7: column integrity + friendly-form safety", function () {
 		);
 	});
 });
+
+describe("round 10: sole-item safety + cross-block moves", function () {
+	it("dragging a tab's ONLY section within its own tab changes nothing", async function () {
+		const fixture = "Intro.\n\n```mica id=sole-1\ntab: Only\n> [!note] Lonely\ntab: Other\nother stuff\n```\n";
+		await seedAndOpen("SoleDrag.md", fixture);
+		await waitForSelector(".mica-lp .mica-region", 1);
+		const before = await docContains("");
+		await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Lonely"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const rr = region.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
+			// Wiggle strictly WITHIN the region's own bounds.
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.left + 60, rr.top + 20)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.left + 80, rr.top + rr.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rr.left + 80, rr.top + rr.height / 2)));
+		});
+		await new Promise((r) => setTimeout(r, 400));
+		const after = await docContains("");
+		expect(after).toBe(before);
+	});
+
+	it("dragging a grid's ONLY cell within the grid changes nothing", async function () {
+		const fixture = "Intro.\n\n```mica id=sole-2\n:::grid {cols=1}\n:::cell\nlone cell\n:::\n:::\n```\n";
+		await seedAndOpen("SoleCell.md", fixture);
+		await waitForSelector(".mica-lp .mica-cell", 1);
+		const before = await docContains("");
+		await browser.executeObsidian(async () => {
+			const cell = document.querySelector(".mica-lp .mica-cell") as HTMLElement;
+			const handle = cell.querySelector(".mica-cell-tool") as HTMLElement;
+			const rc = cell.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			handle.dispatchEvent(new PointerEvent("pointerdown", opts(rc.right - 10, rc.top + 8)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rc.left + 40, rc.top + 30)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rc.left + 60, rc.top + rc.height / 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rc.left + 60, rc.top + rc.height / 2)));
+		});
+		await new Promise((r) => setTimeout(r, 400));
+		const after = await docContains("");
+		expect(after).toBe(before);
+	});
+
+	it("a callout drags into ANOTHER mica block entirely", async function () {
+		await seedAndOpen(
+			"CrossBlock.md",
+			"First block:\n\n```mica id=xb-1\ntab: Src\n> [!tip] Traveler\n\nstays here\n```\n\nSecond block:\n\n```mica id=xb-2\ntab: Dst\ndestination prose\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length >= 2),
+			{ timeout: 8000, timeoutMsg: "both blocks never rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Traveler"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const dstRegion = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("destination prose"),
+			) as HTMLElement;
+			const rr = region.getBoundingClientRect();
+			const rd = dstRegion.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 20)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 40, rd.top - 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.left + 40, rd.top - 2)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				const b2 = v.indexOf("id=xb-2");
+				const traveler = v.indexOf("[!tip] Traveler");
+				// Landed inside block 2, gone from block 1, block 1 keeps its prose.
+				return traveler > b2 && v.indexOf("stays here") < b2 && v.lastIndexOf("[!tip] Traveler") === traveler;
+			},
+			{ timeout: 8000, timeoutMsg: "the callout never crossed into the second block" },
+		);
+	});
+
+	it("a whole GRID drags into another block", async function () {
+		await seedAndOpen(
+			"CrossGrid.md",
+			"A:\n\n```mica id=xg-1\nlead text\n\n:::grid {cols=1}\n:::cell\ncargo\n:::\n:::\n```\n\nB:\n\n```mica id=xg-2\ntab: Dock\ndock prose\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length >= 2),
+			{ timeout: 8000, timeoutMsg: "both blocks never rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const wrap = document.querySelector(".mica-lp .mica-grid-wrap") as HTMLElement;
+			const grip = wrap.querySelector(".mica-grid-tools .mica-region-grip") as HTMLElement;
+			const dst = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("dock prose"),
+			) as HTMLElement;
+			const rw = wrap.getBoundingClientRect();
+			const rd = dst.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rw.right - 10, rw.top + 8)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rw.left + 40, rw.top + 40)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.left + 40, rd.bottom + 2)));
+			await new Promise((r) => setTimeout(r, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.left + 40, rd.bottom + 2)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const v = await docContains("");
+				const b2 = v.indexOf("id=xg-2");
+				const grid = v.indexOf(":::grid");
+				return grid > b2 && v.indexOf("cargo") > b2 && v.indexOf("lead text") < b2;
+			},
+			{ timeout: 8000, timeoutMsg: "the grid never crossed into the second block" },
+		);
+	});
+});

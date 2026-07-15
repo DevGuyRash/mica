@@ -56,6 +56,9 @@ class MicaWidget extends WidgetType {
 				? { plugin: this.plugin, file: info.file, blockId: this.id, content: this.content }
 				: undefined;
 		const ui = this.blockUi();
+		// Cross-block drops need the TARGET block's op hook: expose it on the
+		// root (apply relocates the block by id, so a stale widget stays safe).
+		(el as HTMLElement & { micaApply?: (op: StructOp) => void }).micaApply = (op) => this.apply(view, op, ui);
 		renderCst(parseBlock(this.content), el, {
 			app: this.plugin.app,
 			sourcePath: info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "",

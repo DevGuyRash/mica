@@ -2303,13 +2303,16 @@ body[data-mica-grip="left"] .mica-grid-tools {
 
 /* ---------- Navigator popover (tree + drag-to-reorder) ---------- */
 .mica-navpop {
-	position: absolute;
-	z-index: 30;
+	position: fixed;
+	z-index: 999;
 	min-width: 240px;
 	max-width: 340px;
-	max-height: 50vh;
 	overflow-y: auto;
 	padding: 4px;
+}
+.mica-nav-row.is-current {
+	background: color-mix(in srgb, var(--mica-accent) 18%, transparent);
+	color: var(--text-normal);
 }
 .mica-nav-row {
 	display: flex;
@@ -2419,4 +2422,17 @@ body[data-mica-grip="left"] .mica-grid-tools {
 }
 .cm-line.mica-src-dir {
 	color: color-mix(in srgb, var(--mica-accent) 70%, var(--text-faint));
+}
+
+/* Spring-load pending: the hovered chip pulses until the panel switches. */
+.mica-tab-chip.mica-spring-pending {
+	animation: mica-spring-pulse 0.45s ease-in-out infinite alternate;
+}
+@keyframes mica-spring-pulse {
+	from {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	}
+	to {
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--mica-accent) 25%, transparent);
+	}
 }

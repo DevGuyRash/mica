@@ -24,6 +24,9 @@ export interface DragSpec {
 	fromPath: number[];
 	/** Present for region drags: the leaf run `[start, end)` within `fromPath`. */
 	region?: { start: number; end: number };
+	/** The dragged thing's serialization — enables CROSS-BLOCK moves (the
+	 *  target block re-parses it via insertLeaf). Regions/groups only. */
+	text?: string;
 }
 
 interface Slot {
@@ -38,7 +41,15 @@ interface Slot {
 	cx: number;
 	cy: number;
 	/** The owning container's bounds (pointer gating) and nesting depth. */
-	container: { el: HTMLElement; left: number; top: number; right: number; bottom: number; depth: number };
+	container: {
+		el: HTMLElement;
+		rootEl: HTMLElement;
+		left: number;
+		top: number;
+		right: number;
+		bottom: number;
+		depth: number;
+	};
 	/** Grid column metadata (cell drags): the flow indices of this column's
 	 *  cells plus the same-column landing indices above/below this gap. */
 	col?: { up?: number; down?: number; members: number[] };
@@ -49,6 +60,8 @@ interface Slot {
  *  merely toggles classes — so only rects are re-read per recompute. */
 interface SlotContainer {
 	el: HTMLElement;
+	/** The `.mica` block root this container belongs to. */
+	rootEl: HTMLElement;
 	parentPath: number[];
 	len: number;
 	horizontal: boolean;
@@ -56,8 +69,12 @@ interface SlotContainer {
 	kids: { el: HTMLElement; idx: number }[];
 }
 
+/** Block roots expose their op hook for cross-block drops. */
+export type BlockApplyHost = HTMLElement & { micaApply?: (op: StructOp) => void };
+
 interface ActiveDrag {
 	spec: DragSpec;
+	sourceRoot: HTMLElement;
 	source: HTMLElement;
 	ghost: HTMLElement;
 	indicator: HTMLElement;
@@ -160,12 +177,13 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 	const containers = collectContainers(root, spec);
 	active = {
 		spec,
+		sourceRoot: root,
 		source: item,
 		ghost,
 		indicator,
 		scroller: root.closest(".cm-scroller, .markdown-preview-view") as HTMLElement | null,
 		containers,
-		slots: computeSlots(containers, spec),
+		slots: computeSlots(containers, spec, root),
 		current: null,
 		markedEl: null,
 		offsetX: e.clientX - rect.left,
@@ -178,6 +196,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 			ghost.remove();
 			indicator.remove();
 			active?.markedEl?.removeClass("mica-drop-inside");
+			document.querySelector(".mica-spring-pending")?.removeClass("mica-spring-pending");
 			item.removeClass("mica-dragging");
 			document.body.removeClass("mica-dnd-active");
 		},
@@ -199,27 +218,44 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 	const wanted = kind === "group" || kind === "region" ? "group" : kind;
 	const fromKey = fromPath.join(".");
 	const containers: SlotContainer[] = [];
-	for (const el of Array.from(root.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
-		const parentPath = parsePath(el.dataset.path);
-		const parentKey = parentPath.join(".");
-		// Never offer slots inside the dragged node's own subtree (regions are
-		// leaves — they have no subtree to exclude).
-		if (!spec.region && fromKey && (parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))) continue;
-		// A kid belongs to THIS container only if its nearest container ancestor
-		// is `el`. Match via the parent (cells are containers themselves, and a
-		// region nested in a cell must never count as a grid child — its idx
-		// would poison column membership and the no-op exclusion).
-		const kids = Array.from(el.querySelectorAll<HTMLElement>(":scope [data-mica-idx]"))
-			.filter((k) => k.parentElement?.closest("[data-mica-container]") === el)
-			.map((k) => ({ el: k, idx: Number(k.dataset.micaIdx ?? "0") }));
-		containers.push({
-			el,
-			parentPath,
-			len: Number(el.dataset.len ?? "0"),
-			horizontal: el.dataset.axis === "x",
-			depth: parentPath.length,
-			kids,
-		});
+	// Regions and groups can move BETWEEN blocks (their serialization rides
+	// the drag) — sweep every block in the same editor pane. Numeric paths
+	// collide across blocks, so subtree/no-op exclusions stay source-scoped.
+	const crossable = Boolean(spec.text) && (kind === "region" || kind === "group");
+	const scope = root.closest(".cm-editor, .markdown-preview-view");
+	const roots: HTMLElement[] =
+		crossable && scope ? Array.from(scope.querySelectorAll<HTMLElement>(".mica")) : [root];
+	for (const rootEl of roots) {
+		for (const el of Array.from(rootEl.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
+			if (el.closest(".mica") !== rootEl) continue; // nested block safety
+			const parentPath = parsePath(el.dataset.path);
+			const parentKey = parentPath.join(".");
+			// Never offer slots inside the dragged node's own subtree (regions
+			// are leaves — no subtree). Source block only: other blocks' paths
+			// are a different coordinate space.
+			if (
+				rootEl === root &&
+				!spec.region &&
+				fromKey &&
+				(parentKey === fromKey || parentKey.startsWith(`${fromKey}.`))
+			)
+				continue;
+			// A kid belongs to THIS container only if its nearest container
+			// ancestor is `el` (a region nested in a cell must never count as a
+			// grid child — its idx would poison column membership).
+			const kids = Array.from(el.querySelectorAll<HTMLElement>(":scope [data-mica-idx]"))
+				.filter((k) => k.parentElement?.closest("[data-mica-container]") === el)
+				.map((k) => ({ el: k, idx: Number(k.dataset.micaIdx ?? "0") }));
+			containers.push({
+				el,
+				rootEl,
+				parentPath,
+				len: Number(el.dataset.len ?? "0"),
+				horizontal: el.dataset.axis === "x",
+				depth: parentPath.length,
+				kids,
+			});
+		}
 	}
 	return containers;
 }
@@ -234,7 +270,7 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
  * reorders that column and crossing into another column is an explicit,
  * visible act. Indicators span the full gap they represent.
  */
-function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
+function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLElement): Slot[] {
 	const { kind, fromPath } = spec;
 	const slots: Slot[] = [];
 	const fromKey = fromPath.join(".");
@@ -244,6 +280,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 	/** Drop the slots that would be NO-OPS — an indicator must never promise a
 	 *  move that changes nothing (the gaps hugging the dragged item itself). */
 	const isNoop = (s: Slot): boolean => {
+		if (s.container.rootEl !== sourceRoot) return false; // other block: never a no-op
 		const pk = s.parentPath.join(".");
 		if (spec.region) {
 			return pk === fromKey && s.index >= spec.region.start && s.index <= spec.region.end;
@@ -262,6 +299,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec): Slot[] {
 		if (rect.width === 0 || rect.height === 0) continue; // hidden panel
 		const container = {
 			el: entry.el,
+			rootEl: entry.rootEl,
 			left: rect.left,
 			top: rect.top,
 			right: rect.right,
@@ -432,6 +470,20 @@ function dragMove(e: PointerEvent): void {
 	// One pass: a deeper hit resets the running best (this fires per
 	// pointermove — no throwaway candidate arrays).
 	const M = 12;
+	// The deepest container under the pointer — measured over ALL containers,
+	// slotted or not. If IT offers no valid slot (e.g. a sole section dragged
+	// within its own tab), show NOTHING rather than bubbling to an ancestor:
+	// a two-pixel drag must never pop content out to the block root.
+	// STRICT bounds here (no ±M): forgiveness widens where you may drop,
+	// it must never widen where dropping is denied — a point just below a
+	// group belongs to the parent, not to the group's body.
+	let deepestUnder = -1;
+	for (const c of d.containers) {
+		if (c.depth <= deepestUnder) continue;
+		const r = c.el.getBoundingClientRect();
+		if (r.width > 0 && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom)
+			deepestUnder = c.depth;
+	}
 	let best: Slot | null = null;
 	let bestDist = Number.POSITIVE_INFINITY;
 	let bestDepth = -1;
@@ -439,6 +491,7 @@ function dragMove(e: PointerEvent): void {
 		const c = s.container;
 		if (e.clientX < c.left - M || e.clientX > c.right + M || e.clientY < c.top - M || e.clientY > c.bottom + M)
 			continue;
+		if (c.depth < deepestUnder) continue;
 		if (c.depth < bestDepth) continue;
 		if (c.depth > bestDepth) {
 			bestDepth = c.depth;
@@ -485,14 +538,17 @@ function springLoad(e: PointerEvent): void {
 	const chip = chipWrap?.querySelector<HTMLElement>(".mica-tab-btn:not(.is-active)") ?? null;
 	if (chip === d.springEl) return;
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
+	document.querySelector(".mica-spring-pending")?.removeClass("mica-spring-pending");
 	d.springEl = chip;
 	if (!chip) return;
+	chipWrap?.addClass("mica-spring-pending");
 	d.springTimer = window.setTimeout(() => {
+		chipWrap?.removeClass("mica-spring-pending");
 		if (!active || active.springEl !== chip) return;
 		chip.click();
 		// The panel switch re-lays-out the block — recompute geometry.
-		active.slots = computeSlots(active.containers, active.spec);
-	}, 450);
+		active.slots = computeSlots(active.containers, active.spec, active.sourceRoot);
+	}, 300);
 }
 
 /** Scroll the note while dragging near the viewport's top/bottom edge. */
@@ -514,7 +570,8 @@ function autoScroll(e: PointerEvent): void {
 			const before = scroller.scrollTop;
 			scroller.scrollTop += dy;
 			// Pinned at an edge: nothing moved, so the slots are already right.
-			if (scroller.scrollTop !== before) active.slots = computeSlots(active.containers, active.spec);
+			if (scroller.scrollTop !== before)
+				active.slots = computeSlots(active.containers, active.spec, active.sourceRoot);
 			active.scrollRaf = window.requestAnimationFrame(step);
 		};
 		d.scrollRaf = window.requestAnimationFrame(step);
@@ -532,6 +589,29 @@ function finishDrag(commit: boolean): void {
 	d.cleanup();
 	if (!commit || !d.current) return;
 	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => void }).apply;
+	if (d.current.container.rootEl !== d.sourceRoot) {
+		// CROSS-BLOCK: the serialization rides the drag; the target re-parses
+		// it (insertLeaf handles prose, callouts, code, and whole groups), the
+		// source deletes its original. Target first — a failure duplicates,
+		// never loses.
+		const text = d.spec.text;
+		const targetApply = (d.current.container.rootEl as BlockApplyHost).micaApply;
+		if (!text || !targetApply) return;
+		targetApply({ op: "insertLeaf", path: d.current.parentPath, at: d.current.index, text });
+		if (d.spec.region) {
+			apply?.({
+				op: "saveRegion",
+				path: d.spec.fromPath,
+				start: d.spec.region.start,
+				end: d.spec.region.end,
+				expected: text,
+				text: "",
+			});
+		} else {
+			apply?.({ op: "deleteNode", path: d.spec.fromPath });
+		}
+		return;
+	}
 	if (d.spec.region) {
 		apply?.({
 			op: "moveRegion",

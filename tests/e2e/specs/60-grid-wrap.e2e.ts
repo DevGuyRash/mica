@@ -280,7 +280,8 @@ describe("grid row resize", function () {
 			() =>
 				browser.executeObsidian(({ app, obsidian }) => {
 					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
-					return /:::grid \{cols=2 rowh=\d+\}/.test(v);
+					// Pair semantics: the divider writes BOTH neighbours' heights.
+					return /:::grid \{cols=2 rowh=\d+,\d+\}/.test(v);
 				}),
 			{ timeout: 8000, timeoutMsg: "rowh never landed in the grid header" },
 		);
@@ -441,13 +442,17 @@ describe("syntax highlighting", function () {
 			() =>
 				browser.executeObsidian(({ app, obsidian }) => {
 					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-					view?.editor.setCursor({ line: 3, ch: 0 });
+					// Reassert only when Obsidian's late cursor-restore moved it —
+					// hammering setCursor every poll churns the very updates we
+					// are waiting for.
+					const cur = view?.editor.getCursor();
+					if (cur && cur.line !== 3) view?.editor.setCursor({ line: 3, ch: 0 });
 					return (
 						document.querySelectorAll(".cm-line.mica-src-tab").length >= 1 &&
 						document.querySelectorAll(".cm-line.mica-src-fence").length >= 1
 					);
 				}),
-			{ timeout: 8000, timeoutMsg: "structure lines never tinted in source view" },
+			{ timeout: 12000, timeoutMsg: "structure lines never tinted in source view" },
 		);
 	});
 });

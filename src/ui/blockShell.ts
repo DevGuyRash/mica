@@ -357,7 +357,7 @@ function renderFoldBar(
 	key: string,
 	icon: string,
 	summary: string,
-	drag?: { path: number[]; region?: { start: number; end: number }; itemEl: HTMLElement },
+	drag?: { path: number[]; region?: { start: number; end: number }; itemEl: HTMLElement; text?: string },
 ): void {
 	host.addClass("is-folded");
 	const bar = host.createDiv({ cls: "mica-fold-bar" });
@@ -384,8 +384,8 @@ function renderFoldBar(
 		makeDraggable(
 			grip,
 			drag.region
-				? { kind: "region", fromPath: drag.path, region: drag.region }
-				: { kind: "group", fromPath: drag.path },
+				? { kind: "region", fromPath: drag.path, region: drag.region, text: drag.text }
+				: { kind: "group", fromPath: drag.path, text: drag.text },
 			drag.path,
 			(op) => ctx.editable?.apply(op),
 			drag.itemEl,
@@ -429,19 +429,33 @@ interface NavRow {
  * among its SIBLINGS — drop before a sibling, or after the parent's last row.
  */
 function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e: MouseEvent): void {
-	root.querySelector(".mica-navpop")?.remove();
-	const pop = root.createDiv({ cls: "mica-popover mica-navpop" });
-	const rootRect = root.getBoundingClientRect();
-	pop.style.left = `${Math.max(8, e.clientX - rootRect.left - 260)}px`;
-	pop.style.top = `${e.clientY - rootRect.top + 12}px`;
+	document.body.querySelector(".mica-navpop")?.remove();
+	// Body-level + fixed: never clipped by the block, and it SURVIVES the
+	// block re-renders that reveal/unfold trigger — so it stays open while
+	// the user jumps between several targets. Outside click / Esc closes.
+	const pop = document.body.createDiv({ cls: "mica-popover mica-navpop" });
+	const left = Math.min(Math.max(8, e.clientX - 260), window.innerWidth - 348);
+	const top = Math.min(e.clientY + 12, window.innerHeight - 120);
+	pop.style.left = `${left}px`;
+	pop.style.top = `${top}px`;
+	pop.style.maxHeight = `${Math.max(120, window.innerHeight - top - 16)}px`;
 	const dismiss = (): void => {
 		pop.remove();
 		document.removeEventListener("pointerdown", onOut, true);
+		document.removeEventListener("keydown", onKey, true);
 	};
 	const onOut = (ev: PointerEvent): void => {
 		if (!pop.contains(ev.target as Node)) dismiss();
 	};
+	const onKey = (ev: KeyboardEvent): void => {
+		if (ev.key === "Escape") {
+			ev.preventDefault();
+			ev.stopPropagation();
+			dismiss();
+		}
+	};
 	document.addEventListener("pointerdown", onOut, true);
+	document.addEventListener("keydown", onKey, true);
 
 	const ICONS: Record<string, string> = {
 		tabs: "app-window",
@@ -591,8 +605,10 @@ function wireNavRow(
 			clearMarks();
 			row.el.removeClass("mica-nav-dragging");
 			if (!dragging) {
-				// Plain click: reveal the thing (unfold + switch tabs as needed).
-				dismiss();
+				// Plain click: reveal (unfold + switch tabs) but STAY OPEN —
+				// the user may want to jump to several things in a row.
+				for (const r of rows) r.el.removeClass("is-current");
+				row.el.addClass("is-current");
 				revealNode(ctx, root, {
 					path: row.path,
 					kind: row.revealKind,
@@ -1048,6 +1064,7 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 			path: target.path,
 			region: { start: target.start, end: target.end },
 			itemEl: region,
+			text: target.original,
 		});
 		return;
 	}
@@ -1063,7 +1080,12 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 			grip.addEventListener("click", (e) => e.stopPropagation());
 			makeDraggable(
 				grip,
-				{ kind: "region", fromPath: target.path, region: { start: target.start, end: target.end } },
+				{
+					kind: "region",
+					fromPath: target.path,
+					region: { start: target.start, end: target.end },
+					text: target.original,
+				},
 				target.path,
 				(op) => ctx.editable?.apply(op),
 				region,
@@ -1147,7 +1169,11 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	const tkey = nodeFoldKey(path);
 	if (ctx.ui?.folded.has(tkey)) {
 		const n = node.children.filter((c) => c.kind === "container" && c.name === "tab").length;
-		renderFoldBar(wrap, ctx, tkey, "app-window", `Tabs · ${n}`, { path, itemEl: wrap });
+		renderFoldBar(wrap, ctx, tkey, "app-window", `Tabs · ${n}`, {
+			path,
+			itemEl: wrap,
+			text: serializeCst({ children: [node] }),
+		});
 		return;
 	}
 	const navOuter = wrap.createDiv({ cls: "mica-tab-nav-outer" });
@@ -1263,7 +1289,13 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			},
 		);
 		const grip = iconButton(sticky, "mica-group-grip", "grip-vertical", "Drag to move this tab group");
-		makeDraggable(grip, "group", path, (op) => ctx.editable?.apply(op), wrap);
+		makeDraggable(
+			grip,
+			{ kind: "group", fromPath: path, text: serializeCst({ children: [node] }) },
+			path,
+			(op) => ctx.editable?.apply(op),
+			wrap,
+		);
 		iconButton(sticky, "mica-group-x", "trash-2", "Delete tab group").addEventListener("click", (e) => {
 			e.stopPropagation();
 			deleteWithUndo(ctx, { op: "deleteNode", path }, "Tab group deleted");
@@ -1346,11 +1378,18 @@ function startRename(
 	input.focus();
 	input.select();
 	let done = false;
+	const stop = (): void => document.removeEventListener("pointerdown", onOutside, true);
 	const commit = (): void => {
 		if (done) return;
 		done = true;
+		stop();
 		ctx.editable?.apply({ op: "renameTab", path, index, title: input.value.trim() || "Tab" });
 	};
+	// Clicking a non-focusable surface never fires blur — commit explicitly.
+	const onOutside = (ev: PointerEvent): void => {
+		if (ev.target !== input) commit();
+	};
+	document.addEventListener("pointerdown", onOutside, true);
 	input.addEventListener("keydown", (e) => {
 		if (e.key === "Enter") {
 			e.preventDefault();
@@ -1358,6 +1397,7 @@ function startRename(
 		} else if (e.key === "Escape") {
 			e.preventDefault();
 			done = true;
+			stop();
 			input.remove();
 			btn.style.display = "";
 		}
@@ -1502,7 +1542,9 @@ function mountGridResizers(
 		rowStrips.push(strip);
 		strip.addEventListener("dblclick", (e) => {
 			e.stopPropagation();
+			// Reset the PAIR this divider sits between.
 			rowHeights[r] = null;
+			rowHeights[r + 1] = null;
 			ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
 		});
 		strip.addEventListener("pointerdown", (down) => {
@@ -1510,12 +1552,21 @@ function mountGridResizers(
 			down.preventDefault();
 			down.stopPropagation();
 			const startY = down.clientY;
-			const startH = rowHeights[r] ?? Math.round(cells[r * cols]?.getBoundingClientRect().height ?? 80);
-			let lastH: number | null = null;
+			// The divider moves BETWEEN the pair: the upper row takes what the
+			// lower gives (each floors at 40px / its content height).
+			const measured = (row: number): number =>
+				Math.round(cells[row * cols]?.getBoundingClientRect().height ?? 80);
+			const startA = rowHeights[r] ?? measured(r);
+			const startB = rowHeights[r + 1] ?? measured(r + 1);
+			let lastA: number | null = null;
+			let lastB: number | null = null;
 			const move = (e: PointerEvent): void => {
-				lastH = Math.max(40, Math.round(startH + (e.clientY - startY)));
+				const dy = e.clientY - startY;
+				lastA = Math.max(40, Math.round(startA + dy));
+				lastB = Math.max(40, Math.round(startB - dy));
 				const live = [...rowHeights];
-				live[r] = lastH;
+				live[r] = lastA;
+				live[r + 1] = lastB;
 				applyRowTemplate(grid, live);
 				layout();
 			};
@@ -1523,8 +1574,9 @@ function mountGridResizers(
 				window.removeEventListener("pointermove", move, true);
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
-				if (e.type !== "pointerup" || lastH === null || Math.abs(e.clientY - startY) < 3) return;
-				rowHeights[r] = lastH;
+				if (e.type !== "pointerup" || lastA === null || Math.abs(e.clientY - startY) < 3) return;
+				rowHeights[r] = lastA;
+				rowHeights[r + 1] = lastB;
 				ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
 			};
 			window.addEventListener("pointermove", move, true);
@@ -1552,6 +1604,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		renderFoldBar(wrap, ctx, gkey, "layout-grid", `Grid · ${cells} cell${cells === 1 ? "" : "s"}`, {
 			path,
 			itemEl: wrap,
+			text: serializeCst({ children: [node] }),
 		});
 		return;
 	}
@@ -1630,7 +1683,13 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		});
 		const topGrip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move this grid");
 		topGrip.addEventListener("click", (e) => e.stopPropagation());
-		makeDraggable(topGrip, "group", path, (op) => ctx.editable?.apply(op), wrap);
+		makeDraggable(
+			topGrip,
+			{ kind: "group", fromPath: path, text: serializeCst({ children: [node] }) },
+			path,
+			(op) => ctx.editable?.apply(op),
+			wrap,
+		);
 		iconButton(tools, "mica-minitool mica-region-x", "x", "Delete grid").addEventListener("click", (e) => {
 			e.stopPropagation();
 			deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted");
