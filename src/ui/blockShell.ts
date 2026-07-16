@@ -147,6 +147,17 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 			el.addEventListener(type, (e) => {
 				const t = e.target as HTMLElement;
 				if (t.closest("a, .internal-link")) return;
+				// Our stopPropagation starves Obsidian's document-level
+				// menu-close listener: menus opened from the widget would
+				// linger (and stack) until Esc. Close them ourselves. The
+				// synthetic events skip "pointerdown" so the click-outside
+				// editor handler (pointerdown-only) never miscounts a
+				// widget-internal click as outside.
+				if (type === "pointerdown" && document.querySelector("body > .menu")) {
+					for (const evt of ["mousedown", "click"] as const) {
+						document.body.dispatchEvent(new MouseEvent(evt, { bubbles: true }));
+					}
+				}
 				e.stopPropagation();
 				// A TRUSTED mousedown on text-less chrome (empty regions, cell
 				// padding, bars, strips) lets the browser place the native
@@ -196,6 +207,8 @@ function applyBlockAttrs(el: HTMLElement, attrs: Record<string, string>): void {
 	if (attrs["radius"]) el.style.setProperty("--mica-radius", `${Number(attrs["radius"]) || 0}px`);
 	if (attrs["density"]) el.setAttribute("data-mica-density", attrs["density"]);
 	if (attrs["tabstyle"]) el.setAttribute("data-mica-tabstyle", attrs["tabstyle"]);
+	// Structural outlines: absent attr = follow the global setting (body class).
+	if (attrs["outline"]) el.setAttribute("data-mica-outline", attrs["outline"]);
 	el.setAttribute("data-mica-wrap", attrs["wrap"] === "off" ? "off" : "on");
 }
 
@@ -847,6 +860,11 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 		["connected", "Connected"],
 		["underline", "Underline"],
 		["pill", "Pill"],
+	]);
+	seg("Outlines", "outline", [
+		["", "Default"],
+		["on", "On"],
+		["off", "Off"],
 	]);
 
 	const radiusRow = pop.createDiv({ cls: "mica-appearance-row" });
@@ -1679,12 +1697,45 @@ function mountGridResizers(
 	// The ⊕ pill is the ONE click-to-add target; the strip itself only ever
 	// resizes (drag) or resets (double-click) — a bare strip click did both
 	// jobs before and the first click of a double-click inserted a column.
+	// Activation is pointer-captured with a movement tolerance: a native
+	// click dies when the pointer drifts a few pixels between down and up,
+	// which read as "the button just didn't trigger".
 	const plusPill = (strip: HTMLElement, tip: string, run: () => void): void => {
 		const pill = iconButton(strip, "mica-boundary-plus", "plus", tip);
-		pill.addEventListener("pointerdown", (e) => e.stopPropagation()); // never start a resize
+		// Pointer-gesture activation: capture keeps the pointerup on the pill
+		// so a few pixels of drift still count as a click (a native click
+		// dies on any drift — "the button just didn't trigger"), while >8px
+		// is a deliberate move and does nothing. The click handler is only
+		// the programmatic fallback (a real gesture already ran or was a
+		// drift-reject; either way the click must not double-fire).
+		let pointerGesture = false;
+		let ran = false;
 		pill.addEventListener("click", (e) => {
-			e.stopPropagation();
-			run();
+			e.stopPropagation(); // edge strips also listen for click
+			if (!pointerGesture && !ran) run();
+			pointerGesture = false;
+			ran = false;
+		});
+		pill.addEventListener("pointerdown", (e) => {
+			pointerGesture = true;
+			ran = false;
+			e.stopPropagation(); // never arm the strip's resize
+			e.preventDefault();
+			try {
+				pill.setPointerCapture(e.pointerId);
+			} catch {
+				// Synthetic events carry no active pointer — capture is moot.
+			}
+			const sx = e.clientX;
+			const sy = e.clientY;
+			const up = (ue: PointerEvent): void => {
+				pill.removeEventListener("pointerup", up);
+				if (Math.hypot(ue.clientX - sx, ue.clientY - sy) <= 8) {
+					ran = true;
+					run();
+				}
+			};
+			pill.addEventListener("pointerup", up);
 		});
 	};
 

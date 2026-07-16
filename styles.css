@@ -2145,7 +2145,6 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	bottom: 0;
 	width: 9px;
 	cursor: col-resize;
-	z-index: 4;
 	display: flex;
 	align-items: stretch;
 	justify-content: center;
@@ -2167,7 +2166,6 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	right: 6px;
 	height: 9px;
 	cursor: row-resize;
-	z-index: 4;
 	display: flex;
 	align-items: center;
 	justify-content: stretch;
@@ -2618,6 +2616,20 @@ body.mica-dnd-active .mica-edge-add {
 .mica-boundary-plus {
 	pointer-events: auto;
 	cursor: pointer;
+	/* Above BOTH strips (they are z-auto so pills stack in the grid's own
+	   context): where strips cross — every column pill sits on the row
+	   boundary in a 2-row grid — the later-painted strip used to swallow
+	   the other's pill clicks entirely. */
+	z-index: 6;
+}
+/* Dodge the crossings: each pill slides along ITS OWN line away from the
+   strip midpoint, so the 2×2 case (both boundaries at dead center) never
+   stacks the two pills on the same spot. */
+.mica-col-resizer .mica-boundary-plus {
+	top: calc(50% - 26px);
+}
+.mica-row-resizer .mica-boundary-plus {
+	left: calc(50% - 26px);
 }
 
 /* ---------- Excel-style column/row handles (move · menu) ---------- */
@@ -2697,4 +2709,30 @@ body.mica-dnd-active .mica-row-handle {
 	opacity: 0 !important;
 	pointer-events: none !important;
 	visibility: hidden !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Structural outlines: subtle always-on borders for tabs groups, sections,
+   grids, and cells. Global default = body.mica-outlines (settings toggle);
+   per-block fence attr `outline=on|off` overrides either way.
+   ═══════════════════════════════════════════════════════════════════════ */
+body.mica-outlines .mica:not([data-mica-outline="off"]) .mica-tabs,
+.mica[data-mica-outline="on"] .mica-tabs {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+}
+body.mica-outlines .mica:not([data-mica-outline="off"]) .mica-grid-wrap,
+.mica[data-mica-outline="on"] .mica-grid-wrap {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+}
+body.mica-outlines .mica:not([data-mica-outline="off"]) .mica-cell,
+.mica[data-mica-outline="on"] .mica-cell {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+}
+body.mica-outlines .mica:not([data-mica-outline="off"]) .mica-region,
+.mica[data-mica-outline="on"] .mica-region {
+	border: 1px solid color-mix(in srgb, var(--background-modifier-border) 70%, transparent);
+	border-radius: 6px;
 }

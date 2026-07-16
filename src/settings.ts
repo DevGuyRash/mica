@@ -66,6 +66,9 @@ export interface MicaSettings {
 	/** What clicking outside an inline editor does. */
 	editorClickOutside: "nothing" | "cancel" | "save";
 	/** Show line numbers in the markdown editors. */
+	/** Draw structural outlines (tabs, sections, cells) by default; per-block
+	 * `outline=on|off` fence attr overrides. */
+	showOutlines: boolean;
 	editorLineNumbers: boolean;
 	/** Render whitespace characters in the markdown editors. */
 	editorWhitespace: boolean;
@@ -104,6 +107,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	blockHeaderMode: "hover",
 	dragHandlePosition: "right",
 	editorClickOutside: "nothing",
+	showOutlines: false,
 	editorLineNumbers: false,
 	editorWhitespace: false,
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
@@ -401,6 +405,19 @@ export class MicaSettingTab extends PluginSettingTab {
 				t.setValue(s.showVersionChip).onChange(async (v) => {
 					s.showVersionChip = v;
 					this.micaPlugin.refreshViews();
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Structural outlines")
+			.setDesc(
+				"Draw subtle borders around tabs, sections, and grid cells so the structure is always visible. Each block can override this via its appearance popover.",
+			)
+			.addToggle((t) =>
+				t.setValue(s.showOutlines).onChange(async (v) => {
+					s.showOutlines = v;
+					this.micaPlugin.applyStyleVars();
 					await save();
 				}),
 			);

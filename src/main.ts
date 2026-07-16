@@ -247,6 +247,7 @@ export default class MicaPlugin extends Plugin {
 			void this.saveSettings();
 		});
 		b.toggleClass("mica-animate", s.animations);
+		b.toggleClass("mica-outlines", s.showOutlines);
 		const set = (k: string, v: string | null): void => {
 			if (v === null) b.style.removeProperty(k);
 			else b.style.setProperty(k, v);

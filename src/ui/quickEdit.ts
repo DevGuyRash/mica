@@ -177,6 +177,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	};
 
 	const editor = new MdEditor(host, {
+		app: ctx.app,
 		initial: initial ?? target.original,
 		placeholder: "Write markdown — Ctrl+Enter saves, Esc cancels",
 		onSave: () => commit(),

@@ -1060,3 +1060,137 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 		expect(["ok", "no callout button (overflowed)"]).toContain(state);
 	});
 });
+
+describe("round 16: pill hit-testing, menu dismissal, outlines", function () {
+	it("column pills are hittable with 2 rows (strips no longer swallow them) and tolerate drift", async function () {
+		await seedAndOpen(
+			"PillHit.md",
+			"Intro.\n\n```mica id=ph-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-col-resizer .mica-boundary-plus").length >= 1,
+				),
+			{ timeout: 8000, timeoutMsg: "column pill never rendered" },
+		);
+		// Test isolation: earlier specs may leave body-level popovers behind,
+		// and elementFromPoint would hit them instead of the grid.
+		await browser.executeObsidian(() => {
+			document.querySelectorAll("body > .mica-popover, body > .mica-tb-popover, body > .menu").forEach((n) => {
+				n.remove();
+			});
+		});
+		const hit = await browser.executeObsidian(() => {
+			const pill = document.querySelector(".mica-lp .mica-col-resizer .mica-boundary-plus") as HTMLElement;
+			const r = pill.getBoundingClientRect();
+			const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+			return pill.contains(at) || at === pill ? "pill" : (at?.className ?? "?").toString().slice(0, 40);
+		});
+		expect(hit).toBe("pill");
+		// Activation tolerates a small drift between down and up (capture).
+		await browser.executeObsidian(async () => {
+			const pill = document.querySelector(".mica-lp .mica-col-resizer .mica-boundary-plus") as HTMLElement;
+			const r = pill.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 21,
+			});
+			pill.dispatchEvent(new PointerEvent("pointerdown", opts(r.left + 9, r.top + 9)));
+			await new Promise((res) => setTimeout(res, 30));
+			pill.dispatchEvent(new PointerEvent("pointerup", opts(r.left + 13, r.top + 12)));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("{cols=3}");
+				}),
+			{ timeout: 8000, timeoutMsg: "the drifted pill press did not insert a column" },
+		);
+	});
+
+	it("widget-internal clicks close open menus; only one menu at a time", async function () {
+		await seedAndOpen("MenuClose.md", "Intro.\n\n```mica id=mc-1\ntab: Main\nfirst\n\nsecond\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-insert-zone").length >= 2),
+			{ timeout: 8000, timeoutMsg: "insert zones never rendered" },
+		);
+		// Open a menu from zone 1.
+		await browser.executeObsidian(() => {
+			(document.querySelectorAll(".mica-lp .mica-insert-zone .mica-insert-plus")[0] as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll("body > .menu").length === 1),
+			{ timeout: 8000, timeoutMsg: "first menu never opened" },
+		);
+		// Full pointer sequence on zone 2: the old menu must close and only
+		// the new one may remain.
+		await browser.executeObsidian(async () => {
+			const zone = document.querySelectorAll(".mica-lp .mica-insert-zone .mica-insert-plus")[1] as HTMLElement;
+			const r = zone.getBoundingClientRect();
+			const opts: PointerEventInit = {
+				bubbles: true,
+				cancelable: true,
+				clientX: r.left + r.width / 2,
+				clientY: r.top + r.height / 2,
+				button: 0,
+				pointerId: 22,
+			};
+			zone.dispatchEvent(new PointerEvent("pointerdown", opts));
+			zone.dispatchEvent(new MouseEvent("mousedown", opts));
+			await new Promise((res) => setTimeout(res, 30));
+			zone.dispatchEvent(new PointerEvent("pointerup", opts));
+			zone.dispatchEvent(new MouseEvent("mouseup", opts));
+			zone.dispatchEvent(new MouseEvent("click", opts));
+		});
+		await browser.pause(300);
+		const counts = await browser.executeObsidian(() => document.querySelectorAll("body > .menu").length);
+		expect(counts).toBe(1);
+		// A plain widget-background click closes menus outright.
+		await browser.executeObsidian(async () => {
+			const body = document.querySelector(".mica-lp .mica-block-body, .mica-lp .mica") as HTMLElement;
+			const r = body.getBoundingClientRect();
+			const opts: PointerEventInit = {
+				bubbles: true,
+				cancelable: true,
+				clientX: r.left + 4,
+				clientY: r.top + 4,
+				button: 0,
+				pointerId: 23,
+			};
+			body.dispatchEvent(new PointerEvent("pointerdown", opts));
+			body.dispatchEvent(new MouseEvent("mousedown", opts));
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll("body > .menu").length === 0),
+			{ timeout: 8000, timeoutMsg: "the menu never closed on a widget click" },
+		);
+	});
+
+	it("structural outlines follow the global toggle and the per-block override", async function () {
+		await seedAndOpen("Outlines.md", "Intro.\n\n```mica id=ol-1\ntab: Main\nbody\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length === 1),
+			{ timeout: 8000, timeoutMsg: "tabs never rendered" },
+		);
+		const widths = await browser.executeObsidian(({ app }) => {
+			type P = { settings: { showOutlines: boolean }; applyStyleVars(): void };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, P> } }).plugins.plugins["mica"];
+			const tabs = document.querySelector(".mica-lp .mica-tabs") as HTMLElement;
+			const off = getComputedStyle(tabs).borderTopWidth;
+			plugin.settings.showOutlines = true;
+			plugin.applyStyleVars();
+			const on = getComputedStyle(tabs).borderTopWidth;
+			plugin.settings.showOutlines = false;
+			plugin.applyStyleVars();
+			return { off, on };
+		});
+		expect(widths.off).toBe("0px");
+		expect(widths.on).toBe("1px");
+	});
+});

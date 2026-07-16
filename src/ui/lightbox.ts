@@ -59,6 +59,7 @@ export class EditorLightbox extends Modal {
 		this.previewEl = split.createDiv({ cls: "mica-lightbox-preview" });
 
 		this.editor = new MdEditor(editorHost, {
+			app: this.opts.app,
 			initial: this.opts.initial,
 			placeholder: "Write markdown — Ctrl/Cmd+Enter saves, Esc cancels",
 			onSave: () => this.save(),

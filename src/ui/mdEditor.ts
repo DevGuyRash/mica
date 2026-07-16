@@ -7,6 +7,7 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+import { Scope, type App } from "obsidian";
 
 /** Editor view options (line numbers, whitespace) — persisted by the host
  *  plugin and applied to every editor, live-toggleable per instance. */
@@ -53,6 +54,12 @@ export interface MdEditorOpts {
 	/** Fires on selection movement too (cheap consumers only, e.g. stats). */
 	onSelection?: () => void;
 	autofocus?: boolean;
+	/** When provided, save/cancel keys also register on a focus-scoped
+	 * Obsidian keymap Scope: global hotkeys (Obsidian's or a community
+	 * plugin's, e.g. one binding Ctrl+Enter) run at window capture and eat
+	 * the REAL keystroke before the shadow editor's keymap ever sees it —
+	 * a pushed Scope outranks them while the editor is focused. */
+	app?: App;
 }
 
 /**
@@ -163,6 +170,7 @@ export class MdEditor {
 	/** The light-DOM host (carries `.mica-mdeditor` for layout + tests). */
 	readonly host: HTMLElement;
 	private readonly viewOpts = new Compartment();
+	private popScope: (() => void) | null = null;
 
 	constructor(parent: HTMLElement, opts: MdEditorOpts) {
 		this.host = parent.createDiv({ cls: "mica-mdeditor" });
@@ -170,6 +178,44 @@ export class MdEditor {
 		const mount = document.createElement("div");
 		mount.style.display = "contents";
 		root.appendChild(mount);
+
+		// Global hotkeys (Obsidian's own, or a community plugin's Ctrl+Enter)
+		// run at window capture and consume REAL keystrokes before the shadow
+		// editor's keymap sees them. A Scope pushed while we hold focus
+		// outranks them; everything we don't bind falls through to the app.
+		if (opts.app) {
+			const app = opts.app;
+			const scope = new Scope(app.scope);
+			// The CM keymap below handles the key when the event reaches the
+			// shadow editor first (target phase) — it preventDefaults, and the
+			// scope stands down. The scope earns its keep when a global hotkey
+			// would otherwise consume the key before CM ever sees it.
+			scope.register(["Mod"], "Enter", (evt) => {
+				if (!evt.defaultPrevented) opts.onSave();
+				return false;
+			});
+			scope.register([], "Escape", (evt) => {
+				if (!evt.defaultPrevented) opts.onCancel();
+				return false;
+			});
+			let pushed = false;
+			const push = (): void => {
+				if (!pushed) {
+					app.keymap.pushScope(scope);
+					pushed = true;
+				}
+			};
+			const pop = (): void => {
+				if (pushed) {
+					app.keymap.popScope(scope);
+					pushed = false;
+				}
+			};
+			// focusin/focusout are composed — they cross the shadow boundary.
+			this.host.addEventListener("focusin", push);
+			this.host.addEventListener("focusout", pop);
+			this.popScope = pop;
+		}
 
 		const saveKeys = keymap.of([
 			{
@@ -250,6 +296,7 @@ export class MdEditor {
 	}
 
 	destroy(): void {
+		this.popScope?.();
 		openInstances.delete(this);
 		this.view.destroy();
 		this.host.remove();
