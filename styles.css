@@ -2384,6 +2384,25 @@ body[data-mica-grip="left"] .mica-grid-tools {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Selection armor: widget CHROME must be incapable of hosting a native
+   selection anchor. A trusted click can park the browser caret in chrome
+   (WebDriver focus, native defaults); DOM mutations then relocate it and
+   CodeMirror syncs it as "cursor inside the block" — the whole widget
+   flips to raw source. user-select:none makes that anchor impossible;
+   prose, inputs, and the shadow editors re-enable selection where it
+   actually means something.
+   ═══════════════════════════════════════════════════════════════════════ */
+.mica {
+	user-select: none;
+}
+.mica .mica-md,
+.mica .mica-mdeditor,
+.mica input,
+.mica textarea {
+	user-select: text;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Add-affordance SSOT: every "add something here" control shares the same
    cursor, dashes, and accent hover — insert zones, empty-region ghosts,
    the grid ghost tile, and the column strips speak one language.
@@ -2649,6 +2668,17 @@ body.mica-dnd-active .mica-edge-add {
 	border-radius: 2px;
 	background: var(--mica-accent);
 	pointer-events: none;
+}
+/* WHAT is moving: the dragged column/row tints while its handle drags. */
+.mica-cell.mica-move-source {
+	outline: 2px dashed color-mix(in srgb, var(--mica-accent) 55%, transparent);
+	outline-offset: -2px;
+	opacity: 0.75;
+}
+body.mica-handle-dragging .mica-col-handle.is-dragging,
+body.mica-handle-dragging .mica-row-handle.is-dragging {
+	opacity: 1 !important;
+	color: var(--mica-accent);
 }
 /* During a handle drag only the indicator guides. */
 body.mica-handle-dragging * {

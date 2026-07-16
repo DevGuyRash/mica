@@ -453,7 +453,18 @@ describe("syntax highlighting", function () {
 					// the lines in every failing run).
 					view?.editor.focus();
 					const cur = view?.editor.getCursor();
-					if (cur && cur.line !== 3) view?.editor.setCursor({ line: 3, ch: 0 });
+					if (cur && cur.line !== 3) {
+						// Reveal now requires a USER-driven selection (the field
+						// ignores programmatic cursor moves) — annotate like a
+						// real keyboard/pointer select.
+						const cm = (
+							view?.editor as unknown as {
+								cm: { dispatch(spec: { selection: { anchor: number }; userEvent: string }): void };
+							}
+						).cm;
+						const pos = view?.editor.posToOffset({ line: 3, ch: 0 }) ?? 0;
+						cm.dispatch({ selection: { anchor: pos }, userEvent: "select" });
+					}
 					return (
 						document.querySelectorAll(".cm-line.mica-src-tab").length >= 1 &&
 						document.querySelectorAll(".cm-line.mica-src-fence").length >= 1
@@ -472,6 +483,8 @@ describe("syntax highlighting", function () {
 				return JSON.stringify({
 					file: view?.file?.path,
 					cursor: view?.editor.getCursor(),
+					docFocus: document.hasFocus(),
+					active: (document.activeElement?.className ?? "").toString().slice(0, 40),
 					lp: document.querySelectorAll(".mica-lp").length,
 					srcClasses: document.querySelectorAll("[class*=mica-src]").length,
 					cmLines: lines.length,
@@ -881,6 +894,90 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 			() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length,
 		);
 		expect(regions).toBe(2);
+	});
+
+	it("a TRUSTED click on an empty cell never flips the block to raw source", async function () {
+		// Native pointer input (unlike synthetic dispatches) lets the browser
+		// place a caret at the nearest editable position — without the
+		// mousedown preventDefault guard that position is OUTSIDE the
+		// contenteditable=false widget, i.e. inside the block's range, and
+		// the whole block reveals as raw source (the round-15 bug).
+		await seedAndOpen(
+			"TrustedClick.md",
+			"Intro.\n\n```mica id=tc-1\n:::grid {cols=2}\n:::cell\nfilled\n:::\n:::cell\n:::\n:::\n```\nAfter.\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-cell").length === 2),
+			{ timeout: 8000, timeoutMsg: "grid never rendered" },
+		);
+		// Element-based WebDriver clicks are TRUSTED input with chromedriver
+		// computing the coordinates — raw action({x,y}) math desyncs from the
+		// page under Electron zoom.
+		await browser.executeObsidian(() => {
+			const cells = document.querySelectorAll(".mica-lp .mica-cell");
+			(cells[1] as HTMLElement).querySelector(".mica-region")?.setAttribute("data-e2e", "empty-region");
+		});
+		await $('.mica-lp [data-e2e="empty-region"]').click();
+		await browser.pause(400);
+		const state = await browser.executeObsidian(() => ({
+			lp: document.querySelectorAll(".mica-lp").length,
+			menu: document.querySelectorAll("body > .menu").length,
+		}));
+		expect(state.lp).toBe(1); // the widget survived the trusted click
+		expect(state.menu).toBe(1); // and the insert menu opened
+		// The menu itself is Obsidian machinery (and real menus close on the
+		// window-focus churn the headless driver produces between trusted
+		// clicks) — choose "Text" synthetically; the regression under test is
+		// the REGION mousedown above.
+		await browser.executeObsidian(() => {
+			const items = Array.from(document.querySelectorAll("body > .menu .menu-item"));
+			(items.find((x) => (x.textContent ?? "").trim() === "Text") as HTMLElement)?.click();
+		});
+		await browser
+			.waitUntil(
+				() =>
+					browser.executeObsidian(
+						() =>
+							document.querySelectorAll(".mica-lp").length === 1 &&
+							document.querySelectorAll(".mica-lp .mica-region.is-editing").length === 1,
+					),
+				{ timeout: 8000, timeoutMsg: "the inline editor did not open (or the block flipped raw)" },
+			)
+			.catch(async (err: Error) => {
+				const diag = await browser.executeObsidian(() =>
+					JSON.stringify({
+						lp: document.querySelectorAll(".mica-lp").length,
+						editing: document.querySelectorAll(".mica-region.is-editing").length,
+						menus: document.querySelectorAll("body > .menu").length,
+						docFocus: document.hasFocus(),
+						active: (document.activeElement?.className ?? "").toString().slice(0, 40),
+						preview: document.querySelectorAll(".cm-preview-code-block").length,
+					}),
+				);
+				console.log("TRUSTED FAIL DIAG:", diag);
+				throw err;
+			});
+	});
+
+	it("a stale over-long rowh list lays out no phantom tracks", async function () {
+		// 4 cells at cols=2 = 2 rows, but rowh carries THREE entries (a column
+		// count change left it stale) — the 300px third track must not render.
+		await seedAndOpen(
+			"StaleRowh.md",
+			"Intro.\n\n```mica id=sr-1\n:::grid {cols=2 rowh=auto,auto,300}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-cell").length === 4),
+			{ timeout: 8000, timeoutMsg: "grid never rendered" },
+		);
+		const gap = await browser.executeObsidian(() => {
+			const grid = document.querySelector(".mica-lp .mica-grid") as HTMLElement;
+			const cells = grid.querySelectorAll(".mica-cell");
+			const last = cells[cells.length - 1].getBoundingClientRect();
+			const g = grid.getBoundingClientRect();
+			return Math.round(g.bottom - last.bottom);
+		});
+		expect(gap).toBeLessThan(60); // padding only — no 300px phantom row
 	});
 
 	it("one visual gap offers one insert line (tab tail owns the gap below the group)", async function () {

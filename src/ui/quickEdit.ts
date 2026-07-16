@@ -120,6 +120,29 @@ document.addEventListener("keydown", onDocKeydown, true);
  */
 export function openQuickEdit(region: HTMLElement, ctx: RenderCtx, target: RegionTarget, initial?: string): void {
 	if (region.hasClass("is-editing")) return;
+	// Deferred one tick: opened from an Obsidian Menu item, the menu's hide()
+	// restores focus to the OUTER editor right after onClick. If our inner
+	// editor is already mounted and focused by then, that refocus parks the
+	// document selection at the widget host's DOM point — CodeMirror's
+	// MutationObserver maps it INSIDE the block and the whole widget flips to
+	// raw source, killing this editor as it opens. Mounting after the menu
+	// has fully closed leaves the final focus (and selection) with us.
+	region.addClass("is-editing"); // reserve now — a double click must not stack two mounts
+	window.setTimeout(() => {
+		region.removeClass("is-editing");
+		if (!region.isConnected) return; // the block re-rendered meanwhile
+		// A native caret parked in this region (a trusted click plants one in
+		// chrome even past preventDefault) would be RELOCATED by the mount's
+		// DOM surgery and synced by CodeMirror as "cursor inside the block" —
+		// flipping the widget to raw source. No anchor, no relocation, no flip.
+		const s = window.getSelection();
+		if (s?.anchorNode && region.contains(s.anchorNode)) s.removeAllRanges();
+		openQuickEditNow(region, ctx, target, initial);
+	}, 0);
+}
+
+function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTarget, initial?: string): void {
+	if (region.hasClass("is-editing")) return;
 	region.empty();
 	region.removeClass("is-editable");
 	region.addClass("is-editing");

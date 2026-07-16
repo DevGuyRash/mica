@@ -145,7 +145,32 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 		el.setAttribute("data-mica-guarded", "1");
 		for (const type of ["pointerdown", "mousedown", "click"] as const) {
 			el.addEventListener(type, (e) => {
-				if (!(e.target as HTMLElement).closest("a, .internal-link")) e.stopPropagation();
+				const t = e.target as HTMLElement;
+				if (t.closest("a, .internal-link")) return;
+				e.stopPropagation();
+				// A TRUSTED mousedown on text-less chrome (empty regions, cell
+				// padding, bars, strips) lets the browser place the native
+				// caret at the nearest EDITABLE position — which is outside
+				// this contenteditable=false widget, i.e. in the outer
+				// document INSIDE the block's range: the block then flips to
+				// raw source. stopPropagation cannot stop a native default
+				// action — only preventDefault can. Allow the default only
+				// where it means something: rendered prose (text selection)
+				// and real inputs/editors (focus).
+				if (
+					type === "mousedown" &&
+					!t.closest('.mica-md, input, textarea, [contenteditable="true"], .mica-mdeditor')
+				) {
+					e.preventDefault();
+					// Belt AND suspenders: some trusted-input paths (WebDriver
+					// focus steps, browser quirks) plant the caret in chrome
+					// regardless. A later DOM mutation would relocate it and
+					// CodeMirror would sync it as an in-block cursor. Evict it.
+					queueMicrotask(() => {
+						const s = window.getSelection();
+						if (s?.anchorNode && el.contains(s.anchorNode)) s.removeAllRanges();
+					});
+				}
 			});
 		}
 	}
@@ -1997,6 +2022,11 @@ function mountGridHandles(
 		menu.showAtMouseEvent(e);
 	};
 
+	// The cells of column c / row r — tinted while their handle drags so the
+	// user sees WHAT is moving, not just where it lands.
+	const memberCells = (axis: "x" | "y", idx: number): HTMLElement[] =>
+		cells.filter((_, i) => (axis === "x" ? i % cols === idx : Math.floor(i / cols) === idx));
+
 	/** Wire one handle: click = menu, drag ≥5px = reorder with indicator. */
 	const wire = (
 		handle: HTMLElement,
@@ -2017,6 +2047,7 @@ function mountGridHandles(
 			down.preventDefault();
 			down.stopPropagation();
 			const start = axis === "x" ? down.clientX : down.clientY;
+			const movers = memberCells(axis, from);
 			let target = from;
 			let dragging = false;
 			const boundaries = (): number[] => {
@@ -2037,6 +2068,8 @@ function mountGridHandles(
 				if (!dragging && Math.abs(pos - start) < 5) return;
 				dragging = true;
 				document.body.addClass("mica-handle-dragging");
+				handle.addClass("is-dragging");
+				movers.forEach((m) => m.addClass("mica-move-source"));
 				const bs = boundaries();
 				// The slot whose span holds the pointer (clamped to the lattice).
 				let t = count - 1;
@@ -2055,6 +2088,8 @@ function mountGridHandles(
 				window.removeEventListener("pointercancel", cancel, true);
 				window.removeEventListener("keydown", onEsc, true);
 				document.body.removeClass("mica-handle-dragging");
+				handle.removeClass("is-dragging");
+				movers.forEach((m) => m.removeClass("mica-move-source"));
 				indicator.style.display = "none";
 			};
 			const onEsc = (ke: KeyboardEvent): void => {
@@ -2102,7 +2137,7 @@ function mountGridHandles(
 				const er = edgeEl?.getBoundingClientRect();
 				if (!er) return;
 				const x = (b < cols ? er.left : er.right) - rect.left;
-				indicator.style.display = "";
+				indicator.style.display = "block";
 				indicator.style.left = `${x - 1.5}px`;
 				indicator.style.top = "4px";
 				indicator.style.width = "3px";
@@ -2131,7 +2166,7 @@ function mountGridHandles(
 				const er = edgeEl?.getBoundingClientRect();
 				if (!er) return;
 				const y = (b < rowCount ? er.top : er.bottom) - rect.top;
-				indicator.style.display = "";
+				indicator.style.display = "block";
 				indicator.style.top = `${y - 1.5}px`;
 				indicator.style.left = "4px";
 				indicator.style.height = "3px";
@@ -2200,13 +2235,17 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		grid.style.gridTemplateColumns = widths.map((w) => `minmax(0, ${w}fr)`).join(" ");
 	}
 	// Per-row MIN heights ("rowh=140,auto,200"): rows can be spaced out but
-	// never clip content (minmax(Xpx, auto)).
+	// never clip content (minmax(Xpx, auto)). NEVER emit more tracks than
+	// actual rows — a stale longer list (e.g. after a column-count change)
+	// would lay out phantom explicit tracks as dead space below the grid.
+	const rowCount = Math.max(1, Math.ceil(node.children.length / cols));
 	const rowHeights: (number | null)[] = (titleAttr(node.title, "rowh") ?? "")
 		.split(",")
 		.map((t) => {
 			const n = Number(t);
 			return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
-		});
+		})
+		.slice(0, rowCount);
 	applyRowTemplate(grid, rowHeights);
 
 	node.children.forEach((c, idx) => {

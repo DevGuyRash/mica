@@ -1,6 +1,6 @@
 import { editorInfoField, editorLivePreviewField, MarkdownRenderChild } from "obsidian";
 import { Prec, StateEffect, StateField } from "@codemirror/state";
-import type { EditorState, Extension, Text, Transaction } from "@codemirror/state";
+import type { EditorState, Extension, Text } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
@@ -222,18 +222,17 @@ export function scanCached(state: EditorState): ScanCache {
  * cursor. Runs in a StateField (not a ViewPlugin) because CodeMirror only
  * accepts block-level decorations when they are provided directly.
  */
-function build(plugin: MicaPlugin, state: EditorState): DecorationSet {
+function build(plugin: MicaPlugin, state: EditorState, sel: RevealSel): DecorationSet {
 	if (!state.field(editorLivePreviewField, false)) return Decoration.none;
-	const sel = state.selection.main;
 	const ranges = [];
 	const { blocks, attrs, tos, contents } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
 		const b = blocks[i];
 		if (!b.closed) continue;
 		const to = tos[i];
-		// Reveal the raw source while the caret/selection is inside the block
-		// (arrow-keying in, or an explicit click on the revealed source).
-		if (sel.from <= to && sel.to >= b.start) continue;
+		// Reveal the raw source while the USER's caret/selection is inside the
+		// block (arrow-keying in, or an explicit click on revealed source).
+		if (sel && sel.from <= to && sel.to >= b.start) continue;
 		ranges.push(
 			Decoration.replace({
 				widget: new MicaWidget(plugin, b.id, b.start, contents[i], attrs[i] ?? {}),
@@ -244,20 +243,24 @@ function build(plugin: MicaPlugin, state: EditorState): DecorationSet {
 	return Decoration.set(ranges, true);
 }
 
+/** The selection reveal decisions are made against — null reveals nothing. */
+type RevealSel = { from: number; to: number } | null;
+
 /**
- * True when a selection-only transaction leaves every block's reveal state
- * (caret inside ⇒ raw source shown) as it was — the current decoration set is
- * then still exact and a rebuild would only churn identical widgets.
+ * True when moving from reveal-selection `a` to `b` leaves every block's
+ * reveal state (caret inside ⇒ raw source shown) as it was — the current
+ * decoration set is then still exact and a rebuild would only churn
+ * identical widgets.
  */
-function revealUnchanged(tr: Transaction): boolean {
-	const { blocks, tos } = scanCached(tr.state);
-	const a = tr.startState.selection.main;
-	const b = tr.state.selection.main;
+function revealUnchanged(state: EditorState, a: RevealSel, b: RevealSel): boolean {
+	const { blocks, tos } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
 		const blk = blocks[i];
 		if (!blk.closed) continue;
 		const to = tos[i];
-		if ((a.from <= to && a.to >= blk.start) !== (b.from <= to && b.to >= blk.start)) return false;
+		const ain = a ? a.from <= to && a.to >= blk.start : false;
+		const bin = b ? b.from <= to && b.to >= blk.start : false;
+		if (ain !== bin) return false;
 	}
 	return true;
 }
@@ -271,25 +274,55 @@ export function bumpConfigEpoch(): void {
 	configEpoch++;
 }
 
+/** Decorations plus the user-driven selection they were revealed against. */
+interface RevealState {
+	deco: DecorationSet;
+	sel: RevealSel;
+}
+
 /** The Live Preview editor extension. Registered via `registerEditorExtension`. */
 export function micaLivePreview(plugin: MicaPlugin): Extension {
-	const field = StateField.define<DecorationSet>({
+	const field = StateField.define<RevealState>({
 		create(state) {
-			return build(plugin, state);
+			// Nothing is revealed at create time: the restore-cursor Obsidian
+			// places on file open is programmatic, not the user asking for raw
+			// source (it routinely lands inside a block that starts at offset 0).
+			return { deco: build(plugin, state, null), sel: null };
 		},
-		update(deco, tr) {
+		update(value, tr) {
 			const modeFlipped =
 				tr.state.field(editorLivePreviewField, false) !== tr.startState.field(editorLivePreviewField, false);
 			const refresh = tr.effects.some((e) => e.is(micaRefreshEffect));
-			if (tr.docChanged || modeFlipped || refresh) return build(plugin, tr.state);
-			if (!tr.selection) return deco;
+			// The ONLY selections allowed to reveal raw source are USER-driven
+			// ones (pointer/keyboard selects, typing, undo). Selections synced
+			// back from the DOM without a user event — Obsidian Menu close
+			// restoring focus, cold-start cursor restore, native caret escapes —
+			// must never flip a block open under the user (they read as "it
+			// suddenly shows the whole code block").
+			const userDriven =
+				tr.isUserEvent("select") ||
+				tr.isUserEvent("input") ||
+				tr.isUserEvent("delete") ||
+				tr.isUserEvent("move") ||
+				tr.isUserEvent("undo") ||
+				tr.isUserEvent("redo");
+			const main = tr.state.selection.main;
+			const sel: RevealSel = userDriven
+				? { from: main.from, to: main.to }
+				: value.sel && tr.docChanged
+					? { from: tr.changes.mapPos(value.sel.from), to: tr.changes.mapPos(value.sel.to) }
+					: value.sel;
+			if (tr.docChanged || modeFlipped || refresh) return { deco: build(plugin, tr.state, sel), sel };
+			if (!tr.selection || !userDriven) return sel === value.sel ? value : { deco: value.deco, sel };
 			// Outside Live Preview `deco` is already Decoration.none (mode flips
 			// always rebuild), which is exactly what build() would return.
-			if (!tr.state.field(editorLivePreviewField, false)) return deco;
+			if (!tr.state.field(editorLivePreviewField, false)) return { deco: value.deco, sel };
 			// Cursor-only transaction: rebuild only if a block's reveal flipped.
-			return revealUnchanged(tr) ? deco : build(plugin, tr.state);
+			return revealUnchanged(tr.state, value.sel, sel)
+				? { deco: value.deco, sel }
+				: { deco: build(plugin, tr.state, sel), sel };
 		},
-		provide: (f) => EditorView.decorations.from(f),
+		provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 	});
 	// Beat Obsidian's built-in fenced-code handling.
 	return Prec.highest(field);

@@ -476,6 +476,16 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             *title = format!("{{{attrs}}}");
             let c = ":".repeat((*colons).max(3));
             *open_line = format!("{c}grid {{{attrs}}}\n");
+            // A different column count changes the ROW count — prune a now-
+            // longer rowh list or its extra entries lay out as phantom empty
+            // tracks (dead space below the grid).
+            let new_cols = (*cols).max(1);
+            let len = match node_at(cst, path) {
+                Some(Node::Container { children, .. }) => children.len(),
+                _ => 0,
+            };
+            let rows = len.div_ceil(new_cols).max(1);
+            edit_list_attr(cst, path, "rowh", |parts| parts.truncate(rows));
             true
         }
         StructOp::MoveCellInColumn { path, from, to } => move_cell_in_column(cst, path, *from, *to),
@@ -2660,6 +2670,25 @@ mod tests {
         assert_eq!(
             out,
             ":::grid {cols=2 rowh=200,100}\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn set_cols_prunes_a_now_longer_rowh_list() {
+        // 6 cells: 3 rows at cols=2 → 2 rows at cols=3. The third rowh entry
+        // would otherwise become a phantom empty track below the grid.
+        let src = ":::grid {cols=2 rowh=100,200,300}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\ne\n:::\n:::cell\nf\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::SetCols {
+                path: vec![0],
+                cols: 3,
+            },
+        );
+        assert!(ok);
+        assert!(
+            out.starts_with(":::grid {cols=3 rowh=100,200}\n"),
+            "rowh must shrink with the row count: {out}"
         );
     }
 
