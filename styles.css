@@ -2595,3 +2595,76 @@ body.mica-dnd-active .mica-edge-add {
 	pointer-events: none !important;
 	visibility: hidden !important;
 }
+/* The ⊕ pill is a real button now — the strip resizes, the pill inserts. */
+.mica-boundary-plus {
+	pointer-events: auto;
+	cursor: pointer;
+}
+
+/* ---------- Excel-style column/row handles (move · menu) ---------- */
+.mica-col-handle,
+.mica-row-handle {
+	position: absolute;
+	z-index: 3;
+	width: 26px;
+	height: 14px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 7px;
+	background: rgb(from var(--background-primary) r g b / 1);
+	color: var(--text-faint);
+	opacity: 0;
+	transition:
+		opacity 100ms ease,
+		color 100ms ease;
+	transform: translateX(-50%);
+	cursor: grab;
+}
+.mica-row-handle {
+	width: 14px;
+	height: 26px;
+	transform: translateY(-50%);
+}
+.mica-col-handle .svg-icon,
+.mica-row-handle .svg-icon {
+	width: 10px !important;
+	height: 10px !important;
+}
+.mica-grid-wrap:hover .mica-col-handle,
+.mica-grid-wrap:hover .mica-row-handle {
+	opacity: 1;
+}
+.mica-col-handle:hover,
+.mica-row-handle:hover {
+	color: var(--mica-accent);
+	border-color: color-mix(in srgb, var(--mica-accent) 55%, var(--background-modifier-border));
+}
+.mica-handle-indicator {
+	position: absolute;
+	display: none;
+	z-index: 4;
+	border-radius: 2px;
+	background: var(--mica-accent);
+	pointer-events: none;
+}
+/* During a handle drag only the indicator guides. */
+body.mica-handle-dragging * {
+	cursor: grabbing !important;
+}
+body.mica-handle-dragging .mica-col-resizer,
+body.mica-handle-dragging .mica-row-resizer,
+body.mica-handle-dragging .mica-edge-add,
+body.mica-handle-dragging .mica-cell-bar,
+body.mica-handle-dragging .mica-grid-tools {
+	opacity: 0 !important;
+	pointer-events: none !important;
+}
+body.mica-dnd-active .mica-col-handle,
+body.mica-dnd-active .mica-row-handle {
+	opacity: 0 !important;
+	pointer-events: none !important;
+	visibility: hidden !important;
+}

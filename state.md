@@ -11,12 +11,19 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
   feel is the remaining unknown.
 - **Commits are unsigned** (1Password SSH signer needs interactive approval).
   Re-sign with: `git rebase --exec 'git commit --amend --no-edit -S' 65a1e9e`.
-- **One-time signature churn**: blocks containing callouts get a single
-  spurious auto-snapshot on first edit (the parser now splits callouts into
-  their own leaves, which changed those blocks' content signatures once).
+- **One-time signature churn**: blocks containing callouts or multi-paragraph
+  prose get a single spurious auto-snapshot on first edit (the parser now
+  splits callouts AND paragraphs into their own leaves; each split changed
+  those blocks' content signatures once). Signatures are paragraph-normalized
+  now, so further leaf-granularity changes cannot churn them again.
 
 ## Risks to watch
 
+- The content signature joins sorted paragraph texts with a single space, so
+  "a b" in one paragraph and "a" + "b" as two paragraphs collide (a join/split
+  edit with identical words can miss one auto-snapshot). Pre-existing, rare,
+  and only skips a snapshot — a fix means re-framing the digest (length-
+  prefixed entries) and a full signature churn; defer until one is needed.
 - Obsidian Sync racing a `ledger.jsonl` append mid-write is reasoned-safe
   (append-only + order-independent fold) but not reproduced under real Sync —
   one two-device test belongs on the release checklist (`RELEASING.md`).

@@ -20,6 +20,11 @@ export type StructOp =
 	| { op: "moveCellInColumn"; path: number[]; from: number; to: number }
 	| { op: "insertColumn"; path: number[]; at: number }
 	| { op: "insertRow"; path: number[]; atRow: number }
+	| { op: "deleteColumn"; path: number[]; at: number }
+	| { op: "deleteRow"; path: number[]; atRow: number }
+	| { op: "moveColumn"; path: number[]; from: number; to: number }
+	| { op: "moveRow"; path: number[]; from: number; to: number }
+	| { op: "clearCell"; path: number[]; index: number }
 	| { op: "setGroupAttr"; path: number[]; key: string; value: string | null }
 	| { op: "insertGroup"; path: number[]; at: number; kind: "tabs" | "grid" }
 	| { op: "insertLeaf"; path: number[]; at: number; text: string }

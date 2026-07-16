@@ -137,6 +137,53 @@ pub enum StructOp {
         /// Row index (`0..=rows`).
         at_row: usize,
     },
+    /// Delete the COLUMN at index `at`: the cell at that column leaves every
+    /// row, `cols` drops, and a `colw` list loses its entry. Rejected for the
+    /// last remaining column (delete the grid instead).
+    DeleteColumn {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Column index (`0..cols`).
+        at: usize,
+    },
+    /// Delete the ROW at index `at_row` (its consecutive cells); a `rowh`
+    /// list loses its entry. Deleting the only row removes the grid.
+    #[serde(rename_all = "camelCase")]
+    DeleteRow {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Row index (`0..rows`).
+        at_row: usize,
+    },
+    /// Move the whole COLUMN `from` to column index `to`; the `colw` entry
+    /// travels with it. A ragged grid is padded rectangular first (row-major
+    /// flow cannot express mid-grid raggedness).
+    MoveColumn {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Current column index.
+        from: usize,
+        /// Target column index (after the move).
+        to: usize,
+    },
+    /// Move the whole ROW `from` to row index `to`; the `rowh` entry travels
+    /// with it. A ragged grid is padded rectangular first.
+    MoveRow {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Current row index.
+        from: usize,
+        /// Target row index (after the move).
+        to: usize,
+    },
+    /// Empty the cell at flow `index` — grid geometry stays intact (removing
+    /// a cell from flow would shift every later cell across columns).
+    ClearCell {
+        /// Path of the grid.
+        path: Vec<usize>,
+        /// Flow index of the cell.
+        index: usize,
+    },
     /// Write or clear a `{key=value}` header token on the GROUP container
     /// (grid or directive tabs) at `path` — e.g. `colw` fractions.
     #[serde(rename_all = "camelCase")]
@@ -236,6 +283,64 @@ pub enum StructOp {
 /// assert_eq!(serialize_impl(&cst), "tab: B\nbody\n");
 /// ```
 pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
+    let changed = apply_op_inner(cst, op);
+    if changed {
+        // Every successful op re-establishes the leaf-seam invariant tree-wide
+        // (a missed splice site would silently merge sections — see below).
+        normalize_tree(&mut cst.children);
+    }
+    changed
+}
+
+/// Two content leaves flush against each other re-parse as ONE prose run on
+/// the next round-trip (or lazily continue a callout in raw markdown) — the
+/// "my sections combined" bug. After any successful op, restore the
+/// invariant everywhere: a blank-line leaf between adjacent content leaves,
+/// and no whitespace-only leaf at a container's edges (a leading one renders
+/// as a phantom newline in editors). Normalizing the whole tree (instead of
+/// just the spliced list) makes "forgot a call site" impossible; blocks are
+/// small and ops are per-gesture, so the walk is cheap.
+fn normalize_tree(nodes: &mut Vec<Node>) {
+    normalize_leaf_seams(nodes);
+    for n in nodes {
+        if let Node::Container { children, .. } = n {
+            normalize_tree(children);
+        }
+    }
+}
+
+fn normalize_leaf_seams(children: &mut Vec<Node>) {
+    let is_ws = |n: &Node| matches!(n, Node::Leaf { text, .. } if text.trim().is_empty());
+    let is_content = |n: &Node| matches!(n, Node::Leaf { text, .. } if !text.trim().is_empty());
+    while children.first().is_some_and(is_ws) {
+        children.remove(0);
+    }
+    while children.last().is_some_and(is_ws) {
+        children.pop();
+    }
+    let mut i = 0;
+    while i + 1 < children.len() {
+        if is_content(&children[i]) && is_content(&children[i + 1]) {
+            // A final line without its newline needs the terminator too.
+            let sep = match &children[i] {
+                Node::Leaf { text, .. } if !text.ends_with('\n') => "\n\n",
+                _ => "\n",
+            };
+            children.insert(
+                i + 1,
+                Node::Leaf {
+                    text: sep.to_string(),
+                    is_code: false,
+                },
+            );
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
     match op {
         StructOp::SaveRegion {
             path,
@@ -376,6 +481,11 @@ pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
         StructOp::MoveCellInColumn { path, from, to } => move_cell_in_column(cst, path, *from, *to),
         StructOp::InsertColumn { path, at } => insert_column(cst, path, *at),
         StructOp::InsertRow { path, at_row } => insert_row(cst, path, *at_row),
+        StructOp::DeleteColumn { path, at } => delete_column(cst, path, *at),
+        StructOp::DeleteRow { path, at_row } => delete_row(cst, path, *at_row),
+        StructOp::MoveColumn { path, from, to } => move_column(cst, path, *from, *to),
+        StructOp::MoveRow { path, from, to } => move_row(cst, path, *from, *to),
+        StructOp::ClearCell { path, index } => clear_cell(cst, path, *index),
         StructOp::SetGroupAttr { path, key, value } => {
             set_group_attr(cst, path, key, value.as_deref())
         }
@@ -583,9 +693,9 @@ fn grid_cols(node: &Node) -> Option<usize> {
     }
 }
 
-/// Insert one `key=value` list entry at `pos` in a comma list attr, if the
-/// attr exists (missing attrs stay missing — defaults already apply).
-fn insert_list_attr(cst: &mut Cst, path: &[usize], key: &str, pos: usize, entry: &str) {
+/// Edit a comma-list attr in place, if the attr exists (missing attrs stay
+/// missing — defaults already apply). An emptied list drops the attr.
+fn edit_list_attr(cst: &mut Cst, path: &[usize], key: &str, f: impl FnOnce(&mut Vec<String>)) {
     let Some(Node::Container { title, .. }) = node_at(cst, path) else {
         return;
     };
@@ -596,13 +706,41 @@ fn insert_list_attr(cst: &mut Cst, path: &[usize], key: &str, pos: usize, entry:
     else {
         return;
     };
-    let mut parts: Vec<&str> = current.split(',').collect();
-    if pos > parts.len() {
-        return;
+    let mut parts: Vec<String> = current.split(',').map(str::to_string).collect();
+    f(&mut parts);
+    if parts.is_empty() {
+        set_group_attr(cst, path, key, None);
+    } else {
+        set_group_attr(cst, path, key, Some(&parts.join(",")));
     }
-    parts.insert(pos, entry);
-    let joined = parts.join(",");
-    set_group_attr(cst, path, key, Some(&joined));
+}
+
+/// Insert one list entry at `pos` (columns/rows gaining a slot).
+fn insert_list_attr(cst: &mut Cst, path: &[usize], key: &str, pos: usize, entry: &str) {
+    edit_list_attr(cst, path, key, |parts| {
+        if pos <= parts.len() {
+            parts.insert(pos, entry.to_string());
+        }
+    });
+}
+
+/// Remove the `pos` entry (a deleted column/row takes its share with it).
+fn remove_list_attr(cst: &mut Cst, path: &[usize], key: &str, pos: usize) {
+    edit_list_attr(cst, path, key, |parts| {
+        if pos < parts.len() {
+            parts.remove(pos);
+        }
+    });
+}
+
+/// Move the `from` entry to `to` (a moved column/row keeps its share).
+fn move_list_attr(cst: &mut Cst, path: &[usize], key: &str, from: usize, to: usize) {
+    edit_list_attr(cst, path, key, |parts| {
+        if from < parts.len() && to < parts.len() {
+            let v = parts.remove(from);
+            parts.insert(to, v);
+        }
+    });
 }
 
 /// The `InsertColumn` implementation: splice bottom-up so earlier rows'
@@ -651,6 +789,152 @@ fn insert_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
     }
     insert_list_attr(cst, path, "rowh", at_row, "auto");
     true
+}
+
+/// The `DeleteColumn` implementation: bottom-up removal keeps earlier rows'
+/// indices valid; `cols` drops and the `colw` entry leaves with the column.
+fn delete_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
+    let Some(cols) = node_at(cst, path).and_then(grid_cols) else {
+        return false;
+    };
+    if at >= cols || cols == 1 {
+        return false; // the last column IS the grid — delete the grid instead
+    }
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        let rows = children.len().div_ceil(cols);
+        for r in (0..rows).rev() {
+            let idx = r * cols + at;
+            if idx < children.len() {
+                children.remove(idx);
+            }
+        }
+    }
+    let next = cols - 1;
+    if !set_group_attr(cst, path, "cols", Some(&next.to_string())) {
+        return false;
+    }
+    remove_list_attr(cst, path, "colw", at);
+    true
+}
+
+/// The `DeleteRow` implementation: the row's consecutive cells leave the
+/// flow (later rows stay aligned); the `rowh` entry goes with it. A grid
+/// whose last row leaves is scaffolding and removes itself.
+fn delete_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
+    let Some(cols) = node_at(cst, path).and_then(grid_cols) else {
+        return false;
+    };
+    let emptied;
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        let rows = children.len().div_ceil(cols);
+        if at_row >= rows {
+            return false;
+        }
+        let start = at_row * cols;
+        let end = ((at_row + 1) * cols).min(children.len());
+        children.drain(start..end);
+        emptied = !children.iter().any(|c| is_container_named(c, "cell"));
+    }
+    remove_list_attr(cst, path, "rowh", at_row);
+    if emptied {
+        remove_node_at(cst, path);
+    }
+    true
+}
+
+/// The `MoveColumn` implementation: per-row remove/insert inside each row's
+/// span (row lengths never change, so bases stay valid); `colw` follows.
+fn move_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
+    let Some(cols) = node_at(cst, path).and_then(grid_cols) else {
+        return false;
+    };
+    if from >= cols || to >= cols || from == to {
+        return false;
+    }
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        if children.is_empty() {
+            return false;
+        }
+        pad_to_rect(children, cols);
+        let rows = children.len() / cols;
+        for r in 0..rows {
+            let base = r * cols;
+            let cell = children.remove(base + from);
+            children.insert(base + to, cell);
+        }
+    }
+    move_list_attr(cst, path, "colw", from, to);
+    true
+}
+
+/// The `MoveRow` implementation: drain the row's cells and re-splice at the
+/// target row's flow position (post-drain, `to * cols` IS the final slot for
+/// both directions); `rowh` follows.
+fn move_row(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
+    let Some(cols) = node_at(cst, path).and_then(grid_cols) else {
+        return false;
+    };
+    {
+        let Some(children) = children_at_mut(cst, path) else {
+            return false;
+        };
+        if children.is_empty() {
+            return false;
+        }
+        let rows = children.len().div_ceil(cols);
+        if from >= rows || to >= rows || from == to {
+            return false;
+        }
+        pad_to_rect(children, cols);
+        let moved: Vec<Node> = children.drain(from * cols..(from + 1) * cols).collect();
+        let insert_at = to * cols;
+        children.splice(insert_at..insert_at, moved);
+    }
+    move_list_attr(cst, path, "rowh", from, to);
+    true
+}
+
+/// The `ClearCell` implementation: empty the cell in place — geometry is
+/// sacred (flow removal would shift every later cell across columns).
+fn clear_cell(cst: &mut Cst, path: &[usize], index: usize) -> bool {
+    if !is_named(cst, path, "grid") {
+        return false;
+    }
+    let Some(children) = children_at_mut(cst, path) else {
+        return false;
+    };
+    let Some(cell) = children.get_mut(index) else {
+        return false;
+    };
+    if !is_container_named(cell, "cell") {
+        return false;
+    }
+    let Node::Container { children: kids, .. } = cell else {
+        return false;
+    };
+    if kids.is_empty() {
+        return false; // already clear — a no-op
+    }
+    kids.clear();
+    true
+}
+
+/// Pad a ragged grid rectangular with empty cells — row-major flow cannot
+/// express raggedness anywhere but the very end, so row/column moves need a
+/// full lattice to stay column-true.
+fn pad_to_rect(children: &mut Vec<Node>, cols: usize) {
+    while !children.is_empty() && !children.len().is_multiple_of(cols) {
+        children.push(new_cell());
+    }
 }
 
 fn move_cell_in_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
@@ -1594,19 +1878,20 @@ mod tests {
     #[test]
     fn save_region_with_empty_text_deletes_the_run() {
         // The region "x" toolbar uses this as its delete op.
+        // Tab A children: [prose "alpha\n", ws "\n", callout].
         let src = "tab: A\nalpha\n\n> [!note] Hi\n";
         let (ok, out) = apply(
             src,
             StructOp::SaveRegion {
                 path: vec![0, 0],
-                start: 1,
-                end: 2,
+                start: 2,
+                end: 3,
                 expected: "> [!note] Hi\n".into(),
                 text: String::new(),
             },
         );
         assert!(ok);
-        assert_eq!(out, "tab: A\nalpha\n\n");
+        assert_eq!(out, "tab: A\nalpha\n", "trailing spacing goes with it");
     }
 
     #[test]
@@ -1708,7 +1993,8 @@ mod tests {
             },
         );
         assert!(ok);
-        assert_eq!(out, "tab: A\nx\n> [!tip] Hi\n> There\n");
+        // The seam invariant separates the new callout from the paragraph.
+        assert_eq!(out, "tab: A\nx\n\n> [!tip] Hi\n> There\n");
     }
 
     #[test]
@@ -2026,30 +2312,33 @@ mod tests {
         );
         assert!(ok);
         let reparsed = parse_block_impl(&out);
-        assert_eq!(
-            reparsed.children.len(),
-            2,
+        assert!(
+            matches!(reparsed.children.last(), Some(Node::Leaf { text, .. }) if text.contains("new section")),
             "leaf must stay at root: {out:?}"
+        );
+        assert!(
+            matches!(reparsed.children.first(), Some(Node::Container { name, .. }) if name == "tabs"),
+            "group must survive directivized: {out:?}"
         );
     }
 
     #[test]
     fn move_region_relocates_leaf_runs() {
-        // Tab A parses as [prose "alpha\n\n", callout leaf] — move just the
+        // Tab A parses as [prose "alpha\n", ws, callout leaf] — move just the
         // callout into tab B, after its existing content.
         let src = "tab: A\nalpha\n\n> [!note] Hi\ntab: B\nbeta\n";
         let (ok, out) = apply(
             src,
             StructOp::MoveRegion {
                 path: vec![0, 0],
-                start: 1,
-                end: 2,
+                start: 2,
+                end: 3,
                 to_parent: vec![0, 1],
                 to_index: 1,
             },
         );
         assert!(ok);
-        assert_eq!(out, "tab: A\nalpha\n\ntab: B\nbeta\n> [!note] Hi\n");
+        assert_eq!(out, "tab: A\nalpha\ntab: B\nbeta\n\n> [!note] Hi\n");
     }
 
     #[test]
@@ -2067,9 +2356,10 @@ mod tests {
             },
         );
         assert!(ok);
+        // The seam invariant keeps intro and outro their own sections.
         assert_eq!(
             out,
-            "intro\noutro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\n"
+            "intro\n\noutro\n:::grid {cols=2}\n:::cell\na\n:::\n:::\n"
         );
     }
 
@@ -2154,5 +2444,247 @@ mod tests {
             assert!(!ok);
             assert_eq!(out, src);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Leaf-seam normalization: two content leaves flush against each other
+    // re-parse as ONE prose run (the "my sections combined" bug). Every op
+    // that splices leaves must leave a blank-line leaf between sections.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn insert_leaf_seams_against_prose_neighbors() {
+        // [alpha, ws, omega] + "mid" before omega → separated on BOTH sides.
+        let (ok, out) = apply(
+            "alpha\n\nomega\n",
+            StructOp::InsertLeaf {
+                path: vec![],
+                at: 2,
+                text: "mid".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "alpha\n\nmid\n\nomega\n");
+    }
+
+    #[test]
+    fn insert_leaf_legacy_leading_newline_causes_no_phantom_blank() {
+        // The old UI sent "\nWrite here…\n"; the reducer must not leave a
+        // leading blank glued to the top of the container.
+        let (ok, out) = apply(
+            "alpha\n",
+            StructOp::InsertLeaf {
+                path: vec![],
+                at: 0,
+                text: "\nnew\n".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "new\n\nalpha\n");
+    }
+
+    #[test]
+    fn moved_prose_keeps_its_own_section() {
+        // [a, ws, b, ws, g]: gamma dropped above alpha stays its own section.
+        let (ok, out) = apply(
+            "alpha\n\nbeta\n\ngamma\n",
+            StructOp::MoveRegion {
+                path: vec![],
+                start: 4,
+                end: 5,
+                to_parent: vec![],
+                to_index: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "gamma\n\nalpha\n\nbeta\n");
+    }
+
+    #[test]
+    fn deleting_a_container_between_prose_does_not_merge_neighbors() {
+        let src = "alpha\n:::grid {cols=1}\n:::cell\nx\n:::\n:::\nomega\n";
+        let (ok, out) = apply(src, StructOp::DeleteNode { path: vec![1] });
+        assert!(ok);
+        assert_eq!(out, "alpha\n\nomega\n");
+    }
+
+    #[test]
+    fn save_region_cannot_glue_into_the_next_section() {
+        // The unit [0..2) carries its trailing blank; the editor may hand back
+        // text without one — the seam must be restored.
+        let (ok, out) = apply(
+            "alpha\n\nbeta\n",
+            StructOp::SaveRegion {
+                path: vec![],
+                start: 0,
+                end: 2,
+                expected: "alpha\n\n".into(),
+                text: "alpha2".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "alpha2\n\nbeta\n");
+    }
+
+    #[test]
+    fn duplicated_leaf_gets_a_seam() {
+        let (ok, out) = apply("alpha\n", StructOp::DuplicateNode { path: vec![0] });
+        assert!(ok);
+        assert_eq!(out, "alpha\n\nalpha\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Excel-grade grid ops: whole-column/row delete + move, cell clear.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn delete_column_removes_cells_and_adjusts_attrs() {
+        let src = ":::grid {cols=3 colw=1,2,3}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\ne\n:::\n:::cell\nf\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::DeleteColumn {
+                path: vec![0],
+                at: 1,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2 colw=1,3}\n:::cell\na\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\nf\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn delete_column_handles_ragged_and_rejects_last() {
+        // Rows [a b] [c]: column 0 takes a AND c with it.
+        let ragged = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::\n";
+        let (ok, out) = apply(
+            ragged,
+            StructOp::DeleteColumn {
+                path: vec![0],
+                at: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, ":::grid {cols=1}\n:::cell\nb\n:::\n:::\n");
+        let single = ":::grid {cols=1}\n:::cell\nx\n:::\n:::\n";
+        let (ok2, _) = apply(
+            single,
+            StructOp::DeleteColumn {
+                path: vec![0],
+                at: 0,
+            },
+        );
+        assert!(!ok2, "the last column is the grid itself");
+    }
+
+    #[test]
+    fn delete_row_removes_cells_and_rowh_entry() {
+        let src = ":::grid {cols=2 rowh=100,200}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::DeleteRow {
+                path: vec![0],
+                at_row: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2 rowh=200}\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn deleting_the_only_row_removes_the_grid() {
+        let src = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::DeleteRow {
+                path: vec![0],
+                at_row: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "", "a rowless grid is scaffolding");
+    }
+
+    #[test]
+    fn move_column_reorders_every_row_and_colw() {
+        let src = ":::grid {cols=2 colw=1,2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveColumn {
+                path: vec![0],
+                from: 0,
+                to: 1,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2 colw=2,1}\n:::cell\nb\n:::\n:::cell\na\n:::\n:::cell\nd\n:::\n:::cell\nc\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn move_column_pads_a_ragged_grid_first() {
+        let src = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveColumn {
+                path: vec![0],
+                from: 0,
+                to: 1,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2}\n:::cell\nb\n:::\n:::cell\na\n:::\n:::cell\n:::\n:::cell\nc\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn move_row_reorders_cells_and_rowh() {
+        let src = ":::grid {cols=2 rowh=100,200}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::MoveRow {
+                path: vec![0],
+                from: 1,
+                to: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2 rowh=200,100}\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn clear_cell_empties_but_keeps_geometry() {
+        let src = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::ClearCell {
+                path: vec![0],
+                index: 0,
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::grid {cols=2}\n:::cell\n:::\n:::cell\nb\n:::\n:::\n"
+        );
+        let (ok2, _) = apply(
+            &out,
+            StructOp::ClearCell {
+                path: vec![0],
+                index: 0,
+            },
+        );
+        assert!(!ok2, "clearing an empty cell is a no-op");
     }
 }

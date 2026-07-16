@@ -165,8 +165,10 @@ fn parse_children(
     in_tabs_group: bool,
 ) -> (Vec<Node>, Stop) {
     let mut children = Vec::new();
-    // First line of the currently open prose run, if any.
+    // First line of the currently open prose run, if any, and whether that
+    // run is blank lines (spacing) or content (a paragraph).
     let mut md_start: Option<usize> = None;
+    let mut md_blank = false;
 
     while *pos < src.line_count() {
         let line = src.line(*pos);
@@ -265,9 +267,23 @@ fn parse_children(
             continue;
         }
 
-        // 6. Ordinary markdown content — extend the open prose run.
-        if md_start.is_none() {
-            md_start = Some(*pos);
+        // 6. Ordinary markdown content — extend the open prose run. A
+        //    blank⇄content transition ends the run: paragraphs and their
+        //    spacing are separate leaves, so leaf granularity IS section
+        //    granularity and ops can splice sections without their text
+        //    gluing into a neighbour on the next re-parse.
+        let blank = text.trim().is_empty();
+        match md_start {
+            Some(_) if md_blank != blank => {
+                flush_md(&mut children, src, &mut md_start, *pos);
+                md_start = Some(*pos);
+                md_blank = blank;
+            }
+            None => {
+                md_start = Some(*pos);
+                md_blank = blank;
+            }
+            Some(_) => {}
         }
         *pos += 1;
     }
@@ -533,8 +549,9 @@ mod tests {
         roundtrips(src);
         let cst = parse_block_impl(src);
         assert!(matches!(&cst.children[0], Node::Leaf { .. }));
+        // children[1] is the spacing leaf; the tabs group follows it.
         assert_eq!(
-            tab_titles(as_container(&cst.children[1], "tabs")),
+            tab_titles(as_container(&cst.children[2], "tabs")),
             vec!["A"]
         );
     }
@@ -689,7 +706,7 @@ mod tests {
             .collect();
         assert_eq!(
             texts,
-            vec!["intro\n\n", "> [!note] Hi\n> body\n", "\nafter\n"]
+            vec!["intro\n", "\n", "> [!note] Hi\n> body\n", "\n", "after\n"]
         );
         assert_eq!(
             serialize_impl(&cst),
@@ -735,5 +752,36 @@ mod tests {
         if let Ok(src) = std::fs::read_to_string(path) {
             assert_eq!(serialize_impl(&parse_block_impl(&src)), src);
         }
+    }
+
+    fn leaf_texts(src: &str) -> Vec<String> {
+        parse_block_impl(src)
+            .children
+            .iter()
+            .map(|n| match n {
+                Node::Leaf { text, .. } => text.clone(),
+                Node::Container { .. } => panic!("expected only leaves"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prose_splits_at_blank_lines() {
+        // Paragraph granularity IS section granularity: a blank line ends the
+        // prose leaf, so sections can move without text-gluing on re-parse.
+        assert_eq!(
+            leaf_texts("para one\n\npara two\n"),
+            ["para one\n", "\n", "para two\n"]
+        );
+    }
+
+    #[test]
+    fn blank_runs_form_one_whitespace_leaf() {
+        assert_eq!(leaf_texts("a\n\n\n \t\nb\n"), ["a\n", "\n\n \t\n", "b\n"]);
+    }
+
+    #[test]
+    fn tight_lists_stay_one_leaf() {
+        assert_eq!(leaf_texts("- one\n- two\n"), ["- one\n- two\n"]);
     }
 }

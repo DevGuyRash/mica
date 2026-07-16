@@ -672,7 +672,7 @@ describe("round 12: chip ✕, nested callout tools", function () {
 });
 
 describe("round 13: boundary adds, editor click-to-end, body popovers", function () {
-	it("clicking a column boundary inserts a column; an edge click adds at the left", async function () {
+	it("the boundary ⊕ pill inserts a column; a bare strip dblclick never does", async function () {
 		await seedAndOpen(
 			"BoundaryCol.md",
 			"Intro.\n\n```mica id=bc-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n```\n",
@@ -681,21 +681,20 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-col-resizer").length >= 1),
 			{ timeout: 8000, timeoutMsg: "boundary strip never rendered" },
 		);
-		await browser.executeObsidian(async () => {
+		// A double-click on the strip resets widths — it must NOT insert
+		// (the old click-to-add fired on the first click of a dblclick).
+		await browser.executeObsidian(() => {
 			const strip = document.querySelector(".mica-lp .mica-col-resizer") as HTMLElement;
-			const r = strip.getBoundingClientRect();
-			const opts = (x: number, y: number): PointerEventInit => ({
-				bubbles: true,
-				cancelable: true,
-				clientX: x,
-				clientY: y,
-				button: 0,
-				pointerId: 1,
-			});
-			// A CLICK: down + up with no movement.
-			strip.dispatchEvent(new PointerEvent("pointerdown", opts(r.left + 4, r.top + r.height / 2)));
-			await new Promise((res) => setTimeout(res, 30));
-			window.dispatchEvent(new PointerEvent("pointerup", opts(r.left + 4, r.top + r.height / 2)));
+			strip.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+		});
+		await browser.pause(400);
+		const afterDbl = await browser.executeObsidian(({ app, obsidian }) => {
+			return app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+		});
+		expect(afterDbl).toContain("{cols=2}");
+		// The ⊕ pill IS the click-to-add.
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-col-resizer .mica-boundary-plus") as HTMLElement).click();
 		});
 		await browser.waitUntil(
 			() =>
@@ -703,7 +702,7 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
 					return v.includes("{cols=3}") && (v.match(/:::cell/g) ?? []).length === 3;
 				}),
-			{ timeout: 8000, timeoutMsg: "the boundary click did not insert a column" },
+			{ timeout: 8000, timeoutMsg: "the boundary pill did not insert a column" },
 		);
 		// Edge add on the LEFT.
 		await browser.executeObsidian(() => {
@@ -719,7 +718,7 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 		);
 	});
 
-	it("clicking a row boundary inserts a full row of cells", async function () {
+	it("the row boundary ⊕ pill inserts a full row of cells", async function () {
 		await seedAndOpen(
 			"BoundaryRow.md",
 			"Intro.\n\n```mica id=br-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n```\n",
@@ -728,20 +727,8 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-row-resizer").length >= 1),
 			{ timeout: 8000, timeoutMsg: "row boundary never rendered" },
 		);
-		await browser.executeObsidian(async () => {
-			const strip = document.querySelector(".mica-lp .mica-row-resizer") as HTMLElement;
-			const r = strip.getBoundingClientRect();
-			const opts = (x: number, y: number): PointerEventInit => ({
-				bubbles: true,
-				cancelable: true,
-				clientX: x,
-				clientY: y,
-				button: 0,
-				pointerId: 1,
-			});
-			strip.dispatchEvent(new PointerEvent("pointerdown", opts(r.left + r.width / 2, r.top + 4)));
-			await new Promise((res) => setTimeout(res, 30));
-			window.dispatchEvent(new PointerEvent("pointerup", opts(r.left + r.width / 2, r.top + 4)));
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-row-resizer .mica-boundary-plus") as HTMLElement).click();
 		});
 		await browser.waitUntil(
 			() =>
@@ -749,8 +736,168 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
 					return (v.match(/:::cell/g) ?? []).length === 6;
 				}),
-			{ timeout: 8000, timeoutMsg: "the row boundary click did not insert a row" },
+			{ timeout: 8000, timeoutMsg: "the row boundary pill did not insert a row" },
 		);
+	});
+
+	it("column handle menu deletes the whole column; row handle drag reorders rows", async function () {
+		await seedAndOpen(
+			"Handles.md",
+			"Intro.\n\n```mica id=hd-1\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::cell\nd\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-col-handle").length === 2),
+			{ timeout: 8000, timeoutMsg: "column handles never rendered" },
+		);
+		// Click the first column's handle → structural menu → Delete column.
+		await browser.executeObsidian(async () => {
+			const h = document.querySelector('.mica-lp .mica-col-handle[data-col="0"]') as HTMLElement;
+			const r = h.getBoundingClientRect();
+			const opts: PointerEventInit = {
+				bubbles: true,
+				cancelable: true,
+				clientX: r.left + r.width / 2,
+				clientY: r.top + r.height / 2,
+				button: 0,
+				pointerId: 7,
+			};
+			h.dispatchEvent(new PointerEvent("pointerdown", opts));
+			await new Promise((res) => setTimeout(res, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts));
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll("body > .menu .menu-item").length > 0),
+			{ timeout: 8000, timeoutMsg: "the column menu never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const items = Array.from(document.querySelectorAll("body > .menu .menu-item"));
+			(items.find((x) => x.textContent?.includes("Delete column")) as HTMLElement)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return (
+						v.includes("{cols=1}") &&
+						!v.includes("\na\n") &&
+						!v.includes("\nc\n") &&
+						(v.match(/:::cell/g) ?? []).length === 2
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "delete column did not remove a and c" },
+		);
+		// Drag the first row's handle below the second row → rows swap.
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-row-handle").length === 2),
+			{ timeout: 8000, timeoutMsg: "row handles never re-rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const h = document.querySelector('.mica-lp .mica-row-handle[data-row="0"]') as HTMLElement;
+			const cells = document.querySelectorAll(".mica-lp .mica-cell");
+			const target = cells[1].getBoundingClientRect(); // second row's cell (cols=1)
+			const hr = h.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 8,
+			});
+			h.dispatchEvent(new PointerEvent("pointerdown", opts(hr.left + 4, hr.top + 4)));
+			await new Promise((res) => setTimeout(res, 30));
+			window.dispatchEvent(
+				new PointerEvent("pointermove", opts(target.left + 20, target.top + target.height / 2)),
+			);
+			await new Promise((res) => setTimeout(res, 30));
+			window.dispatchEvent(
+				new PointerEvent("pointerup", opts(target.left + 20, target.top + target.height / 2)),
+			);
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.indexOf(":::cell\nd\n") < v.indexOf(":::cell\nb\n") && v.indexOf(":::cell\nd\n") !== -1;
+				}),
+			{ timeout: 8000, timeoutMsg: "row drag did not reorder d above b" },
+		);
+	});
+
+	it("clearing a cell empties it without shifting the lattice", async function () {
+		await seedAndOpen(
+			"ClearCell.md",
+			"Intro.\n\n```mica id=cc-1\n:::grid {cols=2}\n:::cell\nalpha\n:::\n:::cell\nbeta\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-cell").length === 2),
+			{ timeout: 8000, timeoutMsg: "grid never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const cell = document.querySelector(".mica-lp .mica-cell") as HTMLElement;
+			const clear = cell.querySelector('.mica-cell-bar [aria-label="Clear cell"]') as HTMLElement;
+			clear.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return !v.includes("alpha") && v.includes("beta") && (v.match(/:::cell/g) ?? []).length === 2;
+				}),
+			{ timeout: 8000, timeoutMsg: "clear did not empty the cell in place" },
+		);
+	});
+
+	it("a section inserted against another section stays its own section", async function () {
+		await seedAndOpen("NoMerge.md", "Intro.\n\n```mica id=nm-1\ntab: Main\nfirst paragraph\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			{ timeout: 8000, timeoutMsg: "region never rendered" },
+		);
+		// The tail insert zone → Text: the new section must land with a
+		// blank-line seam, not glue into "first paragraph".
+		await browser.executeObsidian(() => {
+			const zone = document.querySelector(".mica-lp .mica-insert-zone.is-tail .mica-insert-plus") as HTMLElement;
+			zone.click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll("body > .menu .menu-item").length > 0),
+			{ timeout: 8000, timeoutMsg: "the insert menu never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const items = Array.from(document.querySelectorAll("body > .menu .menu-item"));
+			(items.find((x) => x.textContent?.trim() === "Text") as HTMLElement)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("first paragraph\n\nWrite here…");
+				}),
+			{ timeout: 8000, timeoutMsg: "the inserted section merged into its neighbor" },
+		);
+		// And the two render as SEPARATE regions.
+		const regions = await browser.executeObsidian(
+			() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length,
+		);
+		expect(regions).toBe(2);
+	});
+
+	it("one visual gap offers one insert line (tab tail owns the gap below the group)", async function () {
+		await seedAndOpen("OneGap.md", "Intro.\n\n```mica id=og-1\ntab: Main\nsome body text\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-insert-zone.is-tail").length > 0),
+			{ timeout: 8000, timeoutMsg: "tail zones never rendered" },
+		);
+		const tails = await browser.executeObsidian(() => {
+			// The tab body has a tail zone; the block ROOT must not add a second
+			// line into the same visual gap (its last child is the tabs group).
+			return {
+				total: document.querySelectorAll(".mica-lp .mica-insert-zone.is-tail").length,
+				inPanels: document.querySelectorAll(".mica-lp .mica-tab-panel .mica-insert-zone.is-tail").length,
+			};
+		});
+		expect(tails.total).toBe(tails.inPanels);
 	});
 
 	it("clicking below the lightbox text places the caret at the end", async function () {

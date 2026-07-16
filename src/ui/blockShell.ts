@@ -64,6 +64,9 @@ export interface RenderCtx {
 	repaintRegion?: (region: HTMLElement, target: RegionTarget) => void;
 	/** Internal: repaint the whole block without a doc change (folds). */
 	rerenderBlock?: () => void;
+	/** Internal: the block's root children — ancestry checks for unified
+	 * gap menus ("Below the tabs group…"). Set by renderCst. */
+	rootNodes?: MicaNode[];
 }
 
 type Container = Extract<MicaNode, { kind: "container" }>;
@@ -130,6 +133,7 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	// A repaint closure so collapse and cancels can redraw without a doc change.
 	ctx.repaintRegion = (region, target) => paintRegionView(region, ctx, target);
 	ctx.rerenderBlock = () => rerender(cst, el, ctx);
+	ctx.rootNodes = cst.children;
 
 	// Keep widget-internal pointer events away from CodeMirror: a click inside
 	// the block must never move the note's caret (that is what caused the
@@ -868,6 +872,7 @@ function leafUnits(nodes: MicaNode[], from: number): { start: number; end: numbe
 function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: number[], opts: NodesOpts = {}): void {
 	let i = 0;
 	let opened = false;
+	let lastContainerEl: HTMLElement | null = null;
 	while (i < nodes.length) {
 		if (nodes[i].kind === "leaf") {
 			// The parser splits callouts and code fences into their own leaves;
@@ -887,25 +892,43 @@ function renderNodes(nodes: MicaNode[], el: HTMLElement, ctx: RenderCtx, path: n
 				opened = opened || auto;
 				i = u.end;
 			}
+			lastContainerEl = null;
 		} else {
 			// Insert-between zones — including BEFORE the first section.
 			if (ctx.editable) renderInsertZone(el, ctx, path, i);
 			renderContainer(nodes[i] as Container, el, ctx, [...path, i]);
+			lastContainerEl = el.lastElementChild as HTMLElement | null;
 			i++;
 		}
 	}
 	if (ctx.editable && nodes.length === 0) {
 		renderRegion(el, ctx, { path, start: 0, end: 0, original: "" }, Boolean(opts.autoOpen) && !opened);
 	}
-	// Append-at-end is available EVERYWHERE there is already content.
-	if (ctx.editable && nodes.length > 0) renderInsertZone(el, ctx, path, nodes.length, true);
+	// Append-at-end is available EVERYWHERE there is already content — except
+	// when this container ends with a tabs group whose every panel already
+	// carries its own tail zone: two stacked lines in one visual gap read as
+	// competing affordances. The inner line's menu still reaches this level
+	// ("Below the tabs group…"). "Every panel" because tab switches toggle
+	// classes without a re-render — any panel can become the visible one.
+	const panels = lastContainerEl?.classList.contains("mica-tabs")
+		? Array.from(lastContainerEl.querySelectorAll(":scope > .mica-tab-panels > .mica-tab-panel"))
+		: [];
+	const innerOwnsGap = panels.length > 0 && panels.every((p) => p.querySelector(".mica-insert-zone.is-tail"));
+	if (ctx.editable && nodes.length > 0 && !innerOwnsGap) renderInsertZone(el, ctx, path, nodes.length, true);
 }
 
 /**
  * The one "insert something here" menu: prose, callout, code, tabs, or grid.
  * `onText` lets empty regions open their editor instead of inserting a stub.
  */
-function showInsertMenu(ctx: RenderCtx, path: number[], at: number, e: MouseEvent, onText?: () => void): void {
+function showInsertMenu(
+	ctx: RenderCtx,
+	path: number[],
+	at: number,
+	e: MouseEvent,
+	onText?: () => void,
+	tail = false,
+): void {
 	const menu = new Menu();
 	menu.addItem((i) =>
 		i
@@ -913,14 +936,14 @@ function showInsertMenu(ctx: RenderCtx, path: number[], at: number, e: MouseEven
 			.setIcon("text")
 			.onClick(() => {
 				if (onText) onText();
-				else ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\nWrite here…\n" });
+				else ctx.editable?.apply({ op: "insertLeaf", path, at, text: "Write here…\n" });
 			}),
 	);
 	menu.addItem((i) =>
 		i
 			.setTitle("Callout")
 			.setIcon("megaphone")
-			.onClick(() => ctx.editable?.apply({ op: "insertLeaf", path, at, text: "\n> [!note] Title\n> Body\n" })),
+			.onClick(() => ctx.editable?.apply({ op: "insertLeaf", path, at, text: "> [!note] Title\n> Body\n" })),
 	);
 	menu.addItem((i) =>
 		i
@@ -931,7 +954,7 @@ function showInsertMenu(ctx: RenderCtx, path: number[], at: number, e: MouseEven
 					op: "insertLeaf",
 					path,
 					at,
-					text: "\n\u0060\u0060\u0060\ncode\n\u0060\u0060\u0060\n",
+					text: "\u0060\u0060\u0060\ncode\n\u0060\u0060\u0060\n",
 				}),
 			),
 	);
@@ -948,6 +971,32 @@ function showInsertMenu(ctx: RenderCtx, path: number[], at: number, e: MouseEven
 			.setIcon("layout-grid")
 			.onClick(() => ctx.editable?.apply({ op: "insertGroup", path, at, kind: "grid" })),
 	);
+	// A tab body's tail zone owns the visual gap BELOW its whole tabs group
+	// (that level's own zone is suppressed to keep one line per gap) — reach
+	// the outer level from here. Chained menus handle nested tabs naturally.
+	if (tail && path.length >= 2) {
+		const groupPath = path.slice(0, -1);
+		const group = nodeAtPath(ctx.rootNodes ?? [], groupPath);
+		if (group?.kind === "container" && group.name === "tabs") {
+			const parentPath = groupPath.slice(0, -1);
+			const parent = parentPath.length ? nodeAtPath(ctx.rootNodes ?? [], parentPath) : null;
+			const siblings = parentPath.length
+				? parent?.kind === "container"
+					? parent.children
+					: null
+				: (ctx.rootNodes ?? null);
+			const gIdx = groupPath[groupPath.length - 1];
+			if (siblings && gIdx === siblings.length - 1) {
+				menu.addSeparator();
+				menu.addItem((i) =>
+					i
+						.setTitle("Below the tabs group…")
+						.setIcon("corner-down-right")
+						.onClick(() => showInsertMenu(ctx, parentPath, gIdx + 1, e, undefined, true)),
+				);
+			}
+		}
+	}
 	menu.showAtMouseEvent(e);
 }
 
@@ -984,7 +1033,7 @@ function showCellTypeMenu(
 			.setTitle("Callout")
 			.setIcon("megaphone")
 			.onClick(() =>
-				addCellWith({ op: "insertLeaf", path: [...gridPath, at], at: 0, text: "\n> [!note] Title\n> Body\n" }),
+				addCellWith({ op: "insertLeaf", path: [...gridPath, at], at: 0, text: "> [!note] Title\n> Body\n" }),
 			),
 	);
 	menu.addItem((i) =>
@@ -996,7 +1045,7 @@ function showCellTypeMenu(
 					op: "insertLeaf",
 					path: [...gridPath, at],
 					at: 0,
-					text: "\n\u0060\u0060\u0060\ncode\n\u0060\u0060\u0060\n",
+					text: "\u0060\u0060\u0060\ncode\n\u0060\u0060\u0060\n",
 				}),
 			),
 	);
@@ -1257,8 +1306,20 @@ function renderInsertZone(el: HTMLElement, ctx: RenderCtx, path: number[], at: n
 	const btn = iconButton(zone, "mica-insert-plus", "plus", "Insert here…");
 	btn.addEventListener("click", (e) => {
 		e.stopPropagation();
-		showInsertMenu(ctx, path, at, e);
+		showInsertMenu(ctx, path, at, e, undefined, tail);
 	});
+}
+
+/** The node at a root-relative child-index path (null when it dead-ends). */
+function nodeAtPath(nodes: MicaNode[], path: number[]): MicaNode | null {
+	let cur: MicaNode | null = null;
+	let list = nodes;
+	for (const idx of path) {
+		cur = list[idx] ?? null;
+		if (!cur) return null;
+		list = cur.kind === "container" ? cur.children : [];
+	}
+	return cur;
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,8 +1616,10 @@ function mountGridResizers(
 	// re-renders the whole block — so query once, not per layout pass.
 	const cells = Array.from(grid.querySelectorAll<HTMLElement>(":scope > .mica-cell"));
 	const rowCount = Math.ceil(cells.length / cols);
+	let layoutHandles: () => void = () => {};
 	const layout = (): void => {
 		if (!grid.isConnected) return;
+		layoutHandles();
 		const g = grid.getBoundingClientRect();
 		// Roll the rect reads: boundary b shares cells[b] with boundary b+1.
 		let right = cells[0]?.getBoundingClientRect();
@@ -1588,20 +1651,16 @@ function mountGridResizers(
 		grid.style.gridTemplateColumns = w.map((x) => `minmax(0, ${x.toFixed(3)}fr)`).join(" ");
 	};
 
-	/** Click vs drag on one strip: <5px release = click (insert). */
-	const armClickOrDrag = (strip: HTMLElement, onClick: () => void): ((moved: boolean) => void) => {
-		let clickArmed = false;
-		strip.addEventListener("pointerdown", () => {
-			clickArmed = true;
-		});
-		return (moved: boolean): void => {
-			if (clickArmed && !moved) onClick();
-			clickArmed = false;
-		};
-	};
-	const plusPill = (strip: HTMLElement, tip: string): void => {
+	// The ⊕ pill is the ONE click-to-add target; the strip itself only ever
+	// resizes (drag) or resets (double-click) — a bare strip click did both
+	// jobs before and the first click of a double-click inserted a column.
+	const plusPill = (strip: HTMLElement, tip: string, run: () => void): void => {
 		const pill = iconButton(strip, "mica-boundary-plus", "plus", tip);
-		pill.style.pointerEvents = "none"; // the STRIP owns the gesture
+		pill.addEventListener("pointerdown", (e) => e.stopPropagation()); // never start a resize
+		pill.addEventListener("click", (e) => {
+			e.stopPropagation();
+			run();
+		});
 	};
 
 	for (let b = 1; b < cols && cells.length > 1; b++) {
@@ -1609,15 +1668,11 @@ function mountGridResizers(
 		strip.createDiv({ cls: "mica-col-resizer-line" });
 		strip.setAttribute(
 			"aria-label",
-			"Click: new column here · drag: resize · double-click: reset widths",
+			"Drag: resize · double-click: reset widths · ⊕/right-click: new column",
 		);
-		plusPill(strip, "New column here");
-		const settle = armClickOrDrag(strip, () =>
-			ctx.editable?.apply({ op: "insertColumn", path, at: b }),
-		);
+		plusPill(strip, "New column here", () => ctx.editable?.apply({ op: "insertColumn", path, at: b }));
 		strips.push(strip);
-		strip.addEventListener("dblclick", (e) => {
-			e.stopPropagation();
+		const resetPair = (): void => {
 			// Reset ONLY this pair: both take their average share; if that makes
 			// every column equal again, drop the attr entirely.
 			const w = [...widths];
@@ -1632,6 +1687,29 @@ function mountGridResizers(
 				key: "colw",
 				value: uniform ? null : rounded.join(","),
 			});
+		};
+		strip.addEventListener("dblclick", (e) => {
+			e.stopPropagation();
+			resetPair();
+		});
+		strip.addEventListener("contextmenu", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const menu = new Menu();
+			menu.addItem((i) =>
+				i
+					.setTitle("New column here")
+					.setIcon("plus")
+					.onClick(() => ctx.editable?.apply({ op: "insertColumn", path, at: b })),
+			);
+			menu.addItem((i) => i.setTitle("Reset this pair's widths").setIcon("undo-2").onClick(resetPair));
+			menu.addItem((i) =>
+				i
+					.setTitle("Distribute all widths evenly")
+					.setIcon("columns-3")
+					.onClick(() => ctx.editable?.apply({ op: "setGroupAttr", path, key: "colw", value: null })),
+			);
+			menu.showAtMouseEvent(e);
 		});
 		strip.addEventListener("pointerdown", (down) => {
 			if (down.button !== 0) return;
@@ -1671,8 +1749,11 @@ function mountGridResizers(
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
 				const moved = Math.abs(e.clientX - startX) >= 5;
-				settle(e.type === "pointerup" ? moved : true);
-				if (e.type !== "pointerup" || !moved) return;
+				if (e.type !== "pointerup" || !moved) {
+					live(startW); // sub-threshold wiggle: snap back, commit nothing
+					layout();
+					return;
+				}
 				widths.splice(0, widths.length, ...lastW);
 				const rounded = lastW.map((x) => Math.round(x * 100) / 100);
 				const uniform = rounded.every((x) => Math.abs(x - rounded[0]) < 0.03);
@@ -1692,18 +1773,36 @@ function mountGridResizers(
 	for (let r = 0; r + 1 < rowCount; r++) {
 		const strip = grid.createDiv({ cls: "mica-row-resizer" });
 		strip.createDiv({ cls: "mica-row-resizer-line" });
-		strip.setAttribute("aria-label", "Click: new row here · drag: resize · double-click: reset heights");
-		plusPill(strip, "New row here");
-		const settleRow = armClickOrDrag(strip, () =>
-			ctx.editable?.apply({ op: "insertRow", path, atRow: r + 1 }),
-		);
+		strip.setAttribute("aria-label", "Drag: resize · double-click: reset heights · ⊕/right-click: new row");
+		plusPill(strip, "New row here", () => ctx.editable?.apply({ op: "insertRow", path, atRow: r + 1 }));
 		rowStrips.push(strip);
-		strip.addEventListener("dblclick", (e) => {
-			e.stopPropagation();
-			// Reset the PAIR this divider sits between.
+		const resetRowPair = (): void => {
 			rowHeights[r] = null;
 			rowHeights[r + 1] = null;
 			ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
+		};
+		strip.addEventListener("dblclick", (e) => {
+			e.stopPropagation();
+			resetRowPair();
+		});
+		strip.addEventListener("contextmenu", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const menu = new Menu();
+			menu.addItem((i) =>
+				i
+					.setTitle("New row here")
+					.setIcon("plus")
+					.onClick(() => ctx.editable?.apply({ op: "insertRow", path, atRow: r + 1 })),
+			);
+			menu.addItem((i) => i.setTitle("Reset this pair's heights").setIcon("undo-2").onClick(resetRowPair));
+			menu.addItem((i) =>
+				i
+					.setTitle("Distribute all heights evenly")
+					.setIcon("rows-3")
+					.onClick(() => ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: null })),
+			);
+			menu.showAtMouseEvent(e);
 		});
 		strip.addEventListener("pointerdown", (down) => {
 			if (down.button !== 0) return;
@@ -1746,8 +1845,11 @@ function mountGridResizers(
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
 				const movedRow = Math.abs(e.clientY - startY) >= 5;
-				settleRow(e.type === "pointerup" ? movedRow : true);
-				if (e.type !== "pointerup" || lastA === null || !movedRow) return;
+				if (e.type !== "pointerup" || lastA === null || !movedRow) {
+					applyRowTemplate(grid, rowHeights); // wiggle: snap back
+					layout();
+					return;
+				}
 				rowHeights[r] = lastA;
 				rowHeights[r + 1] = lastB;
 				ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: rowhValue(rowHeights) });
@@ -1758,12 +1860,13 @@ function mountGridResizers(
 		});
 	}
 
-	// Edge strips: one-click add at the grid's four edges (no resize there).
+	// Edge strips: one-click add at the grid's four edges (no resize there,
+	// so the whole strip stays clickable alongside its pill).
 	const edge = (cls: string, tip: string, run: () => void): void => {
 		const strip = grid.createDiv({ cls: `mica-edge-add ${cls}` });
 		strip.setAttribute("aria-label", tip);
 		strip.createDiv({ cls: "mica-col-resizer-line mica-edge-line" });
-		plusPill(strip, tip);
+		plusPill(strip, tip, run);
 		strip.addEventListener("click", (e) => {
 			e.stopPropagation();
 			run();
@@ -1776,6 +1879,8 @@ function mountGridResizers(
 		ctx.editable?.apply({ op: "insertRow", path, atRow: rowCount }),
 	);
 
+	layoutHandles = mountGridHandles(grid, ctx, path, cols, rowCount, cells);
+
 	// Track layout: cells resize as content changes; keep dividers glued.
 	const ro = new ResizeObserver(() => layout());
 	ro.observe(grid);
@@ -1783,6 +1888,284 @@ function mountGridResizers(
 	// component or each repaint stacks a live observer on a detached grid.
 	ctx.component.register(() => ro.disconnect());
 	window.requestAnimationFrame(layout);
+}
+
+/**
+ * Excel-style structure handles: a slim pill at each column's top and each
+ * row's left. Click opens the structural menu (insert / move / delete /
+ * distribute); dragging ≥5px reorders the whole column/row with a live
+ * indicator at the landing boundary; Escape cancels the drag.
+ */
+function mountGridHandles(
+	grid: HTMLElement,
+	ctx: RenderCtx,
+	path: number[],
+	cols: number,
+	rowCount: number,
+	cells: HTMLElement[],
+): () => void {
+	const indicator = grid.createDiv({ cls: "mica-handle-indicator" });
+	const colHandles: HTMLElement[] = [];
+	const rowHandles: HTMLElement[] = [];
+
+	const colMenu = (c: number, e: MouseEvent): void => {
+		const menu = new Menu();
+		menu.addItem((i) =>
+			i
+				.setTitle("Insert column left")
+				.setIcon("between-vertical-end")
+				.onClick(() => ctx.editable?.apply({ op: "insertColumn", path, at: c })),
+		);
+		menu.addItem((i) =>
+			i
+				.setTitle("Insert column right")
+				.setIcon("between-vertical-start")
+				.onClick(() => ctx.editable?.apply({ op: "insertColumn", path, at: c + 1 })),
+		);
+		if (c > 0)
+			menu.addItem((i) =>
+				i
+					.setTitle("Move left")
+					.setIcon("arrow-left")
+					.onClick(() => ctx.editable?.apply({ op: "moveColumn", path, from: c, to: c - 1 })),
+			);
+		if (c + 1 < cols)
+			menu.addItem((i) =>
+				i
+					.setTitle("Move right")
+					.setIcon("arrow-right")
+					.onClick(() => ctx.editable?.apply({ op: "moveColumn", path, from: c, to: c + 1 })),
+			);
+		menu.addSeparator();
+		menu.addItem((i) =>
+			i
+				.setTitle("Distribute widths evenly")
+				.setIcon("columns-3")
+				.onClick(() => ctx.editable?.apply({ op: "setGroupAttr", path, key: "colw", value: null })),
+		);
+		if (cols > 1)
+			menu.addItem((i) =>
+				i
+					.setTitle("Delete column")
+					.setIcon("trash-2")
+					.onClick(() => deleteWithUndo(ctx, { op: "deleteColumn", path, at: c }, "Column deleted")),
+			);
+		menu.showAtMouseEvent(e);
+	};
+
+	const rowMenu = (r: number, e: MouseEvent): void => {
+		const menu = new Menu();
+		menu.addItem((i) =>
+			i
+				.setTitle("Insert row above")
+				.setIcon("between-horizontal-end")
+				.onClick(() => ctx.editable?.apply({ op: "insertRow", path, atRow: r })),
+		);
+		menu.addItem((i) =>
+			i
+				.setTitle("Insert row below")
+				.setIcon("between-horizontal-start")
+				.onClick(() => ctx.editable?.apply({ op: "insertRow", path, atRow: r + 1 })),
+		);
+		if (r > 0)
+			menu.addItem((i) =>
+				i
+					.setTitle("Move up")
+					.setIcon("arrow-up")
+					.onClick(() => ctx.editable?.apply({ op: "moveRow", path, from: r, to: r - 1 })),
+			);
+		if (r + 1 < rowCount)
+			menu.addItem((i) =>
+				i
+					.setTitle("Move down")
+					.setIcon("arrow-down")
+					.onClick(() => ctx.editable?.apply({ op: "moveRow", path, from: r, to: r + 1 })),
+			);
+		menu.addSeparator();
+		menu.addItem((i) =>
+			i
+				.setTitle("Distribute heights evenly")
+				.setIcon("rows-3")
+				.onClick(() => ctx.editable?.apply({ op: "setGroupAttr", path, key: "rowh", value: null })),
+		);
+		menu.addItem((i) =>
+			i
+				.setTitle("Delete row")
+				.setIcon("trash-2")
+				.onClick(() => deleteWithUndo(ctx, { op: "deleteRow", path, atRow: r }, "Row deleted")),
+		);
+		menu.showAtMouseEvent(e);
+	};
+
+	/** Wire one handle: click = menu, drag ≥5px = reorder with indicator. */
+	const wire = (
+		handle: HTMLElement,
+		from: number,
+		count: number,
+		axis: "x" | "y",
+		menuAt: (e: MouseEvent) => void,
+		commit: (to: number) => void,
+		indicate: (boundary: number) => void,
+	): void => {
+		handle.addEventListener("contextmenu", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			menuAt(e);
+		});
+		handle.addEventListener("pointerdown", (down) => {
+			if (down.button !== 0) return;
+			down.preventDefault();
+			down.stopPropagation();
+			const start = axis === "x" ? down.clientX : down.clientY;
+			let target = from;
+			let dragging = false;
+			const boundaries = (): number[] => {
+				// Boundary k = leading edge of slot k (slot `count` = trailing edge).
+				const out: number[] = [];
+				for (let k = 0; k < count; k++) {
+					const el = axis === "x" ? cells[k] : cells[k * cols];
+					const rect = el?.getBoundingClientRect();
+					out.push(rect ? (axis === "x" ? rect.left : rect.top) : Number.POSITIVE_INFINITY);
+				}
+				const lastEl = axis === "x" ? cells[count - 1] : cells[(count - 1) * cols];
+				const lastRect = lastEl?.getBoundingClientRect();
+				out.push(lastRect ? (axis === "x" ? lastRect.right : lastRect.bottom) : Number.POSITIVE_INFINITY);
+				return out;
+			};
+			const move = (e: PointerEvent): void => {
+				const pos = axis === "x" ? e.clientX : e.clientY;
+				if (!dragging && Math.abs(pos - start) < 5) return;
+				dragging = true;
+				document.body.addClass("mica-handle-dragging");
+				const bs = boundaries();
+				// The slot whose span holds the pointer (clamped to the lattice).
+				let t = count - 1;
+				for (let k = 0; k < count; k++) {
+					if (pos < bs[k + 1]) {
+						t = k;
+						break;
+					}
+				}
+				target = t;
+				indicate(t > from ? t + 1 : t);
+			};
+			const finish = (): void => {
+				window.removeEventListener("pointermove", move, true);
+				window.removeEventListener("pointerup", up, true);
+				window.removeEventListener("pointercancel", cancel, true);
+				window.removeEventListener("keydown", onEsc, true);
+				document.body.removeClass("mica-handle-dragging");
+				indicator.style.display = "none";
+			};
+			const onEsc = (ke: KeyboardEvent): void => {
+				if (ke.key !== "Escape") return;
+				ke.preventDefault();
+				ke.stopPropagation();
+				finish();
+			};
+			const cancel = (): void => finish();
+			const up = (e: PointerEvent): void => {
+				const wasDragging = dragging;
+				finish();
+				if (!wasDragging) {
+					menuAt(e); // a plain click: the structural menu
+					return;
+				}
+				if (target !== from) commit(target);
+			};
+			window.addEventListener("pointermove", move, true);
+			window.addEventListener("pointerup", up, true);
+			window.addEventListener("pointercancel", cancel, true);
+			window.addEventListener("keydown", onEsc, true);
+		});
+	};
+
+	const g = (): DOMRect => grid.getBoundingClientRect();
+	for (let c = 0; c < cols; c++) {
+		const handle = grid.createEl("button", {
+			cls: "clickable-icon mica-col-handle",
+			attr: { type: "button", "aria-label": "Column: drag to move · click for menu" },
+		});
+		setIcon(handle, "grip-horizontal");
+		handle.setAttribute("data-col", String(c));
+		colHandles.push(handle);
+		wire(
+			handle,
+			c,
+			cols,
+			"x",
+			(e) => colMenu(c, e),
+			(to) => ctx.editable?.apply({ op: "moveColumn", path, from: c, to }),
+			(b) => {
+				const rect = g();
+				const edgeEl = b < cols ? cells[b] : cells[cols - 1];
+				const er = edgeEl?.getBoundingClientRect();
+				if (!er) return;
+				const x = (b < cols ? er.left : er.right) - rect.left;
+				indicator.style.display = "";
+				indicator.style.left = `${x - 1.5}px`;
+				indicator.style.top = "4px";
+				indicator.style.width = "3px";
+				indicator.style.height = `${rect.height - 8}px`;
+			},
+		);
+	}
+	for (let r = 0; r < rowCount; r++) {
+		const handle = grid.createEl("button", {
+			cls: "clickable-icon mica-row-handle",
+			attr: { type: "button", "aria-label": "Row: drag to move · click for menu" },
+		});
+		setIcon(handle, "grip-vertical");
+		handle.setAttribute("data-row", String(r));
+		rowHandles.push(handle);
+		wire(
+			handle,
+			r,
+			rowCount,
+			"y",
+			(e) => rowMenu(r, e),
+			(to) => ctx.editable?.apply({ op: "moveRow", path, from: r, to }),
+			(b) => {
+				const rect = g();
+				const edgeEl = b < rowCount ? cells[b * cols] : cells[(rowCount - 1) * cols];
+				const er = edgeEl?.getBoundingClientRect();
+				if (!er) return;
+				const y = (b < rowCount ? er.top : er.bottom) - rect.top;
+				indicator.style.display = "";
+				indicator.style.top = `${y - 1.5}px`;
+				indicator.style.left = "4px";
+				indicator.style.height = "3px";
+				indicator.style.width = `${rect.width - 8}px`;
+			},
+		);
+	}
+
+	// Handles ride the same layout pass as the boundary strips.
+	return (): void => {
+		const rect = grid.getBoundingClientRect();
+		for (let c = 0; c < cols; c++) {
+			const h = colHandles[c];
+			const r0 = cells[c]?.getBoundingClientRect();
+			if (!r0) {
+				h.style.display = "none";
+				continue;
+			}
+			h.style.display = "";
+			h.style.left = `${r0.left - rect.left + r0.width / 2}px`;
+			h.style.top = `${r0.top - rect.top - 2}px`;
+		}
+		for (let r = 0; r < rowCount; r++) {
+			const h = rowHandles[r];
+			const r0 = cells[r * cols]?.getBoundingClientRect();
+			if (!r0) {
+				h.style.display = "none";
+				continue;
+			}
+			h.style.display = "";
+			h.style.top = `${r0.top - rect.top + r0.height / 2}px`;
+			h.style.left = `${r0.left - rect.left - 2}px`;
+		}
+	};
 }
 
 function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
@@ -1850,9 +2233,12 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 					});
 				},
 			);
-			iconButton(bar, "mica-cell-tool", "x", "Delete cell").addEventListener("click", (e) => {
+			// Clear, not delete: removing a cell from flow shifts every later
+			// cell across columns — geometry changes belong to the row/column
+			// handles. An empty cell keeps the lattice true.
+			iconButton(bar, "mica-cell-tool", "eraser", "Clear cell").addEventListener("click", (e) => {
 				e.stopPropagation();
-				deleteWithUndo(ctx, { op: "deleteCell", path, index: idx }, "Cell deleted");
+				deleteWithUndo(ctx, { op: "clearCell", path, index: idx }, "Cell cleared");
 			});
 		}
 	});

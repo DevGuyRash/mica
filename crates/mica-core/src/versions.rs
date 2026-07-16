@@ -438,6 +438,25 @@ mod tests {
     }
 
     #[test]
+    fn signature_is_independent_of_leaf_granularity() {
+        // Prose hashes per PARAGRAPH — parser leaf-boundary changes (and the
+        // number of blank lines between sections) can never churn signatures.
+        assert_eq!(
+            content_signature_impl("a\n\nb\n"),
+            content_signature_impl("a\n\n\n\nb\n")
+        );
+        assert_eq!(
+            content_signature_impl("a\n\nb\n"),
+            content_signature_impl("b\n\na\n"),
+            "paragraph order is structure, not content (sorted collection)"
+        );
+        assert_ne!(
+            content_signature_impl("a\n\nb\n"),
+            content_signature_impl("a\n\nb EDITED\n")
+        );
+    }
+
+    #[test]
     fn snapshot_gate_matches_plugin_semantics() {
         // No head yet: gate on having content at all.
         assert!(!should_snapshot_impl("tab: A\n\n", HeadRef::None, false));
