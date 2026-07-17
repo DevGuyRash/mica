@@ -1,11 +1,12 @@
 //! Migration: convert legacy ```tabs blocks (obsidian-tabs) into ```mica blocks
 //! with colon-fence directives, preserving each tab's body verbatim. The outer
-//! fence is sized above any inner code fence. Archive-as-history import is
-//! layered on by the plugin (it snapshots the migrated blocks afterward).
+//! fence is sized above any inner code fence. Extracted archive entries are
+//! returned to the host, which persists them before snapshotting the new head.
 
 use crate::new_id_impl;
 use crate::scanner::scan_tag_impl;
 use serde::Serialize;
+use std::collections::HashSet;
 
 /// A versioned artifact extracted from a legacy tab body: in this vault's
 /// convention, each `[!success]-` / `[!bug]-` / `[!todo]-` callout wraps one
@@ -14,7 +15,7 @@ use serde::Serialize;
 pub struct MigratedVersion {
     /// `V0.3`-style label parsed from the callout title, else the title itself.
     pub label: String,
-    /// Callout type: `success` (active) | `bug` (archived) | `todo` (wip).
+    /// Lowercased callout type (for example `success`, `bug`, or `todo`).
     pub status: String,
     /// The dequoted payload (inner fence stripped when the body is one fence).
     pub content: String,
@@ -53,7 +54,7 @@ pub struct MigrationResult {
 /// as version history — a comma-separated list (e.g. `"success, bug, todo"`);
 /// an EMPTY string imports every callout type.
 pub fn migrate_tabs_impl(doc: &str, callout_types: &str) -> MigrationResult {
-    let allowed: Vec<String> = callout_types
+    let allowed: HashSet<String> = callout_types
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
@@ -92,7 +93,7 @@ pub fn migrate_tabs_impl(doc: &str, callout_types: &str) -> MigrationResult {
     }
 }
 
-fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock) {
+fn convert(content: &str, allowed_callouts: &HashSet<String>) -> (String, MigratedBlock) {
     let mut preamble = String::new();
     let mut tabs: Vec<(String, String)> = Vec::new();
     let mut name: Option<String> = None;
@@ -115,7 +116,7 @@ fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock
     }
 
     let id = new_id_impl();
-    let block_name = tabs.first().map(|(n, _)| n.clone());
+    let block_name = tabs.first().map(|(name, _)| name).cloned();
     let versions = tabs
         .iter()
         .flat_map(|(_, b)| extract_versions(b, allowed_callouts))
@@ -152,14 +153,14 @@ fn convert(content: &str, allowed_callouts: &[String]) -> (String, MigratedBlock
 /// `> [!type]±  Title (Vx.y)` callouts whose type is in `allowed` (any type
 /// when `allowed` is empty); the payload is the callout body dequoted, with a
 /// single wrapping code fence stripped when present.
-fn extract_versions(body: &str, allowed: &[String]) -> Vec<MigratedVersion> {
+fn extract_versions(body: &str, allowed: &HashSet<String>) -> Vec<MigratedVersion> {
     let mut out = Vec::new();
     let mut lines = body.lines().peekable();
     while let Some(line) = lines.next() {
         let Some((status, title)) = parse_callout_header(line) else {
             continue;
         };
-        if !allowed.is_empty() && !allowed.iter().any(|a| a == &status) {
+        if !allowed.is_empty() && !allowed.contains(&status) {
             continue;
         }
         // Collect the quoted body, stopping at the NEXT callout header (which is
@@ -226,10 +227,10 @@ fn parse_version_label(title: &str) -> String {
 /// When the dequoted body is exactly one fenced block, return its inside;
 /// otherwise return the body joined as-is.
 fn strip_wrapping_fence(lines: &[String]) -> String {
-    let significant: Vec<usize> = (0..lines.len())
-        .filter(|&i| !lines[i].trim().is_empty())
-        .collect();
-    if let (Some(&first), Some(&last)) = (significant.first(), significant.last()) {
+    if let (Some(first), Some(last)) = (
+        lines.iter().position(|line| !line.trim().is_empty()),
+        lines.iter().rposition(|line| !line.trim().is_empty()),
+    ) {
         let open = lines[first].trim_start();
         let fc = open.as_bytes().first().copied();
         if let (Some(ch @ (b'`' | b'~')), true) = (fc, first != last) {

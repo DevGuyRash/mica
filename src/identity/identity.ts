@@ -1,6 +1,6 @@
 import { TFile } from "obsidian";
 import type MicaPlugin from "../main";
-import { ensureIds, newId } from "../wasm/bridge";
+import { ensureIds, newId, scanBlocksView } from "../wasm/bridge";
 
 /**
  * Ensure the note has a stable `mica-id` in frontmatter (written via
@@ -9,19 +9,27 @@ import { ensureIds, newId } from "../wasm/bridge";
 export async function ensureNoteId(plugin: MicaPlugin, file: TFile): Promise<string> {
 	let id = "";
 	await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-		if (typeof fm["mica-id"] !== "string" || !fm["mica-id"]) {
-			fm["mica-id"] = newId();
+		const current = fm["mica-id"];
+		if (typeof current === "string" && current) {
+			id = current;
+			return;
 		}
-		id = fm["mica-id"] as string;
+		id = newId();
+		fm["mica-id"] = id;
 	});
 	return id;
 }
 
 /** Ensure every ` ```mica ` block carries an `id=`. Returns true if the note changed. */
 export async function ensureBlockIds(plugin: MicaPlugin, file: TFile): Promise<boolean> {
-	const doc = await plugin.app.vault.read(file);
-	const next = ensureIds(doc);
-	if (next === doc) return false;
-	await plugin.app.vault.modify(file, next);
-	return true;
+	const initial = await plugin.app.vault.read(file);
+	if (!scanBlocksView(initial).some((block) => !block.id)) return false;
+
+	let changed = false;
+	await plugin.app.vault.process(file, (doc) => {
+		const next = ensureIds(doc);
+		changed = next !== doc;
+		return next;
+	});
+	return changed;
 }

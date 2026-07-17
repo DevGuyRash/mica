@@ -51,9 +51,11 @@ pub fn block_content_edit_impl(doc: &str, id: &str, new_content: &str) -> Option
 /// Ensure every ` ```mica ` block carries an `id=`; id-less blocks get a fresh
 /// UUIDv7 inserted into their header. Returns the (possibly unchanged) document.
 pub fn ensure_ids_impl(doc: &str) -> String {
-    let mut out = doc.to_string();
-    // Reverse order so each insertion leaves earlier byte offsets valid.
-    for b in scan_impl(doc).iter().rev() {
+    let blocks = scan_impl(doc);
+    let mut insertions = Vec::new();
+    // Preserve the established reverse-document UUID generation order while
+    // collecting offsets; output is assembled once in forward order below.
+    for b in blocks.iter().rev() {
         if b.id().is_some() {
             continue;
         }
@@ -64,8 +66,25 @@ pub fn ensure_ids_impl(doc: &str) -> String {
         if doc.get(tag_start..insert_at) != Some("mica") {
             continue;
         }
-        out.insert_str(insert_at, &format!(" id={}", crate::new_id_impl()));
+        insertions.push((insert_at, crate::new_id_impl()));
     }
+    if insertions.is_empty() {
+        return doc.to_string();
+    }
+
+    let added: usize = insertions
+        .iter()
+        .map(|(_, id)| " id=".len() + id.len())
+        .sum();
+    let mut out = String::with_capacity(doc.len() + added);
+    let mut cursor = 0;
+    for (insert_at, id) in insertions.into_iter().rev() {
+        out.push_str(&doc[cursor..insert_at]);
+        out.push_str(" id=");
+        out.push_str(&id);
+        cursor = insert_at;
+    }
+    out.push_str(&doc[cursor..]);
     out
 }
 
@@ -113,7 +132,7 @@ pub fn set_block_attr_impl(doc: &str, id: &str, key: &str, value: Option<&str>) 
     let indent = &header[..indent_len];
     let fence = &header[indent_len..indent_len + b.fence_len];
 
-    let mut attrs = b.attrs.clone();
+    let mut attrs = b.attrs;
     match value {
         Some(v) => {
             if let Some(slot) = attrs.iter_mut().find(|(k, _)| k == key) {
@@ -125,19 +144,26 @@ pub fn set_block_attr_impl(doc: &str, id: &str, key: &str, value: Option<&str>) 
         None => attrs.retain(|(k, _)| k != key),
     }
 
-    let mut line = format!("{indent}{fence}mica");
+    let mut line = String::with_capacity(header.len() + value.map_or(0, str::len) + key.len() + 4);
+    line.push_str(indent);
+    line.push_str(fence);
+    line.push_str("mica");
     for (k, v) in &attrs {
+        line.push(' ');
+        line.push_str(k);
         if v.is_empty() {
-            line.push_str(&format!(" {k}"));
         } else if v.contains(char::is_whitespace) {
-            line.push_str(&format!(" {k}=\"{v}\""));
+            line.push_str("=\"");
+            line.push_str(v);
+            line.push('"');
         } else {
-            line.push_str(&format!(" {k}={v}"));
+            line.push('=');
+            line.push_str(v);
         }
     }
     line.push('\n');
 
-    let mut out = String::with_capacity(doc.len() + 32);
+    let mut out = String::with_capacity(doc.len() - header.len() + line.len());
     out.push_str(&doc[..b.start]);
     out.push_str(&line);
     out.push_str(&doc[b.content_start..]);

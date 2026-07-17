@@ -7,6 +7,7 @@ import type MicaPlugin from "../main";
 import { parseBlock, scanBlocksView, serializeCst, setBlockAttr, type BlockView } from "../wasm/bridge";
 import { renderCst, type BlockUi } from "../ui/blockShell";
 import { applyOp, revealFor, type StructOp } from "../cst/ops";
+import { getBlockUi } from "../render/blockUiState";
 
 /**
  * The rendered widget shown in place of a ` ```mica ` block in Live Preview.
@@ -30,7 +31,7 @@ class MicaWidget extends WidgetType {
 		private readonly id: string | null,
 		private readonly start: number,
 		private readonly content: string,
-		private readonly attrs: Record<string, string>,
+		private readonly attrs: Readonly<Record<string, string>>,
 	) {
 		super();
 	}
@@ -39,6 +40,7 @@ class MicaWidget extends WidgetType {
 		return (
 			other.epoch === this.epoch &&
 			other.id === this.id &&
+			(this.id !== null || other.start === this.start) &&
 			other.content === this.content &&
 			sameAttrs(other.attrs, this.attrs)
 		);
@@ -51,17 +53,18 @@ class MicaWidget extends WidgetType {
 		this.child = child;
 		this.plugin.addChild(child);
 		const info = view.state.field(editorInfoField, false);
+		const sourcePath = info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "";
 		const chip =
 			this.plugin.settings.showVersionChip && this.id && info?.file
 				? { plugin: this.plugin, file: info.file, blockId: this.id, content: this.content }
 				: undefined;
-		const ui = this.blockUi();
+		const ui = this.blockUi(sourcePath);
 		// Cross-block drops need the TARGET block's op hook: expose it on the
 		// root (apply relocates the block by id, so a stale widget stays safe).
 		(el as HTMLElement & { micaApply?: (op: StructOp) => void }).micaApply = (op) => this.apply(view, op, ui);
 		renderCst(parseBlock(this.content), el, {
 			app: this.plugin.app,
-			sourcePath: info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "",
+			sourcePath,
 			component: child,
 			editable: {
 				apply: (op) => this.apply(view, op, ui),
@@ -79,39 +82,8 @@ class MicaWidget extends WidgetType {
 	}
 
 	/** Per-block UI state, kept on the plugin so it survives widget rebuilds. */
-	private blockUi(): BlockUi {
-		const key = this.id ?? `@${this.start}`;
-		const store = this.plugin.micaUi;
-		let ui = store.get(key);
-		if (ui) {
-			// Refresh recency (Map preserves insertion order → cheap LRU).
-			store.delete(key);
-			store.set(key, ui);
-			return ui;
-		}
-		ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
-		// Folds survive restarts: restore from plugin data, write back on change.
-		const saved = this.plugin.settings.foldState[key];
-		if (saved) for (const k of saved) ui.folded.add(k);
-		const plugin = this.plugin;
-		ui.persistFolds = () => {
-			if (ui!.folded.size) plugin.settings.foldState[key] = [...ui!.folded];
-			else delete plugin.settings.foldState[key];
-			// The store is user data — cap it like the UI store itself.
-			const keys = Object.keys(plugin.settings.foldState);
-			if (keys.length > 256) for (const k of keys.slice(0, keys.length - 256)) delete plugin.settings.foldState[k];
-			void plugin.saveSettings();
-		};
-		store.set(key, ui);
-		// The store is otherwise unbounded and pins draft strings for every
-		// block ever rendered — evict the stalest draft-free entries.
-		if (store.size > 128) {
-			for (const [k, v] of store) {
-				if (store.size <= 128) break;
-				if (k !== key && !v.draft) store.delete(k);
-			}
-		}
-		return ui;
+	private blockUi(sourcePath: string): BlockUi {
+		return getBlockUi(this.plugin, this.id ?? `@${sourcePath}:${this.start}`);
 	}
 
 	/** The block's CURRENT content from a live scan (never the cached copy). */
@@ -175,7 +147,7 @@ class MicaWidget extends WidgetType {
 	}
 }
 
-function sameAttrs(a: Record<string, string>, b: Record<string, string>): boolean {
+function sameAttrs(a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean {
 	if (a === b) return true;
 	const ka = Object.keys(a);
 	const kb = Object.keys(b);
@@ -189,12 +161,12 @@ export interface ScanCache {
 	/** Text instances known to equal `doc` (split panes share one entry). */
 	texts: WeakSet<Text>;
 	doc: string;
-	blocks: BlockView[];
-	attrs: Record<string, string>[];
+	blocks: readonly BlockView[];
+	attrs: readonly Readonly<Record<string, string>>[];
 	/** Per-block replace-range end (the closing fence line's end). */
-	tos: number[];
+	tos: readonly number[];
 	/** Per-block content slices — shared instances make widget `eq` O(1). */
-	contents: string[];
+	contents: readonly string[];
 }
 let scanCache: ScanCache | null = null;
 /** Exported for sibling extensions (source highlighter): same Text-identity

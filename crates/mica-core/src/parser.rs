@@ -292,12 +292,8 @@ fn parse_children(
     (children, Stop::Eof)
 }
 
-/// Collect a run of consecutive `tab:` sections into an implicit `tabs`
-/// container. Each tab auto-closes at the next `tab:`, at an enclosing `:::`
-/// closer, or at end of block — no closing fence required. The `tabs` group
-/// and each `tab` are synthetic (empty open/close lines), so serialization
-/// reproduces exactly the original `tab:` lines and bodies.
-/// Consume consecutive `tab:` sections into bare `tab` containers.
+/// Consume consecutive `tab:` sections into bare `tab` containers. Each tab
+/// auto-closes at the next delimiter, an enclosing `:::` closer, or EOF.
 fn collect_delim_tab_nodes(
     src: &Src<'_>,
     pos: &mut usize,

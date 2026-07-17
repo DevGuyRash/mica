@@ -14,6 +14,7 @@ use mica_core::{
     ensure_ids_impl, fold_ledger_impl, hash_content_impl, new_id_impl, replace_block_content_impl,
     scan_impl, should_snapshot_impl, BlockState, Event, HeadRef,
 };
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -88,8 +89,8 @@ pub fn snapshot_note(note: &NoteRef, force: bool, stamp_ids: bool) -> Result<Vec
     }
 
     let st = state(&note.abs)?;
-    let mut actions = Vec::new();
-    let mut events: Vec<Event> = Vec::new();
+    let mut actions = Vec::with_capacity(blocks.len());
+    let mut events: Vec<Event> = Vec::with_capacity(blocks.len() * 2);
     for b in &blocks {
         let Some(id) = b.id() else { continue };
         if !b.closed {
@@ -97,8 +98,8 @@ pub fn snapshot_note(note: &NoteRef, force: bool, stamp_ids: bool) -> Result<Vec
         }
         let content = &doc[b.content_start..b.content_end];
         let hash = hash_content_impl(content);
-        let head = st.get(id).and_then(|s| s.head.clone());
-        if head.as_deref() == Some(hash.as_str()) {
+        let head = st.get(id).and_then(|s| s.head.as_deref());
+        if head == Some(hash.as_str()) {
             actions.push(SnapshotAction {
                 block: id.to_string(),
                 hash: None,
@@ -106,11 +107,11 @@ pub fn snapshot_note(note: &NoteRef, force: bool, stamp_ids: bool) -> Result<Vec
             });
             continue;
         }
-        let head_content = match &head {
+        let head_content = match head {
             None => None,
             Some(h) => sidecar::read_object(&note.abs, h)?,
         };
-        let head_ref = match (&head, &head_content) {
+        let head_ref = match (head, head_content.as_deref()) {
             (None, _) => HeadRef::None,
             (Some(_), None) => HeadRef::Missing,
             (Some(_), Some(c)) => HeadRef::Content(c),
@@ -235,7 +236,7 @@ pub fn restore(note: &NoteRef, block_id: &str, hash: &str) -> Result<()> {
     };
     let doc = read_doc(&note.abs)?;
     let terminated = terminate(&content);
-    let Some(next) = replace_block_content_impl(&doc, block_id, &terminated) else {
+    let Some(next) = replace_block_content_impl(&doc, block_id, terminated.as_ref()) else {
         return Err(CliError::NotFound(format!(
             "block {block_id} not found in the note"
         )));
@@ -277,7 +278,7 @@ pub fn set_content(note: &NoteRef, block_id: &str, content: &str) -> Result<()> 
     snapshot_note(note, false, true)?;
     let doc = read_doc(&note.abs)?;
     let terminated = terminate(content);
-    let Some(next) = replace_block_content_impl(&doc, block_id, &terminated) else {
+    let Some(next) = replace_block_content_impl(&doc, block_id, terminated.as_ref()) else {
         return Err(CliError::NotFound(format!(
             "block {block_id} not found in the note"
         )));
@@ -335,11 +336,11 @@ pub fn now_ms() -> u64 {
 }
 
 /// Newline-terminate content so it can never glue onto the closing fence.
-fn terminate(content: &str) -> String {
+fn terminate(content: &str) -> Cow<'_, str> {
     if !content.is_empty() && !content.ends_with('\n') {
-        format!("{content}\n")
+        Cow::Owned(format!("{content}\n"))
     } else {
-        content.to_string()
+        Cow::Borrowed(content)
     }
 }
 

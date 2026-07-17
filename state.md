@@ -17,6 +17,16 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
   those blocks' content signatures once). Signatures are paragraph-normalized
   now, so further leaf-granularity changes cannot churn them again.
 
+- **Deferred decision**: a keyboard path for the editor toolbar (tools are
+  tabindex −1 by design; pickers are mouse-only). Everything else keyboard-
+  reachable; decide whether toolbar hotkeys/tab-stops are worth it post-ship.
+- **One-reducer exception to close**: `forkBlock` (src/identity/reconcile.ts)
+  rewrites a duplicate block's `id=` by direct text replacement — the Rust
+  edit surface rejects id changes, so TS had no guarded path. Add a fresh-scan
+  `rewriteBlockId(oldId, occurrence, newId)` at the WASM boundary, then swap
+  the splice. Same theme: blockShell's raw-source editor + Undo use
+  `replaceAll` without an `expected` guard.
+
 ## Risks to watch
 
 - The content signature joins sorted paragraph texts with a single space, so
@@ -33,6 +43,10 @@ Active, in-flight work only. Finished work lives in the docs or the code, not he
 - The fixture theme's `slide-down` entrance animation never advances under the
   sandbox compositor — the `sandbox-motion` snippet disables that one
   animation; keep it enabled (only elementFromPoint ever noticed).
+- The "revealed raw source tints" e2e is load-sensitive: under heavy parallel
+  CPU load the xvfb window loses focus (`document.hasFocus()` false) and
+  Obsidian's own preview widget won't yield — diagnosed via the test's DIAG
+  capture, not a product bug. Run the suite on a quiet machine.
 - The virtualized reading view renders nothing under headless Xvfb;
   reading-mode e2e drives the code-block processor directly. Appearance is
   validated by computed styles — use `preview.html` for human eyeballing.

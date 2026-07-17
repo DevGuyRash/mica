@@ -2246,6 +2246,12 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	background: rgb(from var(--background-primary) r g b / 1);
 }
 
+/* Toolbar pickers mount on BODY and must clear Obsidian's modal layer —
+   the lightbox is a Modal, and a popover under it reads as a dead button. */
+.mica-tb-popover {
+	z-index: 999;
+}
+
 /* ---------- Navigator popover (tree + drag-to-reorder) ---------- */
 .mica-navpop {
 	position: fixed;
@@ -2700,6 +2706,8 @@ body.mica-handle-dragging .mica-col-resizer,
 body.mica-handle-dragging .mica-row-resizer,
 body.mica-handle-dragging .mica-edge-add,
 body.mica-handle-dragging .mica-cell-bar,
+body.mica-handle-dragging .mica-insert-zone,
+body.mica-handle-dragging .mica-region-tools,
 body.mica-handle-dragging .mica-grid-tools {
 	opacity: 0 !important;
 	pointer-events: none !important;

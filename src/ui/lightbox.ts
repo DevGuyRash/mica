@@ -1,5 +1,5 @@
 import { MarkdownRenderChild, MarkdownRenderer, Modal, setIcon, type App } from "obsidian";
-import { editorViewPrefs, MdEditor, toggleViewPref } from "./mdEditor";
+import { editorViewPrefs, MdEditor, toggleViewPref, saveShortcutLabel } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
 
 export interface LightboxOpts {
@@ -58,10 +58,11 @@ export class EditorLightbox extends Modal {
 		const editorHost = split.createDiv({ cls: "mica-lightbox-editor" });
 		this.previewEl = split.createDiv({ cls: "mica-lightbox-preview" });
 
+		const shortcut = saveShortcutLabel();
 		this.editor = new MdEditor(editorHost, {
 			app: this.opts.app,
 			initial: this.opts.initial,
-			placeholder: "Write markdown — Ctrl/Cmd+Enter saves, Esc cancels",
+			placeholder: shortcut ? `Write markdown — ${shortcut} saves, Esc cancels` : "Write markdown — Esc cancels",
 			onSave: () => this.save(),
 			onCancel: () => this.requestClose(),
 			onChange: (v) => {
@@ -113,7 +114,11 @@ export class EditorLightbox extends Modal {
 		this.statsEl = footer.createDiv({ cls: "mica-lightbox-stats" });
 		this.refreshStats(this.opts.initial);
 		footer.createDiv({ cls: "mica-footer-spacer" });
-		const hint = footer.createSpan({ cls: "mica-lightbox-hint", text: "Ctrl+Enter to save" });
+		const hintLabel = saveShortcutLabel();
+		const hint = footer.createSpan({
+			cls: "mica-lightbox-hint",
+			text: hintLabel ? `${hintLabel} to save` : "Save with the button",
+		});
 		void hint;
 		this.cancelBtn = footer.createEl("button", { text: "Cancel", attr: { type: "button" } });
 		this.cancelBtn.addEventListener("click", () => this.requestClose());
@@ -141,6 +146,14 @@ export class EditorLightbox extends Modal {
 
 	/** Esc / Cancel: close clean editors instantly; arm a confirm when dirty. */
 	private requestClose(): void {
+		// Escape aimed at a popover INSIDE the lightbox (the callout type
+		// grid, a toolbar picker) dismisses that popover — it must never arm
+		// "Discard changes?" on the whole editor.
+		const pop = this.contentEl.querySelector(".mica-popover");
+		if (pop) {
+			pop.remove();
+			return;
+		}
 		if (!this.dirty || this.discardArmed) {
 			this.close();
 			return;

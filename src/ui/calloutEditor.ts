@@ -156,7 +156,7 @@ export function openCalloutEditorFor(
 			};
 			foldOpt("Static", "", "Always expanded");
 			foldOpt("Open", "+", "Foldable, starts open");
-			foldOpt("Closed", "-", "Foldable, starts collapsed");
+			foldOpt("Collapsed", "-", "Foldable, starts collapsed");
 
 			const titleInput = row.createEl("input", {
 				cls: "mica-coedit-title",

@@ -4,9 +4,9 @@
 //! native `rlib` for `cargo test`. Public logic lives in `*_impl` functions that
 //! are unit-tested natively; thin `#[wasm_bindgen]` wrappers expose them to
 //! TypeScript. Nothing here touches the filesystem, the network, or Obsidian.
-//!
-//! Milestone status: M0 seeds identity + content-addressing. The fence scanner,
-//! CST, serializer, and diff arrive in M1/M4.
+//! The crate owns scanning, byte-exact CST parsing/serialization, structural
+//! edits, content signatures, version folding, migration, reconciliation, and
+//! diffing so both hosts share the same behavior.
 
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
@@ -29,7 +29,7 @@ pub use migrate::{migrate_tabs_impl, MigratedBlock, MigratedVersion, MigrationRe
 pub use ops::{apply_op_impl, GroupKind, StructOp};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
-pub use scanner::{scan_impl, scan_tag_impl, scan_view_impl, BlockSpan, BlockView};
+pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
 pub use versions::{
     content_signature_impl, fold_ledger_impl, has_content_impl, should_snapshot_impl, BlockState,
     Event, HeadRef, VersionMeta,
@@ -214,7 +214,7 @@ pub fn content_signature(content: &str) -> String {
     content_signature_impl(content)
 }
 
-/// Whether a block carries any non-empty prose.
+/// Whether a block carries any non-empty leaf content, including code/callouts.
 #[wasm_bindgen]
 pub fn has_content(content: &str) -> bool {
     has_content_impl(content)

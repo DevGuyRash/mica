@@ -95,7 +95,11 @@ pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
     // position in that block's `versions`, so dedup and labeling are O(1)
     // per event instead of a scan of the block's whole history.
     let mut state: HashMap<&str, BlockState> = HashMap::new();
-    let mut slot: HashMap<(&str, &str), usize> = HashMap::new();
+    let version_count = events
+        .iter()
+        .filter(|event| matches!(event, Event::AddVersion { .. }))
+        .count();
+    let mut slot: HashMap<(&str, &str), usize> = HashMap::with_capacity(version_count);
     for e in ordered {
         match e {
             Event::AddVersion {
@@ -136,7 +140,7 @@ pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
     state.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
-/// Concatenated, trimmed, sorted leaf prose of block `content` — the identity
+/// Concatenated, trimmed, sorted leaf content of block `content` — the identity
 /// versioning gates on, so structure-only churn never mints a version.
 ///
 /// Purpose: shared "did the words change?" key for the plugin and the CLI.
@@ -197,7 +201,7 @@ fn has_leaf_text(nodes: &[crate::parser::Node]) -> bool {
     })
 }
 
-/// Whether a block has any non-empty prose (used to skip versioning empty scaffolds).
+/// Whether a block has any non-empty leaf content (including code and callouts).
 ///
 /// Purpose: the first snapshot requires actual content.
 ///
@@ -431,10 +435,11 @@ mod tests {
     }
 
     #[test]
-    fn has_content_requires_non_whitespace_prose() {
+    fn has_content_requires_non_whitespace_leaf_content() {
         assert!(!has_content_impl(""));
         assert!(!has_content_impl("tab: A\n\n"));
         assert!(has_content_impl("tab: A\nhi\n"));
+        assert!(has_content_impl("```js\nx\n```\n"));
     }
 
     #[test]

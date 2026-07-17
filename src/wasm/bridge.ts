@@ -1,6 +1,5 @@
 import init, {
 	apply_op,
-	block_content_edit,
 	content_signature,
 	diff,
 	ensure_ids,
@@ -14,25 +13,11 @@ import init, {
 	parse_block,
 	reconcile,
 	replace_block_content,
-	scan,
 	scan_view,
 	serialize,
 	set_block_attr,
 } from "./pkg/mica_core.js";
 import wasmBinary from "./pkg/mica_core_bg.wasm";
-
-/** Byte-offset span of a top-level ` ```mica ` block (mirrors Rust `BlockSpan`). */
-export interface BlockSpan {
-	start: number;
-	end: number;
-	fence_char: number;
-	fence_len: number;
-	content_start: number;
-	content_end: number;
-	closed: boolean;
-	/** Header attributes (`id`, `name`, appearance overrides), in source order. */
-	attrs: [string, string][];
-}
 
 /** A CST node (mirrors Rust `Node`). */
 export type MicaNode =
@@ -53,6 +38,7 @@ export interface Cst {
 }
 
 let ready = false;
+let initializing: Promise<void> | null = null;
 
 /**
  * Instantiate the inlined WASM core exactly once. The `.wasm` is bundled into
@@ -62,6 +48,16 @@ let ready = false;
  */
 export async function initCore(): Promise<void> {
 	if (ready) return;
+	initializing ??= initializeCore();
+	try {
+		await initializing;
+	} catch (error) {
+		initializing = null;
+		throw error;
+	}
+}
+
+async function initializeCore(): Promise<void> {
 	await init({ module_or_path: wasmBinary });
 	ready = true;
 	// After instantiation the inlined bytes are dead weight (the engine keeps
@@ -101,11 +97,6 @@ export function newId(): string {
 	return new_id();
 }
 
-/** Locate every top-level ` ```mica ` block in a document. */
-export function scanBlocks(src: string): BlockSpan[] {
-	return scan(src) as BlockSpan[];
-}
-
 /** Parse one block's content into a CST. */
 export function parseBlock(content: string): Cst {
 	return parse_block(content) as Cst;
@@ -118,16 +109,16 @@ export function serializeCst(cst: Cst): string {
 
 /** A block located with UTF-16 offsets + id/name (mirrors Rust `BlockView`). */
 export interface BlockView {
-	start: number;
-	end: number;
-	content_start: number;
-	content_end: number;
-	fence_len: number;
-	closed: boolean;
-	id: string | null;
-	name: string | null;
+	readonly start: number;
+	readonly end: number;
+	readonly content_start: number;
+	readonly content_end: number;
+	readonly fence_len: number;
+	readonly closed: boolean;
+	readonly id: string | null;
+	readonly name: string | null;
 	/** All fence-header attributes, in header order. */
-	attrs: [string, string][];
+	readonly attrs: readonly (readonly [string, string])[];
 }
 
 // scan_view is a pure function of the document, and independent subsystems
@@ -136,30 +127,14 @@ export interface BlockView {
 // latest-doc slot dedupes those WASM round-trips while retaining at most one
 // document string — usually the editor's own live copy, so ~zero extra memory.
 // Hits alias the same array: callers treat scan results as immutable.
-let lastScan: { doc: string; blocks: BlockView[] } | null = null;
+let lastScan: { doc: string; blocks: readonly BlockView[] } | null = null;
 
 /** Locate all ` ```mica ` blocks with CodeMirror (UTF-16) offsets. */
-export function scanBlocksView(src: string): BlockView[] {
+export function scanBlocksView(src: string): readonly BlockView[] {
 	if (lastScan && lastScan.doc === src) return lastScan.blocks;
 	const blocks = scan_view(src) as BlockView[];
 	lastScan = { doc: src, blocks };
 	return blocks;
-}
-
-/** A position-mapped edit (UTF-16 offsets) — mirrors Rust `BlockEdit`. */
-export interface BlockEdit {
-	from: number;
-	to: number;
-	insert: string;
-}
-
-/**
- * Compute the CodeMirror change that replaces block `id`'s content with
- * `newContent`. Bounds are recomputed from a live scan, so it can never
- * append-instead-of-replace. Returns `null` if the block is not found.
- */
-export function blockContentEdit(doc: string, id: string, newContent: string): BlockEdit | null {
-	return block_content_edit(doc, id, newContent) as BlockEdit | null;
 }
 
 /** Replace block `id`'s content in `doc`, returning the full new document. */
@@ -261,19 +236,6 @@ export function diffText(base: string, other: string, granularity: DiffGranulari
 /** A unified-diff patch (line granularity) between `base` and `other`. */
 export function makePatch(base: string, other: string, context = 3): string {
 	return make_patch(base, other, context);
-}
-
-/** Navigate a CST to the node at `path` (child indices from the root). */
-export function nodeAtPath(cst: Cst, path: number[]): MicaNode | null {
-	let nodes: MicaNode[] = cst.children;
-	let node: MicaNode | null = null;
-	for (const idx of path) {
-		const next = nodes[idx];
-		if (!next) return null;
-		node = next;
-		nodes = next.kind === "container" ? next.children : [];
-	}
-	return node;
 }
 
 // --- Reconciliation (mirrors the Rust reconcile types) -------------------

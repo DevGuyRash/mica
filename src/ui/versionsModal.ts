@@ -159,7 +159,7 @@ export class VersionsModal extends Modal {
 		contentEl.empty();
 		if (!this.rows.length && !this.working.trim()) {
 			contentEl.createEl("p", {
-				text: "No stored versions yet. Edit the block, or run “Snapshot versions now”.",
+				text: "No stored versions yet. Edit the block, or run “Save versions now”.",
 			});
 			return;
 		}
@@ -424,6 +424,7 @@ export class VersionsModal extends Modal {
 			this.layout,
 			(v) => {
 				this.layout = v;
+				this.remember({ defaultDiffMode: v });
 				this.render();
 			},
 		);

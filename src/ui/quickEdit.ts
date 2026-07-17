@@ -1,7 +1,7 @@
 import { setIcon } from "obsidian";
 import type { RenderCtx } from "./blockShell";
 import { EditorLightbox } from "./lightbox";
-import { MdEditor } from "./mdEditor";
+import { MdEditor, saveShortcutLabel } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
 
 export interface RegionTarget {
@@ -36,7 +36,7 @@ interface OpenEditor {
 	applyOp: (value: string) => void;
 	/** Destroy the editor locally (no doc change, draft cleared). */
 	closeLocal: () => void;
-	/** The editor's own cancel path (dirty editors arm "Discard?"). */
+	/** The editor's own cancel path (dirty editors arm "Discard changes?"). */
 	cancel: () => void;
 }
 
@@ -161,7 +161,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	bar.createDiv({ cls: "mica-footer-spacer" });
 	const expand = bar.createEl("button", {
 		cls: "clickable-icon mica-qe-expand",
-		attr: { type: "button", "aria-label": "Open in the full editor (Ctrl+click a region does this directly)" },
+		attr: { type: "button", "aria-label": "Open in the full editor (Ctrl/Cmd+click a section does this directly)" },
 	});
 	setIcon(expand, "maximize-2");
 
@@ -176,10 +176,11 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		cancel.setText("Cancel");
 	};
 
+	const shortcut = saveShortcutLabel();
 	const editor = new MdEditor(host, {
 		app: ctx.app,
 		initial: initial ?? target.original,
-		placeholder: "Write markdown — Ctrl+Enter saves, Esc cancels",
+		placeholder: shortcut ? `Write markdown — ${shortcut} saves, Esc cancels` : "Write markdown — Esc cancels",
 		onSave: () => commit(),
 		onCancel: () => requestCancel(),
 		onChange: (v) => {
@@ -226,7 +227,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		}
 		discardArmed = true;
 		cancel.addClass("mica-danger");
-		cancel.setText("Discard?");
+		cancel.setText("Discard changes?");
 		window.setTimeout(disarm, 2500);
 	};
 
@@ -250,7 +251,7 @@ export function openLightboxFor(ctx: RenderCtx, target: RegionTarget, initial?: 
 	const key = draftKey(target);
 	new EditorLightbox({
 		app: ctx.app,
-		title: "Edit region",
+		title: "Edit section",
 		initial: initial ?? ctx.ui?.draft?.text ?? target.original,
 		sourcePath: ctx.sourcePath,
 		onDraft: (v) => {

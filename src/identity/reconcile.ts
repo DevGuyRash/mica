@@ -5,6 +5,7 @@ import {
 	reconcileIndexes,
 	scanBlocksView,
 	type ContentRef,
+	type LedgerEvent,
 	type ReconcileAction,
 	type SidecarRef,
 } from "../wasm/bridge";
@@ -27,15 +28,25 @@ function sidecarFolders(plugin: MicaPlugin): TFolder[] {
 		.filter((f): f is TFolder => f instanceof TFolder && f.path.endsWith(".mica"));
 }
 
-async function gatherSidecar(plugin: MicaPlugin): Promise<SidecarRef[]> {
-	const refs: SidecarRef[] = [];
+interface IndexedSidecar {
+	readonly folder: TFolder;
+	readonly events: readonly LedgerEvent[];
+	readonly blocks: ReadonlySet<string>;
+}
+
+async function gatherSidecars(plugin: MicaPlugin): Promise<IndexedSidecar[]> {
+	const sidecars: IndexedSidecar[] = [];
 	for (const folder of sidecarFolders(plugin)) {
 		const events = await readEventsAt(plugin.app.vault, `${folder.path}/ledger.jsonl`);
-		for (const block of new Set(events.map((e) => e.block))) {
-			refs.push({ block, sidecar: folder.path });
-		}
+		sidecars.push({ folder, events, blocks: new Set(events.map((event) => event.block)) });
 	}
-	return refs;
+	return sidecars;
+}
+
+function sidecarRefs(sidecars: readonly IndexedSidecar[]): SidecarRef[] {
+	return sidecars.flatMap(({ folder, blocks }) =>
+		[...blocks].map((block) => ({ block, sidecar: folder.path })),
+	);
 }
 
 export interface RepairReport {
@@ -54,28 +65,43 @@ export interface RepairReport {
 export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 	const vault = plugin.app.vault;
 	const content = await gatherContent(plugin);
-	const actions = reconcileIndexes(content, await gatherSidecar(plugin));
+	const sidecars = await gatherSidecars(plugin);
+	const actions = reconcileIndexes(content, sidecarRefs(sidecars));
+	const sidecarByPath = new Map(sidecars.map((sidecar) => [sidecar.folder.path, sidecar]));
+	const keeperByBlock = new Map<string, string>();
+	for (const action of actions) {
+		if (action.kind === "duplicate-block") {
+			keeperByBlock.set(action.block, pickKeeper(plugin, action.block, action.notes, sidecarByPath));
+		}
+	}
 
 	const noteByBlock = new Map<string, string>();
-	for (const c of content) noteByBlock.set(c.block, c.note);
+	for (const ref of content) noteByBlock.set(ref.block, keeperByBlock.get(ref.block) ?? ref.note);
 
 	const rehomed: { from: string; to: string }[] = [];
 	const buried: string[] = [];
-	for (const folder of sidecarFolders(plugin)) {
-		const events = await readEventsAt(vault, `${folder.path}/ledger.jsonl`);
-		const notePath = events.map((e) => noteByBlock.get(e.block)).find((n): n is string => Boolean(n));
+	for (const { folder, events, blocks } of sidecars) {
+		let notePath: string | undefined;
+		for (const block of blocks) {
+			notePath = noteByBlock.get(block);
+			if (notePath) break;
+		}
 		if (!notePath) {
 			// No live note references ANY of this folder's blocks: the note is
 			// gone. History is never deleted — it moves to the graveyard.
-			if (events.length && (await buryFolder(plugin, folder))) buried.push(folder.path);
+			const from = folder.path;
+			if (events.length && (await buryFolder(plugin, folder))) buried.push(from);
 			continue;
 		}
 		const note = vault.getAbstractFileByPath(notePath);
 		if (!(note instanceof TFile)) continue;
 		const expected = sidecarDir(note);
 		if (expected !== folder.path && !vault.getAbstractFileByPath(expected)) {
-			await vault.rename(folder, expected).catch(() => undefined);
-			rehomed.push({ from: folder.path, to: expected });
+			const from = folder.path;
+			// Forking below reads history from the keeper's co-located sidecar, so
+			// a failed rehome must stop the repair before any ids are rewritten.
+			await vault.rename(folder, expected);
+			rehomed.push({ from, to: expected });
 		}
 	}
 
@@ -84,7 +110,7 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 	const forked: { block: string; note: string; freshId: string }[] = [];
 	for (const a of actions) {
 		if (a.kind !== "duplicate-block") continue;
-		const keeper = await pickKeeper(plugin, a.block, a.notes);
+		const keeper = keeperByBlock.get(a.block) ?? a.notes[0];
 		for (const notePath of a.notes) {
 			if (notePath === keeper) continue;
 			const fresh = await forkBlock(plugin, a.block, keeper, notePath);
@@ -96,13 +122,17 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 
 /** The note that keeps a duplicated block id: the one whose own sidecar
  *  already holds the block's history; ties broken by path order. */
-async function pickKeeper(plugin: MicaPlugin, block: string, notes: string[]): Promise<string> {
-	const sorted = [...notes].sort();
+function pickKeeper(
+	plugin: MicaPlugin,
+	block: string,
+	notes: string[],
+	sidecarByPath: ReadonlyMap<string, IndexedSidecar>,
+): string {
+	const sorted = [...new Set(notes)].sort();
 	for (const notePath of sorted) {
 		const note = plugin.app.vault.getAbstractFileByPath(notePath);
 		if (!(note instanceof TFile)) continue;
-		const events = await readEventsAt(plugin.app.vault, `${sidecarDir(note)}/ledger.jsonl`);
-		if (events.some((e) => e.block === block)) return notePath;
+		if (sidecarByPath.get(sidecarDir(note))?.blocks.has(block)) return notePath;
 	}
 	return sorted[0];
 }
@@ -133,11 +163,9 @@ async function forkBlock(
 		);
 		if (events.length) {
 			await ensureSidecar(vault, copy);
-			for (const e of events) {
-				if (typeof e.hash === "string" && e.hash) {
-					const body = await readObject(vault, keeper, e.hash);
-					if (body !== null) await writeObject(vault, copy, e.hash, body);
-				}
+			for (const hash of new Set(events.map((event) => event.hash))) {
+				const body = await readObject(vault, keeper, hash);
+				if (body !== null) await writeObject(vault, copy, hash, body);
 			}
 			await appendEvents(
 				vault,

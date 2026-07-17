@@ -76,7 +76,7 @@ pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
 /// Scan for fenced blocks whose info tag is `tag` (`mica`, or `tabs` for migration).
 ///
 /// Only the outermost blocks are returned; nested structure is the parser's job.
-pub fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
+pub(crate) fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
     let mut blocks = Vec::new();
     let mut offset = 0usize;
     let mut ctx = Ctx::None;

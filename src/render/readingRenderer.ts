@@ -1,7 +1,18 @@
 import { MarkdownRenderChild, TFile } from "obsidian";
 import type MicaPlugin from "../main";
-import { parseBlock } from "../wasm/bridge";
-import { renderCst, type BlockUi, type ChipInfo } from "../ui/blockShell";
+import { parseBlock, scanBlocksView, type BlockView } from "../wasm/bridge";
+import { renderCst, type ChipInfo } from "../ui/blockShell";
+import { getBlockUi } from "./blockUiState";
+
+interface SectionCache {
+	text: string;
+	lineStarts: readonly number[];
+	blocksByStart: ReadonlyMap<number, BlockView>;
+}
+
+// Section info exposes a line number in the whole note. Keep one bounded index
+// so a note with many blocks gets one line walk and one WASM scan, total.
+let sectionCache: SectionCache | null = null;
 
 /**
  * Reading view: register the ` ```mica ` code-block processor. Obsidian calls
@@ -16,15 +27,11 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 		ctx.addChild(child);
 
 		// The processor receives only the inner source; the block id and attrs
-		// live on the fence header line, recovered via the section info (read
-		// fresh — never cached).
+		// live on the fence header line, recovered from the current section text.
 		const info = ctx.getSectionInfo(el);
-		const header = info ? lineAt(info.text, info.lineStart) : "";
-		const id = header.match(/\bid=([^\s`"]+)/)?.[1];
-		const attrs: Record<string, string> = {};
-		for (const m of header.matchAll(/(\w[\w-]*)=(?:"([^"]*)"|(\S+))/g)) {
-			attrs[m[1]] = m[2] ?? m[3] ?? "";
-		}
+		const block = info ? blockAtLine(info.text, info.lineStart) : undefined;
+		const id = block?.id ?? undefined;
+		const attrs = block ? Object.fromEntries(block.attrs) : {};
 
 		let chip: ChipInfo | undefined;
 		if (plugin.settings.showVersionChip) {
@@ -35,14 +42,7 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 		}
 
 		// Share tab/collapse state with Live Preview via the same key.
-		let ui: BlockUi | undefined;
-		if (id) {
-			ui = plugin.micaUi.get(id);
-			if (!ui) {
-				ui = { active: new Map(), reveal: null, draft: null, collapsed: false, folded: new Set() };
-				plugin.micaUi.set(id, ui);
-			}
-		}
+		const ui = id ? getBlockUi(plugin, id) : undefined;
 
 		try {
 			renderCst(parseBlock(source), el, {
@@ -66,17 +66,23 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 }
 
 /**
- * The `line`-th line of `text` (0-based; "" past the end). `section.text` is
- * the WHOLE note and this runs once per block, so splitting the full note
- * into a line array each time is O(note × blocks) allocation for one line.
+ * Resolve one section line through the Rust scanner's exact header grammar.
+ * The local single-slot index keeps the scanner's immutable block aliases and
+ * avoids O(note × blocks) line walks as Obsidian invokes each processor.
  */
-function lineAt(text: string, line: number): string {
-	let pos = 0;
-	for (let i = 0; i < line; i++) {
-		const nl = text.indexOf("\n", pos);
-		if (nl < 0) return "";
-		pos = nl + 1;
+function blockAtLine(text: string, line: number): BlockView | undefined {
+	if (!sectionCache || sectionCache.text !== text) {
+		const lineStarts = [0];
+		let pos = 0;
+		while ((pos = text.indexOf("\n", pos)) >= 0) {
+			lineStarts.push(++pos);
+		}
+		sectionCache = {
+			text,
+			lineStarts,
+			blocksByStart: new Map(scanBlocksView(text).map((block) => [block.start, block])),
+		};
 	}
-	const end = text.indexOf("\n", pos);
-	return end < 0 ? text.slice(pos) : text.slice(pos, end);
+	const start = sectionCache.lineStarts[line];
+	return start === undefined ? undefined : sectionCache.blocksByStart.get(start);
 }

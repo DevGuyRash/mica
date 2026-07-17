@@ -225,7 +225,7 @@ describe("structured callout editor", function () {
 			const title = modal.querySelector(".mica-coedit-title") as HTMLInputElement;
 			title.value = "New title";
 			title.dispatchEvent(new Event("input", { bubbles: true }));
-			(Array.from(modal.querySelectorAll(".mica-pop-seg")).find((b) => b.textContent === "Closed") as HTMLElement).click();
+			(Array.from(modal.querySelectorAll(".mica-pop-seg")).find((b) => b.textContent === "Collapsed") as HTMLElement).click();
 			const host = modal.querySelector(".mica-mdeditor") as HTMLElement & {
 				micaEditor?: { setValue(v: string): void };
 			};
@@ -1192,5 +1192,71 @@ describe("round 16: pill hit-testing, menu dismissal, outlines", function () {
 		});
 		expect(widths.off).toBe("0px");
 		expect(widths.on).toBe("1px");
+	});
+});
+
+describe("round 17: configurable save shortcut", function () {
+	it("the chosen shortcut saves the editor and labels follow it", async function () {
+		await browser.executeObsidian(({ app }) => {
+			type P = { settings: { saveShortcut: string }; applyStyleVars(): void };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, P> } }).plugins.plugins["mica"];
+			plugin.settings.saveShortcut = "shift-enter";
+			plugin.applyStyleVars();
+		});
+		await seedAndOpen("SaveKey.md", "Intro.\n\n```mica id=sk-1\ntab: Main\noriginal words\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			{ timeout: 8000, timeoutMsg: "region never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-region.is-editable") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(
+						(document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null)?.shadowRoot?.querySelector(
+							".cm-content",
+						),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "editor never opened" },
+		);
+		// The placeholder names the chosen key (visible on an emptied editor).
+		const placeholder = await browser.executeObsidian(() => {
+			const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { setValue(v: string): void };
+			};
+			host.micaEditor?.setValue("");
+			const ph = host.shadowRoot?.querySelector(".cm-placeholder");
+			return ph?.textContent ?? "";
+		});
+		expect(placeholder).toContain("Shift+Enter");
+		// And the key actually saves.
+		await browser.executeObsidian(() => {
+			const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { setValue(v: string): void };
+			};
+			host.micaEditor?.setValue("saved by shift-enter");
+			const content = host.shadowRoot?.querySelector(".cm-content") as HTMLElement;
+			content.focus();
+			content.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true }),
+			);
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("saved by shift-enter");
+				}),
+			{ timeout: 8000, timeoutMsg: "Shift+Enter did not save" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			type P = { settings: { saveShortcut: string }; applyStyleVars(): void };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, P> } }).plugins.plugins["mica"];
+			plugin.settings.saveShortcut = "mod-enter";
+			plugin.applyStyleVars();
+		});
 	});
 });

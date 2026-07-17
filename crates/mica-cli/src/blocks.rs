@@ -126,6 +126,11 @@ pub fn parse_path(s: &str) -> Result<Vec<usize>> {
 /// assert_eq!(p, Some(vec![0]));
 /// ```
 pub fn first_container(content: &str, name: &str) -> Option<Vec<usize>> {
+    first_container_in(&parse_block_impl(content).children, name)
+}
+
+/// Find the first named container in an already-parsed node list.
+pub(crate) fn first_container_in(nodes: &[Node], name: &str) -> Option<Vec<usize>> {
     fn walk(nodes: &[Node], name: &str, prefix: &mut Vec<usize>) -> Option<Vec<usize>> {
         for (i, n) in nodes.iter().enumerate() {
             if let Node::Container {
@@ -144,7 +149,7 @@ pub fn first_container(content: &str, name: &str) -> Option<Vec<usize>> {
         }
         None
     }
-    walk(&parse_block_impl(content).children, name, &mut Vec::new())
+    walk(nodes, name, &mut Vec::new())
 }
 
 /// A `(path, kind, display title)` row of the `ls --tree` view.

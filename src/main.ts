@@ -1,7 +1,7 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
 import { setEditorBehavior } from "./ui/quickEdit";
-import { registerViewPrefsPersistence, setEditorViewPrefs } from "./ui/mdEditor";
+import { registerViewPrefsPersistence, setEditorViewPrefs, setSaveShortcut } from "./ui/mdEditor";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
 import { micaSourceHighlight } from "./cm/micaSourceHighlight";
 import { micaLivePreview } from "./cm/micaLivePreview";
@@ -69,7 +69,7 @@ export default class MicaPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "snapshot-now",
-			name: "Snapshot versions now",
+			name: "Save versions now",
 			callback: () => void this.snapshotActiveNote(),
 		});
 		this.addCommand({
@@ -241,6 +241,7 @@ export default class MicaPlugin extends Plugin {
 		b.setAttribute("data-mica-grip", s.dragHandlePosition);
 		setEditorBehavior(s.editorClickOutside);
 		setEditorViewPrefs({ lineNumbers: s.editorLineNumbers, whitespace: s.editorWhitespace });
+		setSaveShortcut(s.saveShortcut);
 		registerViewPrefsPersistence((p) => {
 			this.settings.editorLineNumbers = p.lineNumbers;
 			this.settings.editorWhitespace = p.whitespace;

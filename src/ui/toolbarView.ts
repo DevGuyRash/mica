@@ -344,8 +344,8 @@ function buildCalloutPicker(panel: HTMLElement, app: App, getView: () => EditorV
 		foldBtns.push(b);
 	};
 	foldOpt("Static", "", "Always expanded");
-	foldOpt("Fold +", "+", "Foldable, starts open");
-	foldOpt("Fold −", "-", "Foldable, starts collapsed");
+	foldOpt("Open", "+", "Foldable, starts open");
+	foldOpt("Collapsed", "-", "Foldable, starts collapsed");
 
 	const title = panel.createEl("input", {
 		cls: "mica-pop-search",

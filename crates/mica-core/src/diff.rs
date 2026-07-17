@@ -101,10 +101,10 @@ fn refine_hunk_charwise(hunk: Hunk) -> Hunk {
             let mut i = std::mem::take(inss);
             let pairs = d.len().min(i.len());
             let mut d = d;
-            for k in 0..pairs {
-                let (sa, sb) = char_spans(&d[k].value, &i[k].value);
-                d[k].inline = sa;
-                i[k].inline = sb;
+            for (deleted, inserted) in d.iter_mut().zip(i.iter_mut()) {
+                let (sa, sb) = char_spans(&deleted.value, &inserted.value);
+                deleted.inline = sa;
+                inserted.inline = sb;
             }
             for c in d.iter_mut().skip(pairs) {
                 c.inline.clear();

@@ -597,6 +597,28 @@ function wireNavRow(
 	root: HTMLElement,
 	dismiss: () => void,
 ): void {
+	// A keyboard path for the one structural affordance that lacked one:
+	// Tab reaches rows, Enter/Space reveals, arrows walk the tree.
+	row.el.setAttribute("role", "button");
+	row.el.tabIndex = 0;
+	row.el.addEventListener("keydown", (ke: KeyboardEvent) => {
+		if (ke.key === "Enter" || ke.key === " ") {
+			ke.preventDefault();
+			for (const r of rows) r.el.removeClass("is-current");
+			row.el.addClass("is-current");
+			revealNode(ctx, root, {
+				path: row.path,
+				kind: row.revealKind,
+				start: row.kind === "region" ? row.index : undefined,
+			});
+			return;
+		}
+		if (ke.key === "ArrowDown" || ke.key === "ArrowUp") {
+			ke.preventDefault();
+			const i = rows.indexOf(row);
+			rows[i + (ke.key === "ArrowDown" ? 1 : -1)]?.el.focus();
+		}
+	});
 	row.el.addEventListener("pointerdown", (down: PointerEvent) => {
 		if (down.button !== 0) return;
 		down.preventDefault();
@@ -869,9 +891,21 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 
 	const radiusRow = pop.createDiv({ cls: "mica-appearance-row" });
 	radiusRow.createSpan({ text: "Radius" });
+	const radiusOverridden = Boolean(ctx.blockAttrs?.["radius"]);
+	if (radiusOverridden) radiusRow.createSpan({ cls: "mica-appearance-override", text: "overrides global" });
 	const slider = radiusRow.createEl("input", { attr: { type: "range", min: "0", max: "20", step: "1" } });
-	slider.value = ctx.blockAttrs?.["radius"] ?? "10";
+	// Seed from the EFFECTIVE radius (the block override, else the resolved
+	// global) — a literal default would misrepresent unoverridden blocks.
+	const effectiveRadius = parseFloat(getComputedStyle(el).getPropertyValue("--mica-radius"));
+	slider.value = ctx.blockAttrs?.["radius"] ?? String(Number.isFinite(effectiveRadius) ? effectiveRadius : 10);
 	slider.addEventListener("change", () => ctx.editable?.setAttr("radius", slider.value));
+	const clearRadius = iconButton(
+		radiusRow,
+		`mica-head-btn ${radiusOverridden ? "is-override" : ""}`,
+		"rotate-ccw",
+		radiusOverridden ? "Remove this block's override (follow the global radius)" : "Follows the global radius",
+	);
+	clearRadius.addEventListener("click", () => ctx.editable?.setAttr("radius", null));
 
 	pop.createDiv({
 		cls: "mica-appearance-hint",
@@ -1797,6 +1831,7 @@ function mountGridResizers(
 			const frPerPx = total / Math.max(1, grid.clientWidth);
 			let lastW = startW;
 			const move = (e: PointerEvent): void => {
+				document.body.addClass("mica-handle-dragging"); // one gesture, one visual
 				// Clamp so neither neighbour shrinks below 0.15fr.
 				const raw = (e.clientX - startX) * frPerPx;
 				const dFr = Math.max(-(startW[b - 1] - 0.15), Math.min(startW[b] - 0.15, raw));
@@ -1815,6 +1850,7 @@ function mountGridResizers(
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
+				document.body.removeClass("mica-handle-dragging");
 				live(startW);
 				layout();
 			};
@@ -1824,6 +1860,7 @@ function mountGridResizers(
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
+				document.body.removeClass("mica-handle-dragging");
 				const moved = Math.abs(e.clientX - startX) >= 5;
 				if (e.type !== "pointerup" || !moved) {
 					live(startW); // sub-threshold wiggle: snap back, commit nothing
@@ -1894,6 +1931,7 @@ function mountGridResizers(
 			let lastA: number | null = null;
 			let lastB: number | null = null;
 			const move = (e: PointerEvent): void => {
+				document.body.addClass("mica-handle-dragging");
 				const dy = e.clientY - startY;
 				lastA = Math.max(40, Math.round(startA + dy));
 				lastB = Math.max(40, Math.round(startB - dy));
@@ -1911,6 +1949,7 @@ function mountGridResizers(
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
+				document.body.removeClass("mica-handle-dragging");
 				applyRowTemplate(grid, rowHeights);
 				layout();
 			};
@@ -1920,6 +1959,7 @@ function mountGridResizers(
 				window.removeEventListener("pointerup", up, true);
 				window.removeEventListener("pointercancel", up, true);
 				window.removeEventListener("keydown", onEsc, true);
+				document.body.removeClass("mica-handle-dragging");
 				const movedRow = Math.abs(e.clientY - startY) >= 5;
 				if (e.type !== "pointerup" || lastA === null || !movedRow) {
 					applyRowTemplate(grid, rowHeights); // wiggle: snap back

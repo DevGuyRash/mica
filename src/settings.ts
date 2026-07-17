@@ -65,10 +65,12 @@ export interface MicaSettings {
 	dragHandlePosition: "left" | "right";
 	/** What clicking outside an inline editor does. */
 	editorClickOutside: "nothing" | "cancel" | "save";
-	/** Show line numbers in the markdown editors. */
 	/** Draw structural outlines (tabs, sections, cells) by default; per-block
 	 * `outline=on|off` fence attr overrides. */
 	showOutlines: boolean;
+	/** The editor save key; placeholders and tooltips follow it. */
+	saveShortcut: "mod-enter" | "mod-s" | "shift-enter" | "none";
+	/** Show line numbers in the markdown editors. */
 	editorLineNumbers: boolean;
 	/** Render whitespace characters in the markdown editors. */
 	editorWhitespace: boolean;
@@ -108,6 +110,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	dragHandlePosition: "right",
 	editorClickOutside: "nothing",
 	showOutlines: false,
+	saveShortcut: "mod-enter",
 	editorLineNumbers: false,
 	editorWhitespace: false,
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
@@ -235,6 +238,26 @@ export class MicaSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		new Setting(containerEl)
+			.setName("Hide mica syntax in diffs")
+			.setDesc("Ignore layout lines (:::, tab:) when comparing — only real content differences show.")
+			.addToggle((t) =>
+				t.setValue(s.diffHideSyntax).onChange(async (v) => {
+					s.diffHideSyntax = v;
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Ignore whitespace in diffs")
+			.setDesc("Collapse runs of spaces and tabs before comparing.")
+			.addToggle((t) =>
+				t.setValue(s.diffIgnoreWs).onChange(async (v) => {
+					s.diffIgnoreWs = v;
+					await save();
+				}),
+			);
+
 		// ---------- Appearance ----------
 		new Setting(containerEl).setHeading().setName("Appearance");
 
@@ -353,24 +376,6 @@ export class MicaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Clicking outside an editor")
-			.setDesc(
-				"What happens to an open inline editor when you click elsewhere: keep editing, discard, or save & close (also prevents several cells editing at once).",
-			)
-			.addDropdown((d) =>
-				d
-					.addOption("nothing", "Keep editing")
-					.addOption("cancel", "Discard changes")
-					.addOption("save", "Save & close")
-					.setValue(s.editorClickOutside)
-					.onChange(async (v) => {
-						s.editorClickOutside = v as MicaSettings["editorClickOutside"];
-						this.micaPlugin.applyStyleVars();
-						await save();
-					}),
-			);
-
-		new Setting(containerEl)
 			.setName("Hover tools position")
 			.setDesc("Which corner a section's drag grip and edit pencil (and a cell's toolbar) appear in.")
 			.addDropdown((d) =>
@@ -438,33 +443,6 @@ export class MicaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Editor grows with content")
-			.setDesc("The inline editor expands as you type (up to its max); off = a fixed height with a scrollbar.")
-			.addToggle((t) =>
-				t.setValue(s.editorAutosize).onChange(async (v) => {
-					s.editorAutosize = v;
-					await save();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Editor max height")
-			.setDesc(
-				"Where the inline editor stops growing and scrolls (px). Drag its corner to resize within this bound.",
-			)
-			.addSlider((sl) =>
-				sl
-					.setLimits(120, 1200, 20)
-					.setValue(s.editorMaxHeightPx)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						s.editorMaxHeightPx = v;
-						this.micaPlugin.applyStyleVars();
-						await save();
-					}),
-			);
-
-		new Setting(containerEl)
 			.setName("Cap content height")
 			.setDesc("Limit a tab or grid cell's height and scroll past it, instead of letting it grow unbounded.")
 			.addToggle((t) =>
@@ -498,6 +476,95 @@ export class MicaSettingTab extends PluginSettingTab {
 		);
 
 		// ---------- Editor toolbar ----------
+		// ---------- Editors ----------
+		new Setting(containerEl).setHeading().setName("Editors");
+
+		new Setting(containerEl)
+			.setName("Clicking outside an editor")
+			.setDesc(
+				"What happens to an open inline editor when you click elsewhere: keep editing, discard, or save & close (also prevents several cells editing at once).",
+			)
+			.addDropdown((d) =>
+				d
+					.addOption("nothing", "Keep editing")
+					.addOption("cancel", "Discard changes")
+					.addOption("save", "Save & close")
+					.setValue(s.editorClickOutside)
+					.onChange(async (v) => {
+						s.editorClickOutside = v as MicaSettings["editorClickOutside"];
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Editor save shortcut")
+			.setDesc(
+				"The key that saves and closes an editor. Placeholders and tooltips follow your choice; editors already open pick it up when reopened. Esc always cancels.",
+			)
+			.addDropdown((d) =>
+				d
+					.addOption("mod-enter", "Ctrl/Cmd+Enter")
+					.addOption("mod-s", "Ctrl/Cmd+S")
+					.addOption("shift-enter", "Shift+Enter")
+					.addOption("none", "None (buttons only)")
+					.setValue(s.saveShortcut)
+					.onChange(async (v) => {
+						s.saveShortcut = v as MicaSettings["saveShortcut"];
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Editor grows with content")
+			.setDesc("The inline editor expands as you type (up to its max); off = a fixed height with a scrollbar.")
+			.addToggle((t) =>
+				t.setValue(s.editorAutosize).onChange(async (v) => {
+					s.editorAutosize = v;
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Editor max height")
+			.setDesc(
+				"Where the inline editor stops growing and scrolls (px). Drag its corner to resize within this bound.",
+			)
+			.addSlider((sl) =>
+				sl
+					.setLimits(120, 1200, 20)
+					.setValue(s.editorMaxHeightPx)
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						s.editorMaxHeightPx = v;
+						this.micaPlugin.applyStyleVars();
+						await save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Line numbers")
+			.setDesc("Show line numbers in the markdown editors (also toggleable from the editor toolbar).")
+			.addToggle((t) =>
+				t.setValue(s.editorLineNumbers).onChange(async (v) => {
+					s.editorLineNumbers = v;
+					this.micaPlugin.applyStyleVars();
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Whitespace characters")
+			.setDesc("Render spaces and tabs visibly in the markdown editors.")
+			.addToggle((t) =>
+				t.setValue(s.editorWhitespace).onChange(async (v) => {
+					s.editorWhitespace = v;
+					this.micaPlugin.applyStyleVars();
+					await save();
+				}),
+			);
+
 		new Setting(containerEl).setHeading().setName("Editor toolbar");
 		new Setting(containerEl).setDesc(
 			"Compose the ribbon shown in the quick editor and the lightbox: move items between the lists, reorder, add separators, and define your own template buttons.",

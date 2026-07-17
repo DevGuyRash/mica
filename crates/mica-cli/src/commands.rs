@@ -14,7 +14,7 @@ use crate::vault::{self, NoteRef};
 use mica_core::{
     apply_op_impl, diff_impl, ensure_ids_impl, hash_content_impl, make_patch_impl,
     migrate_tabs_impl, new_id_impl, parse_block_impl, reconcile_impl, scan_impl, serialize_impl,
-    ContentRef, Event, GroupKind, Node, SidecarRef, StructOp, VersionMeta,
+    ContentRef, Cst, Event, GroupKind, Node, SidecarRef, StructOp, VersionMeta,
 };
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -129,10 +129,12 @@ pub fn ls(ctx: &Ctx, note: &str, tree: bool) -> Result<()> {
     let mut rows = Vec::new();
     for (i, b) in spans.iter().filter(|b| b.closed).enumerate() {
         let content = &doc[b.content_start..b.content_end];
-        let tabs: Vec<String> = blocks::tree_rows(content)
-            .into_iter()
+        let tree_rows = blocks::tree_rows(content);
+        let tabs: Vec<String> = tree_rows
+            .iter()
             .filter(|(_, kind, _)| kind == "tab")
             .map(|(_, _, title)| title)
+            .cloned()
             .collect();
         let nversions = b
             .id()
@@ -145,20 +147,20 @@ pub fn ls(ctx: &Ctx, note: &str, tree: bool) -> Result<()> {
             b.get("name").map(str::to_string),
             tabs,
             nversions,
-            content.to_string(),
+            tree_rows,
         ));
     }
 
     if ctx.json {
         let v: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(i, id, name, tabs, nv, content)| {
+            .map(|(i, id, name, tabs, nv, rows)| {
                 let mut o = serde_json::json!({
                     "index": i, "id": id, "name": name, "tabs": tabs, "versions": nv,
                 });
                 if tree {
-                    o["tree"] = serde_json::json!(blocks::tree_rows(content)
-                        .into_iter()
+                    o["tree"] = serde_json::json!(rows
+                        .iter()
                         .map(|(p, k, t)| serde_json::json!({
                             "path": p.iter().map(usize::to_string).collect::<Vec<_>>().join("."),
                             "kind": k, "title": t
@@ -172,7 +174,7 @@ pub fn ls(ctx: &Ctx, note: &str, tree: bool) -> Result<()> {
         return Ok(());
     }
 
-    for (i, id, name, tabs, nv, content) in &rows {
+    for (i, id, name, tabs, nv, tree_rows) in &rows {
         let id_s = id.as_deref().unwrap_or("(no id)");
         let name_s = name
             .as_deref()
@@ -192,7 +194,7 @@ pub fn ls(ctx: &Ctx, note: &str, tree: bool) -> Result<()> {
             s.dim(&format!("{nv} version{}", if *nv == 1 { "" } else { "s" })),
         );
         if tree {
-            for (path, kind, title) in blocks::tree_rows(content) {
+            for (path, kind, title) in tree_rows {
                 let depth = path.len().saturating_sub(1);
                 let path_s = path
                     .iter()
@@ -207,7 +209,7 @@ pub fn ls(ctx: &Ctx, note: &str, tree: bool) -> Result<()> {
                     if title.is_empty() {
                         s.dim("—")
                     } else {
-                        s.bold(&title)
+                        s.bold(title)
                     },
                 );
             }
@@ -294,7 +296,7 @@ pub fn set(ctx: &Ctx, target: &NoteBlock, file: Option<&Path>) -> Result<()> {
 /// # Arguments
 /// * `ctx` - invocation context
 /// * `target` - note + block selector
-/// * `op` - built per subcommand once the live CST is known
+/// * `op` - built per subcommand from the live block and its parsed CST
 ///
 /// # Returns
 /// `()` on success; `BadArgs` when the reducer rejects the op.
@@ -306,18 +308,18 @@ pub fn set(ctx: &Ctx, target: &NoteBlock, file: Option<&Path>) -> Result<()> {
 /// ```no_run
 /// // used by tab/cell/grid/mv commands
 /// ```
-pub fn apply_structural(
+fn apply_structural(
     ctx: &Ctx,
     target: &NoteBlock,
-    op: impl FnOnce(&Located) -> Result<StructOp>,
+    op: impl FnOnce(&Located, &Cst) -> Result<StructOp>,
 ) -> Result<()> {
     let (note, _, _) = load(ctx, target)?;
     engine::snapshot_note(&note, false, true)?; // pre-image + id stamping
                                                 // Reload: stamping may have rewritten the doc.
     let doc = engine::read_doc(&note.abs)?;
     let located = blocks::locate(&doc, target.block.as_deref())?;
-    let op = op(&located)?;
     let mut cst = parse_block_impl(&located.content);
+    let op = op(&located, &cst)?;
     if !apply_op_impl(&mut cst, &op) {
         return Err(CliError::BadArgs(
             "the operation does not apply (missing target or invalid move) — check `mica ls --tree`".to_string(),
@@ -327,7 +329,9 @@ pub fn apply_structural(
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    let mut out = String::with_capacity(doc.len());
+    let mut out = String::with_capacity(
+        doc.len() - (located.span.content_end - located.span.content_start) + next.len(),
+    );
     out.push_str(&doc[..located.span.content_start]);
     out.push_str(&next);
     out.push_str(&doc[located.span.content_end..]);
@@ -337,8 +341,8 @@ pub fn apply_structural(
 }
 
 /// Resolve a tab ORDINAL (0-based among tabs) to a raw child index.
-fn tab_child_index(content: &str, group_path: &[usize], ordinal: usize) -> Result<usize> {
-    nth_child_of_kind(content, group_path, "tab", ordinal).ok_or_else(|| {
+fn tab_child_index(cst: &Cst, group_path: &[usize], ordinal: usize) -> Result<usize> {
+    nth_child_of_kind(cst, group_path, "tab", ordinal).ok_or_else(|| {
         CliError::NotFound(format!(
             "no tab #{ordinal} in that group — check `mica ls --tree`"
         ))
@@ -346,21 +350,15 @@ fn tab_child_index(content: &str, group_path: &[usize], ordinal: usize) -> Resul
 }
 
 /// Resolve a cell ORDINAL to a raw child index.
-fn cell_child_index(content: &str, group_path: &[usize], ordinal: usize) -> Result<usize> {
-    nth_child_of_kind(content, group_path, "cell", ordinal).ok_or_else(|| {
+fn cell_child_index(cst: &Cst, group_path: &[usize], ordinal: usize) -> Result<usize> {
+    nth_child_of_kind(cst, group_path, "cell", ordinal).ok_or_else(|| {
         CliError::NotFound(format!(
             "no cell #{ordinal} in that grid — check `mica ls --tree`"
         ))
     })
 }
 
-fn nth_child_of_kind(
-    content: &str,
-    group_path: &[usize],
-    kind: &str,
-    ordinal: usize,
-) -> Option<usize> {
-    let cst = parse_block_impl(content);
+fn nth_child_of_kind(cst: &Cst, group_path: &[usize], kind: &str, ordinal: usize) -> Option<usize> {
     let mut nodes = &cst.children;
     for &i in group_path {
         match nodes.get(i)? {
@@ -377,8 +375,7 @@ fn nth_child_of_kind(
 }
 
 /// The end-of-group raw insertion index (after the last child).
-fn group_len(content: &str, group_path: &[usize]) -> Result<usize> {
-    let cst = parse_block_impl(content);
+fn group_len(cst: &Cst, group_path: &[usize]) -> Result<usize> {
     let mut nodes = &cst.children;
     for &i in group_path {
         match nodes.get(i) {
@@ -394,18 +391,18 @@ fn group_len(content: &str, group_path: &[usize]) -> Result<usize> {
 }
 
 /// The tabs-group path: `--path` if given, else the first tabs group.
-fn tabs_path(located: &Located, path: Option<&str>) -> Result<Option<Vec<usize>>> {
+fn tabs_path(cst: &Cst, path: Option<&str>) -> Result<Option<Vec<usize>>> {
     match path {
         Some(p) => Ok(Some(blocks::parse_path(p)?)),
-        None => Ok(blocks::first_container(&located.content, "tabs")),
+        None => Ok(blocks::first_container_in(&cst.children, "tabs")),
     }
 }
 
 /// The grid path: `--path` if given, else the first grid.
-fn grid_path(located: &Located, path: Option<&str>) -> Result<Vec<usize>> {
+fn grid_path(cst: &Cst, path: Option<&str>) -> Result<Vec<usize>> {
     match path {
         Some(p) => blocks::parse_path(p),
-        None => blocks::first_container(&located.content, "grid").ok_or_else(|| {
+        None => blocks::first_container_in(&cst.children, "grid").ok_or_else(|| {
             CliError::NotFound("no grid in this block — check `mica ls --tree`".to_string())
         }),
     }
@@ -424,13 +421,14 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
             // (the factory always creates "New tab").
             let mut inserted_group_path: Option<Vec<usize>> = None;
             let mut insert_at: Option<usize> = None;
-            apply_structural(ctx, target, |located| {
-                match tabs_path(located, path.as_deref())? {
+            apply_structural(ctx, target, |_, cst| {
+                match tabs_path(cst, path.as_deref())? {
                     Some(gp) => {
                         let raw_at = match at {
-                            Some(ordinal) => tab_child_index(&located.content, &gp, *ordinal)
-                                .unwrap_or(group_len(&located.content, &gp)?),
-                            None => group_len(&located.content, &gp)?,
+                            Some(ordinal) => {
+                                tab_child_index(cst, &gp, *ordinal).unwrap_or(group_len(cst, &gp)?)
+                            }
+                            None => group_len(cst, &gp)?,
                         };
                         inserted_group_path = Some(gp.clone());
                         insert_at = Some(raw_at);
@@ -441,7 +439,7 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
                     }
                     None => {
                         // No tabs group yet: create one at the root's end.
-                        let root_len = group_len(&located.content, &[])?;
+                        let root_len = group_len(cst, &[])?;
                         inserted_group_path = None;
                         Ok(StructOp::InsertGroup {
                             path: vec![],
@@ -453,25 +451,20 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
             })?;
             if title != "New tab" {
                 // Rename the tab we just created (last tab of the target group).
-                let (note, _, _) = load(ctx, target)?;
-                let doc = engine::read_doc(&note.abs)?;
-                let located = blocks::locate(&doc, target.block.as_deref())?;
-                let gp = match inserted_group_path {
-                    Some(gp) => gp,
-                    None => blocks::first_container(&located.content, "tabs").ok_or_else(|| {
-                        CliError::Corrupt("tab group vanished after insert".to_string())
-                    })?,
-                };
-                let index = match insert_at {
-                    Some(i) => i,
-                    None => {
-                        // Freshly created group: its only tab.
-                        tab_child_index(&located.content, &gp, 0)?
-                    }
-                };
-                apply_structural(ctx, target, |_| {
+                apply_structural(ctx, target, |_, cst| {
+                    let gp =
+                        match &inserted_group_path {
+                            Some(gp) => gp.clone(),
+                            None => blocks::first_container_in(&cst.children, "tabs").ok_or_else(
+                                || CliError::Corrupt("tab group vanished after insert".to_string()),
+                            )?,
+                        };
+                    let index = match insert_at {
+                        Some(i) => i,
+                        None => tab_child_index(cst, &gp, 0)?,
+                    };
                     Ok(StructOp::RenameTab {
-                        path: gp.clone(),
+                        path: gp,
                         index,
                         title: title.clone(),
                     })
@@ -483,10 +476,10 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
             target,
             index,
             path,
-        } => apply_structural(ctx, target, |located| {
-            let gp = tabs_path(located, path.as_deref())?
+        } => apply_structural(ctx, target, |_, cst| {
+            let gp = tabs_path(cst, path.as_deref())?
                 .ok_or_else(|| CliError::NotFound("no tabs group in this block".to_string()))?;
-            let raw = tab_child_index(&located.content, &gp, *index)?;
+            let raw = tab_child_index(cst, &gp, *index)?;
             Ok(StructOp::DeleteTab {
                 path: gp,
                 index: raw,
@@ -497,10 +490,10 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
             index,
             title,
             path,
-        } => apply_structural(ctx, target, |located| {
-            let gp = tabs_path(located, path.as_deref())?
+        } => apply_structural(ctx, target, |_, cst| {
+            let gp = tabs_path(cst, path.as_deref())?
                 .ok_or_else(|| CliError::NotFound("no tabs group in this block".to_string()))?;
-            let raw = tab_child_index(&located.content, &gp, *index)?;
+            let raw = tab_child_index(cst, &gp, *index)?;
             Ok(StructOp::RenameTab {
                 path: gp,
                 index: raw,
@@ -512,11 +505,11 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
             from,
             to,
             path,
-        } => apply_structural(ctx, target, |located| {
-            let gp = tabs_path(located, path.as_deref())?
+        } => apply_structural(ctx, target, |_, cst| {
+            let gp = tabs_path(cst, path.as_deref())?
                 .ok_or_else(|| CliError::NotFound("no tabs group in this block".to_string()))?;
-            let raw_from = tab_child_index(&located.content, &gp, *from)?;
-            let raw_to = match tab_child_index(&located.content, &gp, *to) {
+            let raw_from = tab_child_index(cst, &gp, *from)?;
+            let raw_to = match tab_child_index(cst, &gp, *to) {
                 Ok(i) => {
                     if *to > *from {
                         i + 1 // insert AFTER the ordinal-target when moving right
@@ -524,7 +517,7 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
                         i
                     }
                 }
-                Err(_) => group_len(&located.content, &gp)?,
+                Err(_) => group_len(cst, &gp)?,
             };
             let mut from_path = gp.clone();
             from_path.push(raw_from);
@@ -540,12 +533,13 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
 /// `mica cell …` subcommands.
 pub fn cell(ctx: &Ctx, cmd: &CellCmd) -> Result<()> {
     match cmd {
-        CellCmd::Add { target, path, at } => apply_structural(ctx, target, |located| {
-            let gp = grid_path(located, path.as_deref())?;
+        CellCmd::Add { target, path, at } => apply_structural(ctx, target, |_, cst| {
+            let gp = grid_path(cst, path.as_deref())?;
             let raw_at = match at {
-                Some(ordinal) => cell_child_index(&located.content, &gp, *ordinal)
-                    .unwrap_or(group_len(&located.content, &gp)?),
-                None => group_len(&located.content, &gp)?,
+                Some(ordinal) => {
+                    cell_child_index(cst, &gp, *ordinal).unwrap_or(group_len(cst, &gp)?)
+                }
+                None => group_len(cst, &gp)?,
             };
             Ok(StructOp::InsertCell {
                 path: gp,
@@ -556,9 +550,9 @@ pub fn cell(ctx: &Ctx, cmd: &CellCmd) -> Result<()> {
             target,
             index,
             path,
-        } => apply_structural(ctx, target, |located| {
-            let gp = grid_path(located, path.as_deref())?;
-            let raw = cell_child_index(&located.content, &gp, *index)?;
+        } => apply_structural(ctx, target, |_, cst| {
+            let gp = grid_path(cst, path.as_deref())?;
+            let raw = cell_child_index(cst, &gp, *index)?;
             Ok(StructOp::DeleteCell {
                 path: gp,
                 index: raw,
@@ -569,10 +563,10 @@ pub fn cell(ctx: &Ctx, cmd: &CellCmd) -> Result<()> {
             from,
             to,
             path,
-        } => apply_structural(ctx, target, |located| {
-            let gp = grid_path(located, path.as_deref())?;
-            let raw_from = cell_child_index(&located.content, &gp, *from)?;
-            let raw_to = match cell_child_index(&located.content, &gp, *to) {
+        } => apply_structural(ctx, target, |_, cst| {
+            let gp = grid_path(cst, path.as_deref())?;
+            let raw_from = cell_child_index(cst, &gp, *from)?;
+            let raw_to = match cell_child_index(cst, &gp, *to) {
                 Ok(i) => {
                     if *to > *from {
                         i + 1
@@ -580,7 +574,7 @@ pub fn cell(ctx: &Ctx, cmd: &CellCmd) -> Result<()> {
                         i
                     }
                 }
-                Err(_) => group_len(&located.content, &gp)?,
+                Err(_) => group_len(cst, &gp)?,
             };
             let mut from_path = gp.clone();
             from_path.push(raw_from);
@@ -596,8 +590,8 @@ pub fn cell(ctx: &Ctx, cmd: &CellCmd) -> Result<()> {
 /// `mica grid …` subcommands.
 pub fn grid(ctx: &Ctx, cmd: &GridCmd) -> Result<()> {
     match cmd {
-        GridCmd::Cols { target, cols, path } => apply_structural(ctx, target, |located| {
-            let gp = grid_path(located, path.as_deref())?;
+        GridCmd::Cols { target, cols, path } => apply_structural(ctx, target, |_, cst| {
+            let gp = grid_path(cst, path.as_deref())?;
             Ok(StructOp::SetCols {
                 path: gp,
                 cols: *cols,
@@ -616,7 +610,7 @@ pub fn mv(
 ) -> Result<()> {
     let from = blocks::parse_path(from)?;
     let to_parent = blocks::parse_path(to_parent)?;
-    apply_structural(ctx, target, |_| {
+    apply_structural(ctx, target, |_, _| {
         Ok(StructOp::MoveNode {
             from: from.clone(),
             to_parent: to_parent.clone(),
@@ -847,7 +841,8 @@ pub fn watch(ctx: &Ctx, debounce: u64, interval: u64) -> Result<()> {
         let due: Vec<PathBuf> = dirty
             .iter()
             .filter(|(_, since)| since.elapsed().as_secs() >= debounce)
-            .map(|(p, _)| p.clone())
+            .map(|(path, _)| path)
+            .cloned()
             .collect();
         for p in due {
             dirty.remove(&p);
@@ -909,7 +904,7 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
             // Archived callouts become labeled versions, backdated a second
             // apart so the (ts, eid) fold orders them before the head below.
             let now = engine::now_ms();
-            let mut events = Vec::new();
+            let mut events = Vec::with_capacity(imported);
             for block in &result.blocks {
                 let count = block.versions.len() as u64;
                 for (i, v) in block.versions.iter().enumerate() {
@@ -1020,27 +1015,29 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     // Sidecar index: every block id in every ledger.
     let mut screfs: Vec<SidecarRef> = Vec::new();
     let sidecars = vault::vault_sidecars(&root)?;
+    let mut ledgers = Vec::with_capacity(sidecars.len());
     for sc in &sidecars {
         let events = sidecar::read_ledger_at(&sc.join("ledger.jsonl"))?;
-        let mut seen = std::collections::BTreeSet::new();
+        let rel = sc
+            .strip_prefix(&root)
+            .unwrap_or(sc)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for e in &events {
             let block = match e {
                 Event::AddVersion { block, .. }
                 | Event::SetHead { block, .. }
                 | Event::Label { block, .. } => block,
             };
-            if seen.insert(block.clone()) {
-                let rel = sc
-                    .strip_prefix(&root)
-                    .unwrap_or(sc)
-                    .to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/");
+            if seen.insert(block) {
                 screfs.push(SidecarRef {
                     block: block.clone(),
-                    sidecar: rel,
+                    sidecar: rel.clone(),
                 });
             }
         }
+        ledgers.push(events);
     }
     let actions = reconcile_impl(&content, &screfs);
 
@@ -1050,8 +1047,7 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
         .map(|c| (c.block.as_str(), c.note.as_str()))
         .collect();
     let mut rehomed = Vec::new();
-    for sc in &sidecars {
-        let events = sidecar::read_ledger_at(&sc.join("ledger.jsonl"))?;
+    for (sc, events) in sidecars.iter().zip(&ledgers) {
         let target = events.iter().find_map(|e| {
             let block = match e {
                 Event::AddVersion { block, .. }
@@ -1120,10 +1116,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
         let st = mica_core::fold_ledger_impl(&events);
         for (block, bs) in &st {
             for v in &bs.versions {
-                let obj = sc
-                    .join("objects")
-                    .join(format!("{}.mica.md", v.hash.replace(':', "-")));
-                if !obj.is_file() {
+                if !object_exists(&sc, &v.hash) {
                     problems += 1;
                     findings.push(serde_json::json!({
                         "sidecar": sc.display().to_string(), "kind": "missing-object",
@@ -1170,6 +1163,14 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether a sidecar contains the recorded object in a supported storage form.
+fn object_exists(sidecar: &Path, hash: &str) -> bool {
+    let objects = sidecar.join("objects");
+    let stem = hash.replace(':', "-");
+    objects.join(format!("{stem}.mica.md")).is_file()
+        || objects.join(format!("{stem}.mica.gz")).is_file()
 }
 
 /// Resolve a version selector (`vN`, `b3:hash`, or unique hash prefix) against
@@ -1220,18 +1221,21 @@ pub fn resolve_version(versions: &[VersionMeta], selector: &str) -> Result<Strin
     } else {
         format!("b3:{selector}")
     };
-    let matches: Vec<&VersionMeta> = versions
+    let mut matches = versions
         .iter()
-        .filter(|v| v.hash.starts_with(&norm))
-        .collect();
-    match matches.len() {
-        1 => Ok(matches[0].hash.clone()),
-        0 => Err(CliError::NotFound(format!(
+        .filter(|version| version.hash.starts_with(&norm));
+    let Some(first) = matches.next() else {
+        return Err(CliError::NotFound(format!(
             "no version matching '{selector}' — see `mica versions`"
-        ))),
-        n => Err(CliError::BadArgs(format!(
-            "'{selector}' is ambiguous ({n} versions match) — give more hash characters"
-        ))),
+        )));
+    };
+    let count = 1 + matches.count();
+    if count == 1 {
+        Ok(first.hash.clone())
+    } else {
+        Err(CliError::BadArgs(format!(
+            "'{selector}' is ambiguous ({count} versions match) — give more hash characters"
+        )))
     }
 }
 
@@ -1252,4 +1256,24 @@ fn load(ctx: &Ctx, target: &NoteBlock) -> Result<(NoteRef, String, Located)> {
     let doc = engine::read_doc(&note.abs)?;
     let located = blocks::locate(&doc, target.block.as_deref())?;
     Ok((note, doc, located))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
+    use super::*;
+
+    #[test]
+    fn object_exists_accepts_plain_and_compressed_storage() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sidecar = temp.path().join("N.mica");
+        let objects = sidecar.join("objects");
+        std::fs::create_dir_all(&objects).expect("objects dir");
+
+        std::fs::write(objects.join("b3-plain.mica.md"), "plain").expect("plain object");
+        assert!(object_exists(&sidecar, "b3:plain"));
+
+        std::fs::write(objects.join("b3-compressed.mica.gz"), b"gzip").expect("gzip object");
+        assert!(object_exists(&sidecar, "b3:compressed"));
+    }
 }

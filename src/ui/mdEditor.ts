@@ -7,7 +7,61 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
-import { Scope, type App } from "obsidian";
+import { Platform, Scope, type App } from "obsidian";
+
+/** The user-chosen editor save key ("none" = buttons only). */
+export type SaveShortcut = "mod-enter" | "mod-s" | "shift-enter" | "none";
+
+let saveShortcut: SaveShortcut = "mod-enter";
+
+/** Called from settings load/change — editors opened afterwards use it. */
+export function setSaveShortcut(s: SaveShortcut): void {
+	saveShortcut = s;
+}
+
+/** Human label for the current save key ("" when none) — placeholders and
+ *  tooltips derive from this so the text always matches the binding. */
+export function saveShortcutLabel(): string {
+	const mod = Platform.isMacOS ? "Cmd" : "Ctrl";
+	switch (saveShortcut) {
+		case "mod-enter":
+			return `${mod}+Enter`;
+		case "mod-s":
+			return `${mod}+S`;
+		case "shift-enter":
+			return "Shift+Enter";
+		case "none":
+			return "";
+	}
+}
+
+/** The save binding in CodeMirror keymap syntax, or null when disabled. */
+function saveKeyCm(): string | null {
+	switch (saveShortcut) {
+		case "mod-enter":
+			return "Mod-Enter";
+		case "mod-s":
+			return "Mod-s";
+		case "shift-enter":
+			return "Shift-Enter";
+		case "none":
+			return null;
+	}
+}
+
+/** The save binding as Obsidian Scope (modifiers, key), or null. */
+function saveKeyScope(): [Array<"Mod" | "Shift">, string] | null {
+	switch (saveShortcut) {
+		case "mod-enter":
+			return [["Mod"], "Enter"];
+		case "mod-s":
+			return [["Mod"], "s"];
+		case "shift-enter":
+			return [["Shift"], "Enter"];
+		case "none":
+			return null;
+	}
+}
 
 /** Editor view options (line numbers, whitespace) — persisted by the host
  *  plugin and applied to every editor, live-toggleable per instance. */
@@ -190,10 +244,13 @@ export class MdEditor {
 			// shadow editor first (target phase) — it preventDefaults, and the
 			// scope stands down. The scope earns its keep when a global hotkey
 			// would otherwise consume the key before CM ever sees it.
-			scope.register(["Mod"], "Enter", (evt) => {
-				if (!evt.defaultPrevented) opts.onSave();
-				return false;
-			});
+			const sk = saveKeyScope();
+			if (sk) {
+				scope.register(sk[0], sk[1], (evt) => {
+					if (!evt.defaultPrevented) opts.onSave();
+					return false;
+				});
+			}
 			scope.register([], "Escape", (evt) => {
 				if (!evt.defaultPrevented) opts.onCancel();
 				return false;
@@ -217,17 +274,22 @@ export class MdEditor {
 			this.popScope = pop;
 		}
 
+		const cmKey = saveKeyCm();
 		const saveKeys = keymap.of([
-			{
-				key: "Mod-Enter",
-				run: () => {
-					opts.onSave();
-					return true;
-				},
-			},
+			...(cmKey
+				? [
+						{
+							key: cmKey,
+							run: (): boolean => {
+								opts.onSave();
+								return true;
+							},
+						},
+					]
+				: []),
 			{
 				key: "Escape",
-				run: () => {
+				run: (): boolean => {
 					opts.onCancel();
 					return true;
 				},
