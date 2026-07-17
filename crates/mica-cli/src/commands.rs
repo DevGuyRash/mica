@@ -695,7 +695,10 @@ pub fn diff(
     granularity: &str,
     patch: bool,
 ) -> Result<()> {
-    if !matches!(granularity, "line" | "word" | "char") {
+    if !matches!(
+        granularity,
+        "line" | "word" | "char" | "line-word" | "line-char"
+    ) {
         return Err(CliError::BadArgs(format!(
             "granularity must be line, word, or char (got '{granularity}')"
         )));

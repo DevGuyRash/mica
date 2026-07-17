@@ -56,6 +56,15 @@ export class VersionsModal extends Modal {
 	}
 
 	/** Persist a diff preference (they survive across sessions). */
+	/** The diff granularity for the current refine mode — word and char get
+	 * OUR unconditional pairing ("line-word"/"line-char"); plain "line" keeps
+	 * no sub-line emphasis (none mode strips what similar may emit). */
+	private gran(): "line" | "line-word" | "line-char" {
+		if (this.refine === "char") return "line-char";
+		if (this.refine === "word") return "line-word";
+		return "line";
+	}
+
 	private remember(patch: Partial<typeof this.plugin.settings>): void {
 		Object.assign(this.plugin.settings, patch);
 		void this.plugin.saveSettings();
@@ -474,7 +483,7 @@ export class VersionsModal extends Modal {
 		const body = surface.createDiv();
 		if (this.compareSet.size >= 2) {
 			// N-up: every picked version diffed against the SAME base, column each.
-			const gran = this.refine === "char" ? "line-char" : "line";
+			const gran = this.gran();
 			const picked = this.rows.filter((r) => this.compareSet.has(r.meta.hash));
 			caption.setText(`${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${picked.length} versions`);
 			renderNUp(
@@ -493,7 +502,7 @@ export class VersionsModal extends Modal {
 			renderPatch(body, makePatch(base, to, 3));
 			return;
 		}
-		const result = diffText(base, to, this.refine === "char" ? "line-char" : "line", 3);
+		const result = diffText(base, to, this.gran(), 3);
 		if (this.refine === "none") {
 			for (const h of result.hunks) for (const c of h.changes) c.inline = [];
 		}

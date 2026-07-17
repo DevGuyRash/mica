@@ -82,16 +82,33 @@ pub fn diff_impl(base: &str, other: &str, granularity: &str, context: usize) -> 
         }
         hunks.push(Hunk { changes });
     }
-    if granularity == "line-char" {
-        hunks = hunks.into_iter().map(refine_hunk_charwise).collect();
+    match granularity {
+        // Our own pairing refines UNCONDITIONALLY — similar's built-in inline
+        // emphasis (the plain `line` mode) skips pairs below a similarity
+        // threshold, which reads as "highlighting doesn't work" on real edits.
+        "line-char" => {
+            hunks = hunks
+                .into_iter()
+                .map(|h| refine_hunk(h, char_spans))
+                .collect()
+        }
+        "line-word" => {
+            hunks = hunks
+                .into_iter()
+                .map(|h| refine_hunk(h, word_spans))
+                .collect()
+        }
+        _ => {}
     }
     DiffResult { hunks, similarity }
 }
 
-/// Re-emphasize a hunk's changed lines at CHARACTER level: pair the i-th
-/// deleted line with the i-th inserted line of each replace run and char-diff
-/// the pair. Unpaired lines keep no emphasis (the row itself is colored).
-fn refine_hunk_charwise(hunk: Hunk) -> Hunk {
+/// Re-emphasize a hunk's changed lines with `spans`: pair the i-th deleted
+/// line with the i-th inserted line of each replace run and sub-diff the
+/// pair. Unpaired lines keep no emphasis (the row itself is colored).
+type SpanPair = (Vec<Span>, Vec<Span>);
+
+fn refine_hunk(hunk: Hunk, spans: fn(&str, &str) -> SpanPair) -> Hunk {
     let mut out: Vec<DiffChange> = Vec::new();
     let mut dels: Vec<DiffChange> = Vec::new();
     let mut inss: Vec<DiffChange> = Vec::new();
@@ -102,7 +119,7 @@ fn refine_hunk_charwise(hunk: Hunk) -> Hunk {
             let pairs = d.len().min(i.len());
             let mut d = d;
             for (deleted, inserted) in d.iter_mut().zip(i.iter_mut()) {
-                let (sa, sb) = char_spans(&deleted.value, &inserted.value);
+                let (sa, sb) = spans(&deleted.value, &inserted.value);
                 deleted.inline = sa;
                 inserted.inline = sb;
             }
@@ -132,7 +149,17 @@ fn refine_hunk_charwise(hunk: Hunk) -> Hunk {
 }
 
 /// Character-level spans for one old/new line pair (adjacent runs merged).
-fn char_spans(a: &str, b: &str) -> (Vec<Span>, Vec<Span>) {
+fn char_spans(a: &str, b: &str) -> SpanPair {
+    spans_from(TextDiff::from_chars(a, b))
+}
+
+/// Whole-word spans for one old/new line pair (adjacent runs merged).
+fn word_spans(a: &str, b: &str) -> SpanPair {
+    spans_from(TextDiff::from_words(a, b))
+}
+
+/// Fold a token diff into merged same/emph span runs for both sides.
+fn spans_from<'a>(diff: TextDiff<'a, 'a, 'a, str>) -> SpanPair {
     fn push(v: &mut Vec<Span>, tag: &str, text: &str) {
         if let Some(last) = v.last_mut() {
             if last.tag == tag {
@@ -145,7 +172,6 @@ fn char_spans(a: &str, b: &str) -> (Vec<Span>, Vec<Span>) {
             text: text.into(),
         });
     }
-    let diff = TextDiff::from_chars(a, b);
     let mut sa = Vec::new();
     let mut sb = Vec::new();
     for ch in diff.iter_all_changes() {
@@ -229,6 +255,34 @@ mod tests {
             .map(|s| s.text.clone())
             .collect();
         assert_eq!(emph, vec!["e", "a"], "emphasis should be per-character");
+    }
+
+    #[test]
+    fn line_word_emphasizes_whole_words() {
+        let d = diff_impl("alpha beta gamma\n", "alpha BETA gamma\n", "line-word", 3);
+        let emph: Vec<String> = d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.changes)
+            .filter(|c| c.tag == "delete" || c.tag == "insert")
+            .flat_map(|c| c.inline.iter())
+            .filter(|s| s.tag == "emph")
+            .map(|s| s.text.clone())
+            .collect();
+        assert_eq!(emph, vec!["beta", "BETA"], "exactly the changed word");
+    }
+
+    #[test]
+    fn line_word_refines_dissimilar_pairs_too() {
+        // similar's built-in inline emphasis (plain `line`) skips pairs below
+        // a similarity threshold; our pairing must refine unconditionally.
+        let d = diff_impl("abc\n", "> [!failure] Hello\n", "line-word", 3);
+        let has_emph = d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.changes)
+            .any(|c| c.inline.iter().any(|s| s.tag == "emph"));
+        assert!(has_emph, "dissimilar paired lines still get word emphasis");
     }
 
     #[test]

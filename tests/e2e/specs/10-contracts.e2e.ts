@@ -154,6 +154,9 @@ describe("runtime contracts (window.mica)", function () {
 
 	it("compare modal renders colored +/- diff rows", async function () {
 		await browser.executeObsidian(async ({ app, obsidian }) => {
+			type P = { settings: { defaultDiffMode: string } };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, P> } }).plugins.plugins["mica"];
+			plugin.settings.defaultDiffMode = "inline"; // the row class under test is inline-only
 			const p = "Diffcolor.md";
 			if (!app.vault.getAbstractFileByPath(p)) {
 				await app.vault.create(p, "```mica id=dc-1\ntab: A\nversion one\n```\n");

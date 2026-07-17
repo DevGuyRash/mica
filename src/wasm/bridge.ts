@@ -206,7 +206,7 @@ export function foldLedger(events: LedgerEvent[]): Record<string, BlockState> {
 
 /** `line`/`line-char` = line rows with word- or char-level intra-line
  *  emphasis; whole-document `word`/`char` modes remain for the CLI. */
-export type DiffGranularity = "line" | "word" | "char" | "line-char";
+export type DiffGranularity = "line" | "word" | "char" | "line-word" | "line-char";
 
 export interface DiffSpan {
 	tag: "same" | "emph";
