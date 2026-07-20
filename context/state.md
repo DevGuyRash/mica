@@ -1,5 +1,6 @@
 # Mica — Active State
 
+- Legacy unwrapped multi-paragraph version objects are intentionally byte-exact and semantically ambiguous; any bulk rewrapping SHALL be an explicit domain-informed migration rather than restore-time inference.
 - WHEN preparing the public release THEN you SHALL complete the physical Android/iOS, real two-device Obsidian Sync, clean-vault artifact install, canonical public-repository, and community-submission gates in `RELEASING.md`.
 - The v0.2 rebuild still needs daily-driver use in a real vault; focus on editor feel, pointer drag/drop, folds, the versions timeline, and grid boundary controls.
 - The external 46-file legacy migration corpus and sustained 13k-line/60-fps performance claim still need recorded evidence; the PRD marks both as unverified.

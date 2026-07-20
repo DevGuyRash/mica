@@ -71,7 +71,7 @@ The extras:
 - **Callouts** — any Obsidian callout works, rendered natively.
 - **Code blocks** — ordinary backtick or tilde fences, with an optional language/info string; rendered by Obsidian and editable as language + body, including when quoted inside a callout.
 - **Grids** — `:::grid {cols=3}` … `:::` containing `:::cell` … `:::` cells.
-- **Combined sections** — `:::section` … `:::` is the reversible wrapper Mica creates when compatible Markdown sections are combined. It changes layout grouping, not the Markdown inside, and **Uncombine** removes only the wrapper.
+- **Combined sections** — `:::section` … `:::` is the reversible wrapper Mica creates when compatible Markdown sections are combined. It changes layout grouping, not the Markdown inside, and **Uncombine** removes only the wrapper. Saving several paragraphs from one text editor also uses one logical wrapper, so blank lines stay inside that section instead of silently creating draggable siblings. Mica grows the colon fence above closer-like `:::` lines in the payload.
 - **Nesting** — the flat `tab:` form can't nest, so nested groups use the explicit `:::tabs` / `:::tab Title` form. You'll rarely type it: the insert menus and drag-and-drop build (and convert) nesting for you, correctly, every time.
 
 Everything is ordinary Markdown, and Mica sizes fences for you — you never count backticks.
@@ -84,7 +84,7 @@ Everything is ordinary Markdown, and Mica sizes fences for you — you never cou
 
 ### The block header
 
-Hover a block (or pin it via settings) for its header: **name** (click to rename), the **navigator** (a tree of every tab/grid/cell with word counts — click to jump), a one-click **Copy** control, and the **⋮ menu** (edit whole block in the lightbox, per-block appearance, version history, save version now). The chevron collapses the block to one line.
+Hover a block (or pin it via settings) for its header: **name** (click to rename), the **navigator** (a tree of every tab/grid/cell with word counts — click to jump), a one-click **Copy** control, and the **⋮ menu** (edit whole block in the lightbox, per-block appearance, version history, save version now). An unnamed block displays its note title without writing a `name=` attribute; additional unnamed blocks display ` · 2`, ` · 3`, and so on. Those suffixes are presentation only—stable ids remain authoritative. The chevron collapses the block to one line.
 
 Clipboard buttons also live on tab groups, individual tabs, grids, cells, text/code sections, callouts, nested callouts, nested code, combined sections, and folded sections in both Reading view and Live Preview. By default they copy portable Markdown content with Mica layout wrappers removed. Two independent settings can preserve the selected layout syntax and/or wrap the result in a fresh identity-free `mica` code fence.
 
@@ -95,6 +95,7 @@ Clipboard buttons also live on tab groups, individual tabs, grids, cells, text/c
 - **Smart auto-snapshots.** A short while after a block's _content_ changes, it's snapshotted. Structure-only churn — adding empty tabs, reordering, renaming — never mints a version. Toggle auto/manual and the idle interval from the version chip's right-click menu.
 - **Pre-image safety.** Content-changing CLI/API mutations first ensure the current semantic content is represented in history. Structure-only layout changes intentionally do not mint versions; destructive editor controls instead offer exact-source, conflict-guarded Undo.
 - **Where it lives.** Next to `My Note.md`, a visible `My Note.mica/` folder holds verified content-addressed version objects (plain Markdown through 4 KiB; larger objects use gzip when the host WebView supports it and otherwise remain plain Markdown), an append-only `ledger.jsonl`, and a human-readable `manifest.json`. Migrated notes also retain `migration.json`, the shared plugin/CLI transaction record. It all rides Obsidian Sync and git.
+- **Rename contract.** The block UUID, not its display name or note path, owns the lineage. Renaming a note moves its sidecar through the same serialized queue and refreshes the manifest; a destination collision is surfaced and neither folder is overwritten. Explicit block-name changes update current metadata but do not create a `vN` row, so the content timeline does not claim to be a rename audit log.
 
 ### The timeline
 
@@ -131,6 +132,10 @@ The plugin's core block-editing and versioning surface is also programmatic.
 **From the console or a scripting plugin:**
 
 ```js
+const source = window.mica.createBlockSource({
+	name: "Prompt", // optional; omit it to inherit the note title in the UI
+	body: "tab: Prompt\n\nWrite here.\n",
+});
 await window.mica.blockList("My Note.md");
 await window.mica.blockUpdate("My Note.md", "<id>", "new body"); // guarded update
 await window.mica.blockApply("My Note.md", "<id>", { op: "insertTab", path: [0], at: 2 });
@@ -140,7 +145,9 @@ await window.mica.versionsLabel("My Note.md", "<id>", "<hash>", "Golden");
 await window.mica.versionsDiff("My Note.md", base, other, "word");
 ```
 
-**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-bridge/inbox/`; the result appears in `mica-bridge/outbox/`. Verbs: `block.list/read/update/apply/attr`, `versions.list/snapshot/revert/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. Destructive verbs snapshot first.
+`createBlockSource` is the canonical template path: it returns a complete Mica fence with a UUIDv7, validates an optional user-authored name, and sizes the outer backtick fence above every run in the body. Names containing double quotes, backticks, line breaks, or control characters are rejected with a clear error rather than silently changed. Template code should not reconstruct the header grammar itself.
+
+**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-bridge/inbox/`; the result appears in `mica-bridge/outbox/`. Verbs: `block.source` (body, optional name), `block.list/read/update/apply/attr`, `versions.list/snapshot/revert/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. Destructive verbs snapshot first.
 
 ---
 

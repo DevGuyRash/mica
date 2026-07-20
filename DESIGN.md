@@ -24,15 +24,17 @@ A Mica block is a fenced code block tagged `mica` with a header attribute list:
 - `tab: Title` — the everyday way to write a tab. No closer.
 - `:::grid {cols=3 gap=8}` … `:::` — a grid/menu of `:::cell` … `:::`.
 - `:::tabs` … `:::` with `:::tab Title` … `:::` — the explicit form, used to NEST a tab group inside a tab (the flat `tab:` delimiter can't express nesting). Deeper nesting uses more colons (`::::tabs` wraps `:::tab`), through the 128-level structural safety limit.
-- `:::section` … `:::` — a reversible logical wrapper created only when compatible Markdown sections are combined. It preserves the enclosed paragraph/source boundaries; uncombine removes the wrapper without rewriting the children.
+- `:::section` … `:::` — a reversible logical wrapper created when compatible Markdown sections are combined or when one prose editor save contains multiple paragraph-level leaves. It preserves the enclosed paragraph/source boundaries; uncombine removes the wrapper without rewriting the children. Its colon run is strictly longer than any closer-like colon-only line in its payload.
 - Callouts use Obsidian's native `> [!type]` syntax, unchanged, inside any body.
 - Code sections use standard backtick or tilde fences with an optional language/info string, unchanged.
 
 Rules (testable):
 
 - WHEN Mica serializes a block THEN the outer ` ```mica ` fence length SHALL be strictly greater than every inner code fence it contains.
+- WHEN Mica promotes a multi-paragraph prose edit into one logical section THEN it SHALL size the `section` fence strictly above every closer-like colon run in the payload and SHALL NOT nest another `section` wrapper around an existing one.
 - WHEN a block is parsed and re-serialized with no intervening edit THEN the output SHALL equal the input byte-for-byte (both `tab:` and `:::` forms).
 - The version marker SHALL NOT live in the block body or title; the block `id` plus the sidecar ledger are the source of truth.
+- WHEN `name=` is absent THEN the UI SHALL derive the note-basename label and unnamed ordinal for presentation only; it SHALL NOT persist or resolve that fallback as block identity.
 
 ### Before / after
 
