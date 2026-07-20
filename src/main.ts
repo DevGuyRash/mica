@@ -9,9 +9,9 @@ import { registerReadingRenderer } from "./render/readingRenderer";
 import { VersionEngine } from "./version/engine";
 import { ensureBlockIds, ensureNoteId } from "./identity/identity";
 import { repair } from "./identity/reconcile";
-import { sidecarDir } from "./storage/sidecar";
 import { VersionsModal } from "./ui/versionsModal";
 import { MicaApi } from "./api/mica";
+import { createBlockSource } from "./api/blockSource";
 import { migrateFile, migrateVault, type MigrateFileReport } from "./migrate/migrate";
 import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings";
 import { setToolbarConfig } from "./ui/toolSpec";
@@ -54,8 +54,20 @@ export default class MicaPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
-				this.engine.forgetFile(oldPath);
-				if (file instanceof TFile && file.extension === "md") void this.followRename(file, oldPath);
+				if (file instanceof TFile && file.extension === "md") {
+					void this.engine
+						.handleRename(file, oldPath)
+						.catch((error) => {
+							const detail = error instanceof Error ? error.message : String(error);
+							console.error("Mica: note rename follow-up failed", { oldPath, newPath: file.path, error });
+							new Notice(
+								`Mica: note renamed, but its history needs attention — ${detail}. Run “Repair history”.`,
+							);
+						})
+						.finally(() => this.refreshViews());
+				} else {
+					this.engine.forgetFile(oldPath);
+				}
 			}),
 		);
 		this.registerEvent(this.app.vault.on("delete", (file) => this.engine.forgetFile(file.path)));
@@ -84,7 +96,7 @@ export default class MicaPlugin extends Plugin {
 			name: "Insert Mica block (tabs) here",
 			editorCallback: (editor) => {
 				const cur = editor.getCursor();
-				editor.replaceRange("\n```mica\ntab: New tab\n\n```\n", cur);
+				editor.replaceRange(`\n${createBlockSource({ body: "tab: New tab\n\n" })}`, cur);
 				editor.setCursor({ line: cur.line + 3, ch: 0 });
 			},
 		});
@@ -97,13 +109,7 @@ export default class MicaPlugin extends Plugin {
 					new Notice("Select the markdown to wrap first.");
 					return;
 				}
-				// The fence must out-size any fence inside the selection.
-				let run = 2;
-				for (const m of sel.matchAll(/`+/g)) run = Math.max(run, m[0].length);
-				const fence = "`".repeat(Math.max(3, run + 1));
-				editor.replaceSelection(
-					`${fence}mica\ntab: New tab\n${sel}${sel.endsWith("\n") ? "" : "\n"}${fence}\n`,
-				);
+				editor.replaceSelection(createBlockSource({ body: `tab: New tab\n${sel}` }));
 			},
 		});
 		this.addCommand({
@@ -302,12 +308,6 @@ export default class MicaPlugin extends Plugin {
 			return;
 		}
 		new VersionsModal(this, file, block.id).open();
-	}
-
-	private async followRename(file: TFile, oldPath: string): Promise<void> {
-		const oldSidecar = `${oldPath.slice(0, oldPath.length - file.extension.length - 1)}.mica`;
-		const af = this.app.vault.getAbstractFileByPath(oldSidecar);
-		if (af) await this.app.vault.rename(af, sidecarDir(file)).catch(() => undefined);
 	}
 
 	private async runRepair(): Promise<void> {

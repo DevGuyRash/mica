@@ -28,6 +28,80 @@ const NOTE = ["Intro paragraph.", "", '```mica id=blk-e2e-1 name="E2E"', INNER, 
 );
 
 describe("runtime contracts (window.mica)", function () {
+	it("constructs immediately addressable, fence-safe block source for templates", async function () {
+		const result = await browser.executeObsidian(async ({ app }) => {
+			const source = window.mica.createBlockSource({
+				name: "Prompt block",
+				body: "tab: Main\n\nliteral ````` run\n:::: directive\n",
+			});
+			await app.vault.create("Constructed.md", source);
+			const blocks = await window.mica.blockList("Constructed.md");
+			let invalid = "";
+			try {
+				window.mica.createBlockSource({ name: 'unsafe " name', body: "body" });
+			} catch (error) {
+				invalid = error instanceof Error ? error.message : String(error);
+			}
+			const unnamed = window.mica.createBlockSource({ name: "  ", body: "" });
+			return { source, blocks, invalid, unnamed };
+		});
+
+		expect(result.source).toMatch(/^``````mica id=[0-9a-f-]+ name="Prompt block"$/m);
+		expect(result.source.endsWith("``````\n")).toBe(true);
+		expect(result.blocks).toHaveLength(1);
+		expect(result.blocks[0]?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		expect(result.blocks[0]?.name).toBe("Prompt block");
+		expect(result.invalid).toContain("cannot contain double quotes");
+		expect(result.unnamed).not.toContain(" name=");
+	});
+
+	it("auto-stamps raw id-less blocks even when automatic versions are disabled", async function () {
+		const previous = await browser.executeObsidian(async ({ app, obsidian }) => {
+			type Plugin = {
+				settings: { autoSnapshotEnabled: boolean; autoAddIds: boolean; snapshotDebounceMs: number };
+				engine: { resetDebouncers(): void };
+			};
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, Plugin> } }).plugins.plugins["mica"];
+			const before = { ...plugin.settings };
+			plugin.settings.autoSnapshotEnabled = false;
+			plugin.settings.autoAddIds = true;
+			plugin.settings.snapshotDebounceMs = 50;
+			plugin.engine.resetDebouncers();
+			await app.vault.create("RawIdless.md", "seed\n");
+			const file = app.vault.getAbstractFileByPath("RawIdless.md");
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing raw id-less fixture");
+			await app.vault.process(file, (text) => `${text}\n\`\`\`mica\ntab: Main\nbody\n\`\`\`\n`);
+			return before;
+		});
+
+		try {
+			await browser.waitUntil(async () => /```mica id=[0-9a-f-]+/.test(await readNote("RawIdless.md")), {
+				timeout: 10_000,
+				timeoutMsg: "the raw id-less block was not stamped",
+			});
+			const result = await browser.executeObsidian(async ({ app }) => ({
+				source: await window.mica.blockList("RawIdless.md"),
+				hasSidecar: Boolean(app.vault.getAbstractFileByPath("RawIdless.mica")),
+			}));
+			expect(result.source[0]?.id).toMatch(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+			);
+			expect(result.hasSidecar).toBe(false);
+		} finally {
+			await browser.executeObsidian(({ app }, before) => {
+				type Plugin = {
+					settings: { autoSnapshotEnabled: boolean; autoAddIds: boolean; snapshotDebounceMs: number };
+					engine: { resetDebouncers(): void };
+				};
+				const plugin = (app as unknown as { plugins: { plugins: Record<string, Plugin> } }).plugins.plugins[
+					"mica"
+				];
+				Object.assign(plugin.settings, before);
+				plugin.engine.resetDebouncers();
+			}, previous);
+		}
+	});
+
 	it("block update replaces content exactly — the anti-corruption contract", async function () {
 		await createNote("Corruption.md", NOTE);
 		const grown = `${INNER}\nGROWN LINE 1\nGROWN LINE 2\nGROWN LINE 3\n`.replace("original body", "REPLACED body");
@@ -91,6 +165,76 @@ describe("runtime contracts (window.mica)", function () {
 		expect(afterEdit.length).toBe(3);
 		const branched = await browser.executeObsidian(() => window.mica.blockRead("Versioned.md", "blk-e2e-1"));
 		expect(branched).toBe("branched from v1\n");
+	});
+
+	it("moves history with a renamed note and refreshes metadata without minting a version", async function () {
+		const originalPath = "RenameOrigin.md";
+		const renamedPath = "RenameDestination.md";
+		const id = "rename-history";
+		await createNote(originalPath, `\`\`\`mica id=${id} name="Before"\ntab: Main\nstable body\n\`\`\`\n`);
+		await browser.executeObsidian(async ({ app, obsidian }) => {
+			await window.mica.versionsSnapshot("RenameOrigin.md");
+			const [version] = await window.mica.versionsList("RenameOrigin.md", "rename-history");
+			if (!version) throw new Error("missing rename fixture version");
+			await window.mica.versionsLabel("RenameOrigin.md", "rename-history", version.hash, "kept label");
+			const file = app.vault.getAbstractFileByPath("RenameOrigin.md");
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing rename fixture note");
+			await app.fileManager.renameFile(file, "RenameDestination.md");
+		});
+
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app }) =>
+						!app.vault.getAbstractFileByPath("RenameOrigin.mica") &&
+						Boolean(app.vault.getAbstractFileByPath("RenameDestination.mica/manifest.json")),
+				),
+			{ timeout: 10_000, timeoutMsg: "the sidecar did not follow its renamed note" },
+		);
+
+		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const before = await window.mica.versionsList("RenameDestination.md", "rename-history");
+			await window.mica.blockSetAttr("RenameDestination.md", "rename-history", "name", "After");
+			await window.mica.versionsSnapshot("RenameDestination.md");
+			const after = await window.mica.versionsList("RenameDestination.md", "rename-history");
+			const manifestFile = app.vault.getAbstractFileByPath("RenameDestination.mica/manifest.json");
+			if (!(manifestFile instanceof obsidian.TFile)) throw new Error("missing renamed manifest");
+			const manifest = JSON.parse(await app.vault.read(manifestFile)) as {
+				path: string;
+				blocks: Record<string, string>;
+			};
+			return { before, after, manifest };
+		});
+		expect(result.before.map((version) => version.hash)).toEqual(result.after.map((version) => version.hash));
+		expect(result.after).toHaveLength(1);
+		expect(result.after[0]?.label).toBe("kept label");
+		expect(result.manifest.path).toBe(renamedPath);
+		expect(result.manifest.blocks[id]).toBe("After");
+	});
+
+	it("reports a rename collision and preserves both sidecar folders", async function () {
+		await createNote("RenameCollisionOrigin.md", "```mica id=rename-collision\ntab: Main\nsource history\n```\n");
+		await browser.executeObsidian(async ({ app, obsidian }) => {
+			await window.mica.versionsSnapshot("RenameCollisionOrigin.md");
+			await app.vault.createFolder("RenameCollisionDestination.mica");
+			const file = app.vault.getAbstractFileByPath("RenameCollisionOrigin.md");
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing collision fixture note");
+			await app.fileManager.renameFile(file, "RenameCollisionDestination.md");
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".notice")).some((notice) =>
+						notice.textContent?.includes("history needs attention"),
+					),
+				),
+			{ timeout: 10_000, timeoutMsg: "the sidecar collision was not surfaced" },
+		);
+		const paths = await browser.executeObsidian(({ app }) => ({
+			source: Boolean(app.vault.getAbstractFileByPath("RenameCollisionOrigin.mica")),
+			destination: Boolean(app.vault.getAbstractFileByPath("RenameCollisionDestination.mica")),
+		}));
+		expect(paths).toEqual({ source: true, destination: true });
 	});
 
 	it("migrates the real legacy tabs shape losslessly", async function () {

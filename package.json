@@ -29,12 +29,13 @@
 		"test:diff-budget": "tsx tests/diff-budget.mts",
 		"test:version-window": "tsx tests/version-window.mts",
 		"test:copy-payload": "tsx tests/copy-payload.mts",
+		"test:block-label": "tsx tests/block-label.mts",
 		"test:code-fence": "tsx tests/code-fence.mts",
 		"test:nested-sections": "tsx tests/nested-sections.mts",
 		"test:section-format": "tsx tests/section-format.mts",
 		"check:release": "node tests/release-metadata.mjs",
 		"check:release:assets": "node tests/release-metadata.mjs --artifacts",
-		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:version-window && pnpm run test:copy-payload && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:rust && pnpm run check:release"
+		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:version-window && pnpm run test:copy-payload && pnpm run test:block-label && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:rust && pnpm run check:release"
 	},
 	"keywords": [
 		"obsidian",

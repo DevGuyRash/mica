@@ -1,4 +1,4 @@
-import { browser, expect, $ } from "@wdio/globals";
+import { browser, expect, $, $$ } from "@wdio/globals";
 
 // Friendly, closer-free `tab:` syntax — the primary way users write blocks.
 const NOTE = [
@@ -129,6 +129,50 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		// THE canary for CM6 decoration legality: if block replace decorations
 		// can't be supplied this way, the widget never appears.
 		await expect($(".mica-lp .mica-tabs")).toExist();
+	});
+
+	it("uses rename-safe note-title labels for multiple unnamed blocks", async function () {
+		const source = [
+			"cursor anchor",
+			"",
+			"```mica id=unnamed-one",
+			"tab: One",
+			"first",
+			"```",
+			"",
+			'```mica id=named-middle name="Explicit"',
+			"tab: Named",
+			"middle",
+			"```",
+			"",
+			"```mica id=unnamed-two",
+			"tab: Two",
+			"second",
+			"```",
+		].join("\n");
+		await seedAndOpen("Unnamed blocks.md", source, "live");
+		await browser.waitUntil(async () => (await $$(".mica-lp .mica-head-name")).length === 3, {
+			timeout: 5_000,
+			timeoutMsg: "the unnamed-label fixtures did not render",
+		});
+		const labels = async (): Promise<string[]> =>
+			browser.execute(() =>
+				Array.from(document.querySelectorAll<HTMLElement>(".mica-lp .mica-head-name")).map(
+					(element) => element.textContent ?? "",
+				),
+			);
+		expect(await labels()).toEqual(["Unnamed blocks", "Explicit", "Unnamed blocks · 2"]);
+
+		await browser.executeObsidian(async ({ app, obsidian }) => {
+			const file = app.vault.getAbstractFileByPath("Unnamed blocks.md");
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing unnamed-label note");
+			await app.fileManager.renameFile(file, "Renamed blocks.md");
+		});
+		await browser.waitUntil(async () => (await labels())[0] === "Renamed blocks", {
+			timeout: 5_000,
+			timeoutMsg: "the inherited block label did not follow the note rename",
+		});
+		expect(await labels()).toEqual(["Renamed blocks", "Explicit", "Renamed blocks · 2"]);
 	});
 
 	it("the + affordance adds a tab and activates it", async function () {

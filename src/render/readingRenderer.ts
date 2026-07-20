@@ -3,11 +3,17 @@ import type MicaPlugin from "../main";
 import { parseBlock, scanBlocksView, type BlockView } from "../wasm/bridge";
 import { renderCst, type ChipInfo } from "../ui/blockShell";
 import { getBlockUi } from "./blockUiState";
+import { noteBasenameFromPath, unnamedBlockOrdinals } from "../identity/blockLabel";
+
+interface CachedBlock {
+	block: BlockView;
+	unnamedOrdinal: number;
+}
 
 interface SectionCache {
 	text: string;
 	lineStarts: readonly number[];
-	blocksByStart: ReadonlyMap<number, BlockView>;
+	blocksByStart: ReadonlyMap<number, CachedBlock>;
 }
 
 // Section info exposes a line number in the whole note. Keep one bounded index
@@ -29,13 +35,14 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 		// The processor receives only the inner source; the block id and attrs
 		// live on the fence header line, recovered from the current section text.
 		const info = ctx.getSectionInfo(el);
-		const block = info ? blockAtLine(info.text, info.lineStart) : undefined;
+		const located = info ? blockAtLine(info.text, info.lineStart) : undefined;
+		const block = located?.block;
 		const id = block?.id ?? undefined;
 		const attrs = block ? Object.fromEntries(block.attrs) : {};
+		const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
 
 		let chip: ChipInfo | undefined;
 		if (plugin.settings.showVersionChip) {
-			const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
 			if (id && file instanceof TFile) {
 				chip = { plugin, file, blockId: id, content: source };
 			}
@@ -52,6 +59,10 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 				chip,
 				ui,
 				blockAttrs: attrs,
+				blockNamePresentation: {
+					noteBasename: file instanceof TFile ? file.basename : noteBasenameFromPath(ctx.sourcePath),
+					unnamedOrdinal: located?.unnamedOrdinal ?? 1,
+				},
 				headerMode: plugin.settings.blockHeaderMode,
 				copyOptions: () => ({
 					includeMicaSyntax: plugin.settings.copyIncludeMicaSyntax,
@@ -74,17 +85,21 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
  * The local single-slot index keeps the scanner's immutable block aliases and
  * avoids O(note × blocks) line walks as Obsidian invokes each processor.
  */
-function blockAtLine(text: string, line: number): BlockView | undefined {
+function blockAtLine(text: string, line: number): CachedBlock | undefined {
 	if (!sectionCache || sectionCache.text !== text) {
 		const lineStarts = [0];
 		let pos = 0;
 		while ((pos = text.indexOf("\n", pos)) >= 0) {
 			lineStarts.push(++pos);
 		}
+		const blocks = scanBlocksView(text);
+		const ordinals = unnamedBlockOrdinals(blocks.map((block) => block.name));
 		sectionCache = {
 			text,
 			lineStarts,
-			blocksByStart: new Map(scanBlocksView(text).map((block) => [block.start, block])),
+			blocksByStart: new Map(
+				blocks.map((block, index) => [block.start, { block, unnamedOrdinal: ordinals[index] ?? 1 }]),
+			),
 		};
 	}
 	const start = sectionCache.lineStarts[line];

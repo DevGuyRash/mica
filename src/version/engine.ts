@@ -1,4 +1,4 @@
-import { debounce, TFile, type Debouncer, type Vault } from "obsidian";
+import { debounce, TFile, TFolder, type Debouncer, type Vault } from "obsidian";
 import type MicaPlugin from "../main";
 import {
 	contentSignature,
@@ -19,6 +19,7 @@ import {
 	ledgerAppendProvesNoCommit,
 	readLedger,
 	requireObject,
+	sidecarDir,
 	writeManifest,
 	writeObject,
 } from "../storage/sidecar";
@@ -71,14 +72,14 @@ export class VersionEngine {
 	handleModify(file: TFile): void {
 		if (this.disposed || file.extension !== "md") return;
 		if (file.path.includes(".mica/")) return;
-		if (!this.plugin.settings.autoSnapshotEnabled) return;
+		const hasHistory = Boolean(this.plugin.app.vault.getAbstractFileByPath(sidecarDir(file)));
+		if (!this.plugin.settings.autoSnapshotEnabled && !this.plugin.settings.autoAddIds && !hasHistory) return;
 		let bounce = this.debouncers.get(file.path);
 		if (!bounce) {
 			bounce = debounce(
 				(f: TFile) => {
-					void this.snapshot(f).catch((error) =>
-						console.error("Mica: background snapshot failed", f.path, error),
-					);
+					const work = this.plugin.settings.autoSnapshotEnabled ? this.snapshot(f) : this.maintainNote(f);
+					void work.catch((error) => console.error("Mica: background maintenance failed", f.path, error));
 				},
 				this.plugin.settings.snapshotDebounceMs,
 				true,
@@ -86,6 +87,21 @@ export class VersionEngine {
 			this.debouncers.set(file.path, bounce);
 		}
 		bounce(file);
+	}
+
+	/** Keep identity and existing manifest metadata current when automatic content
+	 * snapshots are disabled. This never creates a sidecar or a version event. */
+	private maintainNote(file: TFile): Promise<void> {
+		return this.withFileLock(file, async () => {
+			const vault = this.plugin.app.vault;
+			let doc = await vault.read(file);
+			let blocks = scanBlocksView(doc);
+			if (this.plugin.settings.autoAddIds && blocks.some((block) => block.closed && !block.id)) {
+				doc = await vault.process(file, (current) => ensureIds(current));
+				blocks = scanBlocksView(doc);
+			}
+			if (await this.refreshManifestIfPresent(vault, file, blocks)) this.emitSnapshot(file);
+		});
 	}
 
 	/** Cancel and forget one file's pending background snapshot. */
@@ -227,6 +243,47 @@ export class VersionEngine {
 		return this.enqueue(file, task);
 	}
 
+	/** Follow one Obsidian note rename with its co-located history folder.
+	 * The move joins the same TFile queue as snapshots. A destination collision is
+	 * never merged or overwritten: both folders remain available for manual repair. */
+	handleRename(file: TFile, oldPath: string): Promise<void> {
+		this.forgetFile(oldPath);
+		return this.withFileLock(file, async () => {
+			const vault = this.plugin.app.vault;
+			const extensionAt = oldPath.lastIndexOf(".");
+			if (extensionAt < 0) throw new Error(`Mica: cannot derive the old history path from ${oldPath}`);
+			const oldSidecar = `${oldPath.slice(0, extensionAt)}.mica`;
+			const nextSidecar = sidecarDir(file);
+			const source = vault.getAbstractFileByPath(oldSidecar);
+			const destination = vault.getAbstractFileByPath(nextSidecar);
+
+			if (oldSidecar === nextSidecar) {
+				if (!source) return;
+				if (!(source instanceof TFolder)) throw new Error(`Mica: history path is not a folder: ${oldSidecar}`);
+			} else {
+				if (!source) {
+					if (destination) {
+						throw new Error(
+							`Mica: ${nextSidecar} already exists while ${oldSidecar} is missing; the destination was left unchanged`,
+						);
+					}
+					return;
+				}
+				if (!(source instanceof TFolder)) throw new Error(`Mica: history path is not a folder: ${oldSidecar}`);
+				if (destination) {
+					throw new Error(
+						`Mica: cannot move history from ${oldSidecar} to ${nextSidecar} because the destination exists; neither sidecar was changed`,
+					);
+				}
+				await vault.rename(source, nextSidecar);
+			}
+
+			const doc = await vault.read(file);
+			await this.refreshManifestIfPresent(vault, file, scanBlocksView(doc));
+			this.emitSnapshot(file);
+		});
+	}
+
 	/** Explicit snapshots reject on failure; background callers catch separately. */
 	snapshot(file: TFile, force = false): Promise<void> {
 		this.stateReads.delete(file);
@@ -268,48 +325,48 @@ export class VersionEngine {
 			const vault = this.plugin.app.vault;
 			let doc = await vault.read(file);
 			let blocks = scanBlocksView(doc);
-			if (!blocks.some((block) => block.closed)) return doc;
+			const hasClosedBlock = blocks.some((block) => block.closed);
 
-			if (this.plugin.settings.autoAddIds && blocks.some((block) => block.closed && !block.id)) {
+			if (
+				hasClosedBlock &&
+				this.plugin.settings.autoAddIds &&
+				blocks.some((block) => block.closed && !block.id)
+			) {
 				doc = await vault.process(file, (current) => ensureIds(current));
 				blocks = scanBlocksView(doc);
 			}
-			this.requireUniqueSnapshotIds(blocks);
-			if (!blocks.some((block) => block.id && block.closed)) return doc;
-
-			const state = await this.readState(file);
 			const events: LedgerEvent[] = [];
-			for (const block of blocks) {
-				const id = block.id;
-				if (!id || !block.closed) continue;
-				const content = doc.slice(block.content_start, block.content_end);
-				const hash = hashContent(content);
-				const head = state[id]?.head ?? null;
-				if (head === hash) continue;
-				if (!force && !(await this.contentChanged(vault, file, content, head))) continue;
-				await ensureSidecar(vault, file);
-				await writeObject(vault, file, hash, content);
-				const ts = Date.now();
-				events.push({ type: "add-version", eid: newId(), ts, block: id, hash });
-				events.push({ type: "set-head", eid: newId(), ts, block: id, hash });
+			if (hasClosedBlock) {
+				this.requireUniqueSnapshotIds(blocks);
+				if (blocks.some((block) => block.id && block.closed)) {
+					const state = await this.readState(file);
+					for (const block of blocks) {
+						const id = block.id;
+						if (!id || !block.closed) continue;
+						const content = doc.slice(block.content_start, block.content_end);
+						const hash = hashContent(content);
+						const head = state[id]?.head ?? null;
+						if (head === hash) continue;
+						if (!force && !(await this.contentChanged(vault, file, content, head))) continue;
+						await ensureSidecar(vault, file);
+						await writeObject(vault, file, hash, content);
+						const ts = Date.now();
+						events.push({ type: "add-version", eid: newId(), ts, block: id, hash });
+						events.push({ type: "set-head", eid: newId(), ts, block: id, hash });
+					}
+				}
 			}
-			if (!events.length) return doc;
-			const names: Record<string, string> = {};
-			for (const block of blocks) if (block.id) names[block.id] = block.name ?? "";
-			const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
-				Record<string, unknown> | undefined;
-			await writeManifest(vault, file, {
-				noteId: typeof frontmatter?.["mica-id"] === "string" ? (frontmatter["mica-id"] as string) : null,
-				path: file.path,
-				blocks: names,
-				updated: Date.now(),
-			});
+			const manifestChanged = await this.refreshManifestIfPresent(vault, file, blocks);
 			// Sidecar/object writes are asynchronous and cannot share a transaction
 			// with the note. Re-read immediately before committing the authoritative
 			// head events; if Sync/editor changed the note meanwhile, discard these
 			// prepared events and snapshot the fresh document instead.
 			const beforeCommit = await vault.read(file);
 			if (beforeCommit !== doc) return this.retrySnapshot(file, force, attempt, committed);
+			if (!events.length) {
+				if (manifestChanged) this.emitSnapshot(file);
+				return doc;
+			}
 			await appendEvents(vault, file, events);
 			committed = true;
 			const afterCommit = await vault.read(file);
@@ -322,6 +379,26 @@ export class VersionEngine {
 				!committed && (!(error instanceof LedgerAppendError) || ledgerAppendProvesNoCommit(error));
 			throw new SnapshotFailure(rollbackSafe, error);
 		}
+	}
+
+	private async refreshManifestIfPresent(
+		vault: Vault,
+		file: TFile,
+		blocks: ReturnType<typeof scanBlocksView>,
+	): Promise<boolean> {
+		const folder = vault.getAbstractFileByPath(sidecarDir(file));
+		if (!folder) return false;
+		if (!(folder instanceof TFolder)) throw new Error(`Mica: sidecar path is not a folder: ${sidecarDir(file)}`);
+		const names: Record<string, string> = {};
+		for (const block of blocks) if (block.id) names[block.id] = block.name ?? "";
+		const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
+			Record<string, unknown> | undefined;
+		return writeManifest(vault, file, {
+			noteId: typeof frontmatter?.["mica-id"] === "string" ? (frontmatter["mica-id"] as string) : null,
+			path: file.path,
+			blocks: names,
+			updated: Date.now(),
+		});
 	}
 
 	private retrySnapshot(file: TFile, force: boolean, attempt: number, historyCommitted: boolean): Promise<string> {

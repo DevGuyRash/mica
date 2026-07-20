@@ -23,6 +23,7 @@ import { calloutCatalog } from "./calloutCatalog";
 import { EditorLightbox } from "./lightbox";
 import { VersionsModal } from "./versionsModal";
 import { copyNodes, copyText, type CopyOptions } from "./copyPayload";
+import { blockNameValidationError, displayBlockName, type BlockNamePresentation } from "../identity/blockLabel";
 
 /** The hooks a rendered block uses to mutate itself (Live Preview only). */
 export interface EditHooks {
@@ -76,6 +77,8 @@ export interface RenderCtx {
 	ui?: BlockUi;
 	/** Fence-header attrs (name, accent, density, tabstyle, radius, …). */
 	blockAttrs?: Record<string, string>;
+	/** Presentation-only fallback for a missing `name=` fence attribute. */
+	blockNamePresentation?: BlockNamePresentation;
 	/** Header visibility: hover (default) / always / never. */
 	headerMode?: "hover" | "always" | "never";
 	/** Read the current clipboard preferences when a copy button is pressed. */
@@ -316,14 +319,20 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 
 	// Name (click to rename in LP).
 	const name = ctx.blockAttrs?.["name"] ?? "";
+	const presentation = ctx.blockNamePresentation ?? { noteBasename: "", unnamedOrdinal: 1 };
+	const fallbackName = displayBlockName(null, presentation);
+	const displayName = displayBlockName(name, presentation);
 	const nameBtn = head.createEl("button", {
-		cls: `mica-head-name ${name ? "" : "is-unnamed"}`,
-		text: name || "Untitled block",
+		cls: `mica-head-name ${name.trim() ? "" : "is-unnamed"}`,
+		text: displayName,
 		attr: { type: "button", "aria-label": ctx.editable ? "Rename block" : "Block name" },
 	});
 	if (ctx.editable) {
 		nameBtn.addEventListener("click", () => {
-			const input = head.createEl("input", { cls: "mica-rename", attr: { type: "text" } });
+			const input = head.createEl("input", {
+				cls: "mica-rename",
+				attr: { type: "text", placeholder: fallbackName },
+			});
 			head.insertBefore(input, nameBtn);
 			nameBtn.style.display = "none";
 			input.value = name;
@@ -332,6 +341,14 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 			let done = false;
 			const commit = (): void => {
 				if (done) return;
+				const error = blockNameValidationError(input.value);
+				if (error) {
+					input.setCustomValidity(error);
+					input.reportValidity();
+					new Notice(`Mica: ${error}`);
+					return;
+				}
+				input.setCustomValidity("");
 				done = true;
 				const v = input.value.trim();
 				if (v !== name) ctx.editable?.setAttr("name", v || null);
@@ -340,6 +357,7 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 					nameBtn.style.display = "";
 				}
 			};
+			input.addEventListener("input", () => input.setCustomValidity(""));
 			input.addEventListener("keydown", (e) => {
 				if (e.key === "Enter") commit();
 				else if (e.key === "Escape") {

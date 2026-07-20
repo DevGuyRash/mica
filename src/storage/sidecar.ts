@@ -290,20 +290,40 @@ export interface SidecarManifest {
 	updated: number;
 }
 
-export async function writeManifest(vault: Vault, file: TFile, manifest: SidecarManifest): Promise<void> {
+export async function writeManifest(vault: Vault, file: TFile, manifest: SidecarManifest): Promise<boolean> {
 	const path = `${sidecarDir(file)}/manifest.json`;
 	const body = JSON.stringify(manifest, null, "\t") + "\n";
 	const af = vault.getAbstractFileByPath(path);
 	if (af instanceof TFile) {
+		// `updated` describes the last semantic manifest change, not the last
+		// snapshot attempt. Avoid rewriting the summary (and waking Sync) when its
+		// note anchor, path, block order, and names are already current.
+		if (sameManifest(await vault.read(af), manifest)) return false;
 		await vault.process(af, () => body);
-		return;
+		return true;
 	}
 	try {
 		await vault.create(path, body);
+		return true;
 	} catch (error) {
 		const raced = vault.getAbstractFileByPath(path);
 		if (!(raced instanceof TFile)) throw error;
+		if (sameManifest(await vault.read(raced), manifest)) return false;
 		await vault.process(raced, () => body);
+		return true;
+	}
+}
+
+function sameManifest(text: string, expected: SidecarManifest): boolean {
+	try {
+		const value = JSON.parse(text) as Partial<SidecarManifest>;
+		return (
+			value.noteId === expected.noteId &&
+			value.path === expected.path &&
+			JSON.stringify(value.blocks) === JSON.stringify(expected.blocks)
+		);
+	} catch {
+		return false;
 	}
 }
 

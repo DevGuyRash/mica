@@ -59,6 +59,7 @@ assert.equal(typeof TFile, "function", "test boundary must expose the mocked TFi
 
 class MockVault {
 	#files = new Map();
+	processCalls = 0;
 
 	getAbstractFileByPath(filePath) {
 		return this.#files.get(filePath) ?? null;
@@ -84,6 +85,13 @@ class MockVault {
 	}
 
 	async read(file) {
+		return file.text;
+	}
+
+	async process(file, update) {
+		this.processCalls += 1;
+		file.text = update(file.text);
+		file.stat.size = Buffer.byteLength(file.text);
 		return file.text;
 	}
 
@@ -136,6 +144,25 @@ try {
 		() => sidecar.readObject(oversizedVault, note, HASH),
 		/decompressed history object exceeds 134217728 bytes/,
 	);
+
+	const manifestVault = new MockVault();
+	const firstManifest = { noteId: "note-id", path: "Fallback.md", blocks: { block: "Before" }, updated: 1 };
+	assert.equal(await sidecar.writeManifest(manifestVault, note, firstManifest), true);
+	assert.equal(
+		await sidecar.writeManifest(manifestVault, note, { ...firstManifest, updated: 2 }),
+		false,
+		"a timestamp-only refresh must not rewrite an unchanged manifest",
+	);
+	assert.equal(manifestVault.processCalls, 0);
+	assert.equal(
+		await sidecar.writeManifest(manifestVault, note, {
+			...firstManifest,
+			blocks: { block: "After" },
+			updated: 3,
+		}),
+		true,
+	);
+	assert.equal(manifestVault.processCalls, 1, "a block-name change must refresh the manifest");
 } finally {
 	if (compressionDescriptor) Object.defineProperty(globalThis, "CompressionStream", compressionDescriptor);
 	else delete globalThis.CompressionStream;
@@ -145,4 +172,4 @@ try {
 	delete globalThis.__micaTestTFile;
 }
 
-console.log("SIDECAR FALLBACK OK — plaintext write, gzip read, corruption, and decompression cap verified");
+console.log("SIDECAR FALLBACK OK — plaintext/gzip safety and idempotent manifest refresh verified");

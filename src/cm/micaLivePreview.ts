@@ -16,6 +16,7 @@ import { renderCst, type BlockUi } from "../ui/blockShell";
 import { applyOpsText, applyOpText, revealFor, type StructOp } from "../cst/ops";
 import { getBlockUi } from "../render/blockUiState";
 import type { BlockApplyHost, CrossBlockMove } from "../ui/dnd";
+import { noteBasenameFromPath, unnamedBlockOrdinals } from "../identity/blockLabel";
 
 /**
  * The rendered widget shown in place of a ` ```mica ` block in Live Preview.
@@ -40,6 +41,7 @@ class MicaWidget extends WidgetType {
 		private readonly start: number,
 		private readonly content: string,
 		private readonly attrs: Readonly<Record<string, string>>,
+		private readonly unnamedOrdinal: number,
 	) {
 		super();
 	}
@@ -50,6 +52,7 @@ class MicaWidget extends WidgetType {
 			other.id === this.id &&
 			(this.id !== null || other.start === this.start) &&
 			other.content === this.content &&
+			other.unnamedOrdinal === this.unnamedOrdinal &&
 			sameAttrs(other.attrs, this.attrs)
 		);
 	}
@@ -91,6 +94,10 @@ class MicaWidget extends WidgetType {
 			chip,
 			ui,
 			blockAttrs: this.attrs,
+			blockNamePresentation: {
+				noteBasename: info?.file?.basename ?? noteBasenameFromPath(sourcePath),
+				unnamedOrdinal: this.unnamedOrdinal,
+			},
 			headerMode: this.plugin.settings.blockHeaderMode,
 			copyOptions: () => ({
 				includeMicaSyntax: this.plugin.settings.copyIncludeMicaSyntax,
@@ -233,6 +240,8 @@ export interface ScanCache {
 	tos: readonly number[];
 	/** Per-block content slices — shared instances make widget `eq` O(1). */
 	contents: readonly string[];
+	/** One-based document-order positions among blocks without an explicit name. */
+	unnamedOrdinals: readonly number[];
 }
 let scanCache: ScanCache | null = null;
 /** Exported for sibling extensions (source highlighter): same Text-identity
@@ -251,7 +260,8 @@ export function scanCached(state: EditorState): ScanCache {
 	// decorations must cover whole lines exactly.
 	const tos = blocks.map((b) => (doc.charCodeAt(b.end - 1) === 10 ? b.end - 1 : b.end));
 	const contents = blocks.map((b) => doc.slice(b.content_start, b.content_end));
-	scanCache = { texts: new WeakSet([state.doc]), doc, blocks, attrs, tos, contents };
+	const unnamedOrdinals = unnamedBlockOrdinals(blocks.map((block) => block.name));
+	scanCache = { texts: new WeakSet([state.doc]), doc, blocks, attrs, tos, contents, unnamedOrdinals };
 	return scanCache;
 }
 
@@ -263,7 +273,7 @@ export function scanCached(state: EditorState): ScanCache {
 function build(plugin: MicaPlugin, state: EditorState, sel: RevealSel): DecorationSet {
 	if (!state.field(editorLivePreviewField, false)) return Decoration.none;
 	const ranges = [];
-	const { blocks, attrs, tos, contents } = scanCached(state);
+	const { blocks, attrs, tos, contents, unnamedOrdinals } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
 		const b = blocks[i];
 		if (!b.closed) continue;
@@ -273,7 +283,7 @@ function build(plugin: MicaPlugin, state: EditorState, sel: RevealSel): Decorati
 		if (sel && sel.from <= to && sel.to >= b.start) continue;
 		ranges.push(
 			Decoration.replace({
-				widget: new MicaWidget(plugin, b.id, b.start, contents[i], attrs[i] ?? {}),
+				widget: new MicaWidget(plugin, b.id, b.start, contents[i], attrs[i] ?? {}, unnamedOrdinals[i] ?? 1),
 				block: true,
 			}).range(b.start, to),
 		);

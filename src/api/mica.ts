@@ -17,6 +17,7 @@ import { requireObject } from "../storage/sidecar";
 import { ensureBlockIds, ensureNoteId } from "../identity/identity";
 import { repair, type RepairReport } from "../identity/reconcile";
 import { migrateFile, migrateVault, type MigrateFileReport } from "../migrate/migrate";
+import { createBlockSource, type CreateBlockSourceOptions } from "./blockSource";
 
 const INBOX = "mica-bridge/inbox";
 const OUTBOX = "mica-bridge/outbox";
@@ -37,6 +38,11 @@ export class MicaApi {
 
 	version(): string {
 		return coreVersion();
+	}
+
+	/** Build a complete UUID-addressed Mica fence for templates/scripts. */
+	createBlockSource(options: CreateBlockSourceOptions): string {
+		return createBlockSource(options);
 	}
 
 	private note(path: string): TFile {
@@ -179,6 +185,7 @@ export class MicaApi {
 
 	private verbTable(): Record<string, (...args: string[]) => Promise<unknown>> {
 		return {
+			"block.source": (body, name?) => Promise.resolve(this.createBlockSource({ body, name })),
 			"block.list": (n) => this.blockList(n),
 			"block.read": (n, id) => this.blockRead(n, id),
 			"block.update": (n, id, c) => this.blockUpdate(n, id, c),
