@@ -1,0 +1,4 @@
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []

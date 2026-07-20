@@ -1,0 +1,65 @@
+name: Compatibility
+
+on:
+    schedule:
+        - cron: "17 7 * * 1"
+    workflow_dispatch:
+
+jobs:
+    e2e:
+        name: ${{ matrix.name }}
+        runs-on: ubuntu-latest
+        continue-on-error: ${{ matrix.advisory }}
+        timeout-minutes: 45
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: minimum compatibility
+                      profile: minimum
+                      advisory: false
+                    - name: mobile compatibility
+                      profile: mobile
+                      advisory: false
+                    - name: desktop latest canary
+                      profile: desktop-latest
+                      advisory: true
+        env:
+            MICA_E2E_PROFILE: ${{ matrix.profile }}
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+            - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+              with:
+                  version: 11.3.0
+
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+              with:
+                  node-version: 22.12.0
+                  cache: pnpm
+
+            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-20
+              with:
+                  toolchain: 1.97.1
+                  targets: wasm32-unknown-unknown
+
+            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+            - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+              with:
+                  tool: wasm-pack@0.15.0
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build plugin
+              run: pnpm run build
+
+            - name: Cache Obsidian binaries
+              uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+              with:
+                  path: .obsidian-cache
+                  key: obsidian-${{ runner.os }}-${{ matrix.profile }}
+
+            - name: E2E compatibility (${{ matrix.profile }})
+              run: xvfb-run -a pnpm run e2e
