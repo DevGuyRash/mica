@@ -402,7 +402,7 @@ fn colon_open(text: &str) -> Option<(usize, String, String)> {
 }
 
 /// A bare closing fence `:::` (>= 3 colons, only whitespace after) → its length.
-fn colon_close_len(text: &str) -> Option<usize> {
+pub(crate) fn colon_close_len(text: &str) -> Option<usize> {
     let indent = leading_spaces(text);
     if indent > 3 {
         return None;

@@ -528,6 +528,9 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             expected,
             text,
         } => {
+            let style = line_style_at(cst, path);
+            let inside_section =
+                node_at(cst, path).is_some_and(|node| is_container_named(node, "section"));
             let Some(children) = children_at_mut(cst, path) else {
                 return false;
             };
@@ -539,11 +542,17 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             }
             // Terminate the replacement's last line so serializing INSIDE a
             // directive container never glues typed text onto its `:::` closer.
-            let replacement = parse_block_impl(&terminated(text)).children;
+            let mut replacement = parse_block_impl(&terminated(text)).children;
+            if !inside_section && plain_content_count(&replacement).is_some_and(|count| count > 1) {
+                replacement = vec![new_section_styled(replacement, &style)];
+            }
             if region_matches(&replacement, expected) {
                 return false;
             }
             children.splice(*start..*end, replacement);
+            if inside_section {
+                grow_section_fence_at(cst, path);
+            }
             true
         }
         StructOp::InsertTab { path, at } => {
@@ -944,6 +953,7 @@ fn combined_target_node(
         if let Node::Container { children, .. } = &mut wrapper {
             *children = target.children;
         }
+        grow_section_fence(&mut wrapper);
         wrapper
     } else {
         new_section_styled(target.children, style)
@@ -2060,14 +2070,90 @@ fn new_cell_styled(style: &LineStyle) -> Node {
 }
 
 fn new_section_styled(children: Vec<Node>, style: &LineStyle) -> Node {
+    let colons = section_fence_len(&children);
+    let fence = ":".repeat(colons);
     Node::Container {
         name: "section".to_string(),
         title: String::new(),
-        colons: 3,
-        open_line: format!("{}:::section{}", style.indent, style.eol),
+        colons,
+        open_line: format!("{}{fence}section{}", style.indent, style.eol),
         children,
-        close_line: format!("{}:::{}", style.indent, style.eol),
+        close_line: format!("{}{fence}{}", style.indent, style.eol),
     }
+}
+
+/// A logical section's fence must be longer than every closer-like line in its
+/// Markdown body, otherwise reparsing would truncate the section. O(n) in the
+/// exact stored payload bytes; section creation already owns those nodes.
+fn section_fence_len(nodes: &[Node]) -> usize {
+    fn max_closer(node: &Node) -> usize {
+        match node {
+            Node::Leaf { text, .. } => text
+                .lines()
+                .filter_map(crate::parser::colon_close_len)
+                .max()
+                .unwrap_or(0),
+            Node::Container { children, .. } => children.iter().map(max_closer).max().unwrap_or(0),
+        }
+    }
+
+    nodes
+        .iter()
+        .map(max_closer)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(3)
+}
+
+fn grow_section_fence_at(cst: &mut Cst, path: &[usize]) {
+    if let Some(node) = node_at_mut(cst, path) {
+        grow_section_fence(node);
+    }
+}
+
+/// Grow an existing logical-section fence around its exact payload. Never
+/// shrink: an authored longer fence may be intentional and is already valid.
+fn grow_section_fence(node: &mut Node) {
+    let Node::Container {
+        name,
+        colons,
+        open_line,
+        children,
+        close_line,
+        ..
+    } = node
+    else {
+        return;
+    };
+    if name != "section" {
+        return;
+    }
+    let required = section_fence_len(children).max(*colons);
+    if required == *colons {
+        return;
+    }
+    *open_line = grow_colon_line(open_line, required);
+    if !close_line.is_empty() {
+        *close_line = grow_colon_line(close_line, required);
+    }
+    *colons = required;
+}
+
+fn grow_colon_line(line: &str, required: usize) -> String {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let run = line[indent..]
+        .bytes()
+        .take_while(|&byte| byte == b':')
+        .count();
+    if run >= required {
+        return line.to_string();
+    }
+    let mut grown = String::with_capacity(line.len() + required - run);
+    grown.push_str(&line[..indent]);
+    grown.push_str(&":".repeat(required));
+    grown.push_str(&line[indent + run..]);
+    grown
 }
 
 /// Build a new empty `:::grid {cols=N}`.
@@ -2252,6 +2338,27 @@ mod tests {
         );
         assert!(changed);
         assert_eq!(out, ":::section\nAlpha\n\nBeta\n\nGamma\n:::\n");
+    }
+
+    #[test]
+    fn combine_into_existing_section_grows_fence_above_literal_closer() {
+        let src = "Gamma\n:::::\nmore\n\n:::section\nAlpha\n:::\n";
+        let (ok, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 0,
+                source_end: 2,
+                source_expected: "Gamma\n:::::\nmore\n\n".into(),
+                target_path: vec![],
+                target_start: 2,
+                target_end: 3,
+                target_expected: ":::section\nAlpha\n:::\n".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(out, "::::::section\nAlpha\n\nGamma\n:::::\nmore\n::::::\n");
+        assert_eq!(parse_block_impl(&out).children.len(), 1);
     }
 
     #[test]
@@ -2533,6 +2640,84 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(out, "tab: A\nnew body\n");
+    }
+
+    #[test]
+    fn save_region_with_multiple_paragraphs_keeps_one_logical_section() {
+        let (ok, out) = apply(
+            "old\n",
+            StructOp::SaveRegion {
+                path: vec![],
+                start: 0,
+                end: 1,
+                expected: "old\n".into(),
+                text: "first paragraph\n\nsecond paragraph".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::section\nfirst paragraph\n\nsecond paragraph\n:::\n"
+        );
+    }
+
+    #[test]
+    fn save_region_inside_logical_section_does_not_nest_wrappers() {
+        let (ok, out) = apply(
+            ":::section\nold\n:::\n",
+            StructOp::SaveRegion {
+                path: vec![0],
+                start: 0,
+                end: 1,
+                expected: "old\n".into(),
+                text: "first paragraph\n\nsecond paragraph".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            ":::section\nfirst paragraph\n\nsecond paragraph\n:::\n"
+        );
+    }
+
+    #[test]
+    fn save_region_sizes_section_fence_above_literal_closers() {
+        let (ok, out) = apply(
+            "old\n",
+            StructOp::SaveRegion {
+                path: vec![],
+                start: 0,
+                end: 1,
+                expected: "old\n".into(),
+                text: "first paragraph\n\n:::::\nsecond paragraph".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            "::::::section\nfirst paragraph\n\n:::::\nsecond paragraph\n::::::\n"
+        );
+        assert_eq!(parse_block_impl(&out).children.len(), 1);
+    }
+
+    #[test]
+    fn save_region_grows_existing_section_fence_atomically() {
+        let (ok, out) = apply(
+            ":::section\nold\n:::\n",
+            StructOp::SaveRegion {
+                path: vec![0],
+                start: 0,
+                end: 1,
+                expected: "old\n".into(),
+                text: "first paragraph\n\n:::::\nsecond paragraph".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(
+            out,
+            "::::::section\nfirst paragraph\n\n:::::\nsecond paragraph\n::::::\n"
+        );
+        assert_eq!(parse_block_impl(&out).children.len(), 1);
     }
 
     #[test]

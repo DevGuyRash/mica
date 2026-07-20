@@ -42,6 +42,37 @@ async function clickLatestMenuItem(title: string): Promise<void> {
 }
 
 describe("structured sections", function () {
+	it("keeps multiple paragraphs typed in one text editor as one section", async function () {
+		await seedAndOpen("MultiParagraphSection.md", "Intro.\n\n```mica id=multi-paragraph\nAlpha\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-region .mica-md"))),
+			{ timeout: 8000, timeoutMsg: "the text section never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-region .mica-md") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-region.is-editing"))),
+			{ timeout: 8000, timeoutMsg: "the text editor never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const host = document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { setValue(value: string): void };
+			};
+			host.micaEditor?.setValue("Alpha\n\nBeta\n\n\nGamma");
+			(document.querySelector(".mica-lp .mica-qe-save") as HTMLButtonElement).click();
+		});
+		await browser.waitUntil(
+			async () =>
+				(await documentSource()).includes(":::section\nAlpha\n\nBeta\n\n\nGamma\n:::\n") &&
+				(await browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length)) === 1,
+			{ timeout: 8000, timeoutMsg: "the paragraphs split into separate visual sections" },
+		);
+		expect(
+			await browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-logical-section"))),
+		).toBe(true);
+	});
+
 	it("edits a named code block and grows both inner and Mica fences safely", async function () {
 		await seedAndOpen("StructuredCode.md", "Intro.\n\n````mica id=code-structured\n```md\n# before\n```\n````\n");
 		await browser.waitUntil(
