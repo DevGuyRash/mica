@@ -5,17 +5,22 @@
 
 import { readFile } from "node:fs/promises";
 import init, {
+	apply_op_text,
+	apply_ops_text,
 	block_content_edit,
 	diff,
 	ensure_ids,
 	fold_ledger,
+	guarded_block_content_edit,
 	hash_content,
 	migrate_tabs,
 	mica_version,
 	new_id,
 	parse_block,
+	rewrite_block_id_at,
 	scan,
 	serialize,
+	set_block_attr_edit,
 } from "../src/wasm/pkg/mica_core.js";
 
 const bytes = await readFile(new URL("../src/wasm/pkg/mica_core_bg.wasm", import.meta.url));
@@ -35,7 +40,7 @@ const id = new_id(); // exercises getrandom at runtime on wasm
 assert(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/.test(id), `uuidv7 shape: ${id}`);
 
 const hash = hash_content("hello");
-assert(hash.startsWith("b3:") && hash.length === 19, `hash: ${hash}`);
+assert(/^b3:[0-9a-f]{64}$/.test(hash), `hash: ${hash}`);
 
 const doc = "text\n````mica\n:::tab A\nhi\n```js\nx\n```\n:::\n````\nafter\n";
 const spans = scan(doc);
@@ -78,6 +83,46 @@ assert(e2 && e2.insert === grown, "edit computed");
 const applied = mig.doc.slice(0, e2.from) + e2.insert + mig.doc.slice(e2.to);
 assert(applied.includes("MUCH longer") && !applied.includes("LOYALTY"), "content replaced, not appended");
 assert((applied.match(/```mica/g) || []).length === 1, "no duplicated fence");
+
+// Fresh-scan edit contracts: ambiguous ids reject, exact occurrence repair and
+// header-only edits return minimal UTF-16 changes, and reducer batches commit
+// atomically without round-tripping a JS CST.
+const duplicateId = "legacy-short";
+const duplicateDoc = `😀 prose id=${duplicateId}\n\`\`\`mica id=${duplicateId} name=One\na\n\`\`\`\n\n\`\`\`mica id=${duplicateId} name=Two\nb\n\`\`\`\n\n\`\`\`mica id=${duplicateId} name=Three\nc\n\`\`\`\n`;
+assert(
+	guarded_block_content_edit(duplicateDoc, duplicateId, "a\n", "changed\n") === null,
+	"guarded by-id edit rejects duplicate identity",
+);
+const duplicateSpans = scan(duplicateDoc);
+assert(duplicateSpans.length === 3, "duplicate fixture scans three times");
+const freshIds = [new_id(), new_id()];
+// The leading emoji occupies two UTF-16 code units but four UTF-8 bytes.
+const startsDescending = ["Three", "Two"].map((name) =>
+	duplicateDoc.indexOf(`\`\`\`mica id=${duplicateId} name=${name}`),
+);
+let repaired = duplicateDoc;
+for (let i = 0; i < startsDescending.length; i++) {
+	const idEdit = rewrite_block_id_at(repaired, startsDescending[i], duplicateId, freshIds[i]);
+	assert(idEdit, "exact duplicate-id occurrence produced an edit");
+	repaired = repaired.slice(0, idEdit.from) + idEdit.insert + repaired.slice(idEdit.to);
+}
+assert((repaired.match(new RegExp(`id=${duplicateId}`, "g")) || []).length === 2, "one block id plus prose remain");
+assert(repaired.startsWith(`😀 prose id=${duplicateId}`), "prose id lookalike was not rewritten");
+assert(
+	freshIds.every((freshId) => repaired.includes(freshId)),
+	"every copy received a fresh id",
+);
+const attrEdit = set_block_attr_edit(repaired, freshIds[0], "name", "Repaired");
+assert(attrEdit && attrEdit.to - attrEdit.from < repaired.length, "attribute edit is header-only");
+
+const reducerInput = "tab: One\nbody\n";
+const reduced = apply_op_text(reducerInput, { op: "renameTab", path: [0], index: 0, title: "Two" });
+assert(reduced.changed && reduced.text.startsWith("tab: Two\n"), "coarse reducer edit succeeded");
+const rejectedBatch = apply_ops_text(reducerInput, [
+	{ op: "renameTab", path: [0], index: 0, title: "Two" },
+	{ op: "deleteTab", path: [0], index: 99 },
+]);
+assert(!rejectedBatch.changed && rejectedBatch.text === reducerInput, "reducer batch rejected atomically");
 
 const dd = diff("a\nb\n", "a\nc\n", "line", 3);
 assert(dd.hunks.length >= 1 && typeof dd.similarity === "number", "diff produced hunks");

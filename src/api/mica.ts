@@ -4,18 +4,16 @@ import {
 	coreVersion,
 	diffText,
 	makePatch,
-	newId,
-	parseBlock,
 	replaceBlockContent,
 	scanBlocksView,
-	serializeCst,
 	setBlockAttr,
 	type DiffGranularity,
 	type DiffResult,
 	type VersionMeta,
 } from "../wasm/bridge";
-import { applyOp, type StructOp } from "../cst/ops";
-import { appendEvents, readObject } from "../storage/sidecar";
+import { applyOpText, type StructOp } from "../cst/ops";
+import { interactiveDiffIssue } from "../diff/budget";
+import { requireObject } from "../storage/sidecar";
 import { ensureBlockIds, ensureNoteId } from "../identity/identity";
 import { repair, type RepairReport } from "../identity/reconcile";
 import { migrateFile, migrateVault, type MigrateFileReport } from "../migrate/migrate";
@@ -54,8 +52,7 @@ export class MicaApi {
 
 	async blockRead(notePath: string, blockId: string): Promise<string> {
 		const doc = await this.plugin.app.vault.read(this.note(notePath));
-		const b = scanBlocksView(doc).find((x) => x.id === blockId);
-		if (!b) throw new Error(`Block not found: ${blockId}`);
+		const b = uniqueBlock(doc, blockId);
 		return doc.slice(b.content_start, b.content_end);
 	}
 
@@ -63,11 +60,16 @@ export class MicaApi {
 		const file = this.note(notePath);
 		// Snapshot BEFORE writing so an agent edit can never destroy the only
 		// copy of the current content (the debounced snapshot may not have fired).
-		await this.plugin.engine.snapshot(file);
-		const next = replaceBlockContent(await this.plugin.app.vault.read(file), blockId, content);
-		if (next === null) throw new Error(`Block not found: ${blockId}`);
-		await this.plugin.app.vault.modify(file, next);
-		await this.plugin.engine.snapshot(file);
+		await this.plugin.engine.mutate(
+			file,
+			(doc) => {
+				uniqueBlock(doc, blockId);
+				const next = replaceBlockContent(doc, blockId, content);
+				if (next === null) throw new Error(`Cannot update block: ${blockId}`);
+				return { doc: next, result: undefined };
+			},
+			{ snapshotBefore: true, snapshotAfter: true },
+		);
 	}
 
 	async versionsList(notePath: string, blockId: string): Promise<VersionMeta[]> {
@@ -89,18 +91,23 @@ export class MicaApi {
 		granularity = "line",
 	): Promise<DiffResult> {
 		const [base, other] = await this.pair(notePath, baseHash, otherHash);
-		return diffText(base, other, granularity as DiffGranularity, 3);
+		const resolved = parseDiffGranularity(granularity);
+		const issue = interactiveDiffIssue(base, other, resolved);
+		if (issue) throw new Error(`Mica: ${issue}; use the mica CLI for this comparison`);
+		return diffText(base, other, resolved, 3);
 	}
 
 	async versionsPatch(notePath: string, baseHash: string, otherHash: string): Promise<string> {
 		const [base, other] = await this.pair(notePath, baseHash, otherHash);
+		const issue = interactiveDiffIssue(base, other, "line");
+		if (issue) throw new Error(`Mica: ${issue}; use the mica CLI for this comparison`);
 		return makePatch(base, other, 3);
 	}
 
 	private async pair(notePath: string, baseHash: string, otherHash: string): Promise<[string, string]> {
 		const file = this.note(notePath);
 		const vault = this.plugin.app.vault;
-		return [(await readObject(vault, file, baseHash)) ?? "", (await readObject(vault, file, otherHash)) ?? ""];
+		return [await requireObject(vault, file, baseHash), await requireObject(vault, file, otherHash)];
 	}
 
 	async versionsEdit(notePath: string, blockId: string, parentHash: string, content: string): Promise<void> {
@@ -109,9 +116,7 @@ export class MicaApi {
 
 	/** Label (or clear the label of) a stored version. */
 	async versionsLabel(notePath: string, blockId: string, hash: string, label: string): Promise<void> {
-		await appendEvents(this.plugin.app.vault, this.note(notePath), [
-			{ type: "label", eid: newId(), ts: Date.now(), block: blockId, hash, label: label || null },
-		]);
+		await this.plugin.engine.labelVersion(this.note(notePath), blockId, hash, label);
 	}
 
 	/**
@@ -120,26 +125,29 @@ export class MicaApi {
 	 */
 	async blockApply(notePath: string, blockId: string, op: StructOp): Promise<boolean> {
 		const file = this.note(notePath);
-		await this.plugin.engine.snapshot(file); // pre-image
-		const doc = await this.plugin.app.vault.read(file);
-		const b = scanBlocksView(doc).find((x) => x.id === blockId);
-		if (!b) throw new Error(`Block not found: ${blockId}`);
-		const { changed, cst } = applyOp(parseBlock(doc.slice(b.content_start, b.content_end)), op);
-		if (!changed) return false;
-		const next = replaceBlockContent(doc, blockId, serializeCst(cst));
-		if (next === null) throw new Error(`Block not found: ${blockId}`);
-		await this.plugin.app.vault.modify(file, next);
-		await this.plugin.engine.snapshot(file);
-		return true;
+		return this.plugin.engine.mutate(
+			file,
+			(doc) => {
+				const block = uniqueBlock(doc, blockId);
+				const { changed, text } = applyOpText(doc.slice(block.content_start, block.content_end), op);
+				if (!changed) return { doc, result: false };
+				const next = replaceBlockContent(doc, blockId, text);
+				if (next === null) throw new Error(`Cannot update block: ${blockId}`);
+				return { doc: next, result: true };
+			},
+			{ snapshotBefore: true, snapshotAfter: true },
+		);
 	}
 
 	/** Set / remove one fence-header attribute (name, accent, density, …). */
 	async blockSetAttr(notePath: string, blockId: string, key: string, value: string | null): Promise<void> {
 		const file = this.note(notePath);
-		const doc = await this.plugin.app.vault.read(file);
-		const next = setBlockAttr(doc, blockId, key, value);
-		if (next === null) throw new Error(`Cannot set ${key} on block ${blockId}`);
-		if (next !== doc) await this.plugin.app.vault.modify(file, next);
+		await this.plugin.engine.mutate(file, (doc) => {
+			uniqueBlock(doc, blockId);
+			const next = setBlockAttr(doc, blockId, key, value);
+			if (next === null) throw new Error(`Cannot set ${key} on block ${blockId}`);
+			return { doc: next, result: undefined };
+		});
 	}
 
 	async prepare(notePath: string): Promise<string> {
@@ -226,16 +234,39 @@ export class MicaApi {
 			error = e instanceof Error ? e.message : String(e);
 		}
 		// Consume the instruction so it can never replay.
-		await vault.delete(file).catch((e) => console.error("Mica bridge: failed to consume inbox file", file.path, e));
+		await this.plugin.app.fileManager
+			.trashFile(file)
+			.catch((e) => console.error("Mica bridge: failed to consume inbox file", file.path, e));
 		try {
 			if (!vault.getAbstractFileByPath(OUTBOX)) await vault.createFolder(OUTBOX);
 			const out = normalizePath(`${OUTBOX}/${file.basename}.json`);
 			const existing = vault.getAbstractFileByPath(out);
-			if (existing instanceof TFile) await vault.delete(existing);
-			await vault.create(out, JSON.stringify({ ok: error === null, result, error }, null, 2));
+			const body = JSON.stringify({ ok: error === null, result, error }, null, 2);
+			if (existing instanceof TFile) await vault.process(existing, () => body);
+			else await vault.create(out, body);
 		} catch (e) {
 			// Never hang an agent silently: the failure is at least observable.
 			console.error("Mica bridge: failed to write outbox result for", file.path, e);
 		}
+	}
+}
+
+function uniqueBlock(doc: string, blockId: string): ReturnType<typeof scanBlocksView>[number] {
+	const matches = scanBlocksView(doc).filter((block) => block.closed && block.id === blockId);
+	if (matches.length === 0) throw new Error(`Block not found: ${blockId}`);
+	if (matches.length > 1) throw new Error(`Block id is ambiguous: ${blockId}; run Mica repair first`);
+	return matches[0];
+}
+
+function parseDiffGranularity(value: string): DiffGranularity {
+	switch (value) {
+		case "line":
+		case "word":
+		case "char":
+		case "line-word":
+		case "line-char":
+			return value;
+		default:
+			throw new Error(`Mica: unsupported diff granularity ${JSON.stringify(value)}`);
 	}
 }

@@ -285,8 +285,7 @@ describe("drag & drop stress", function () {
 	});
 
 	it("Escape cancels a drag without touching the document", async function () {
-		const fixture =
-			"Intro.\n\n```mica id=dnd-6\ntab: Main\n> [!note] Stay\n\n> [!tip] Put\n```\n";
+		const fixture = "Intro.\n\n```mica id=dnd-6\ntab: Main\n> [!note] Stay\n\n> [!tip] Put\n```\n";
 		await seedAndOpen("DndEsc.md", fixture);
 		await waitForSelector(".mica-lp .mica-region", 2);
 		const before = await docContains("");
@@ -311,9 +310,7 @@ describe("drag & drop stress", function () {
 			await new Promise((r) => setTimeout(r, 30));
 			window.dispatchEvent(new PointerEvent("pointermove", opts(rp.left + 40, rp.bottom + 4)));
 			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(
-				new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
-			);
+			window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
 			await new Promise((r) => setTimeout(r, 30));
 			window.dispatchEvent(new PointerEvent("pointerup", opts(rp.left + 40, rp.bottom + 4)));
 		});
@@ -378,14 +375,16 @@ describe("round 7: column integrity + friendly-form safety", function () {
 			"Intro.\n\n```mica id=fg-1\ntab: One\n> [!note] Mover\n\nkeeper prose\n```\n",
 		);
 		await waitForSelector(".mica-lp .mica-region", 2);
-		await browser.executeObsidian(async () => {
-			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+		await browser.executeObsidian(async ({ app, obsidian }) => {
+			const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+			if (!view) throw new Error("the active Markdown view is unavailable");
+			const root = view.containerEl;
+			const region = Array.from(root.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("Mover"),
 			) as HTMLElement;
 			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
-			const wrap = document.querySelector(".mica-lp .mica-tabs") as HTMLElement;
+			const wrap = root.querySelector(".mica-lp .mica-tabs") as HTMLElement;
 			const rr = region.getBoundingClientRect();
-			const rw = wrap.getBoundingClientRect();
 			const opts = (x: number, y: number): PointerEventInit => ({
 				bubbles: true,
 				cancelable: true,
@@ -397,9 +396,23 @@ describe("round 7: column integrity + friendly-form safety", function () {
 			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
 			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 20)));
 			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rw.left + 40, rw.bottom + 6)));
-			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointerup", opts(rw.left + 40, rw.bottom + 6)));
+			let drop: { x: number; y: number } | null = null;
+			for (const offset of [6, 4, 8]) {
+				const rw = wrap.getBoundingClientRect();
+				const candidate = { x: rw.left + 40, y: rw.bottom + offset };
+				window.dispatchEvent(new PointerEvent("pointermove", opts(candidate.x, candidate.y)));
+				await new Promise((r) => setTimeout(r, 40));
+				const indicator = document.querySelector<HTMLElement>(".mica-drop-indicator");
+				if (indicator && getComputedStyle(indicator).display !== "none") {
+					drop = candidate;
+					break;
+				}
+			}
+			if (!drop) {
+				window.dispatchEvent(new PointerEvent("pointercancel", opts(rr.left, rr.top)));
+				throw new Error("the root drop indicator never appeared");
+			}
+			window.dispatchEvent(new PointerEvent("pointerup", opts(drop.x, drop.y)));
 		});
 		await browser.waitUntil(
 			async () => {
@@ -564,6 +577,90 @@ describe("round 10: sole-item safety + cross-block moves", function () {
 		);
 	});
 
+	it("a callout crosses upward into an earlier block in one ordered transaction", async function () {
+		await seedAndOpen(
+			"CrossBlockUp.md",
+			"Destination:\n\n```mica id=xbu-1\ntab: Dst\nupper destination\n```\n\nSource:\n\n```mica id=xbu-2\ntab: Src\n> [!tip] Upward traveler\n\nsource stays\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length >= 2),
+			{ timeout: 8000, timeoutMsg: "both blocks never rendered" },
+		);
+		await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Upward traveler"),
+			) as HTMLElement;
+			const target = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("upper destination"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const rr = region.getBoundingClientRect();
+			const rt = target.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 20)));
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rt.left + 40, rt.top - 2)));
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rt.left + 40, rt.top - 2)));
+		});
+		await browser.waitUntil(
+			async () => {
+				const value = await docContains("");
+				const source = value.indexOf("id=xbu-2");
+				const traveler = value.indexOf("[!tip] Upward traveler");
+				return traveler > 0 && traveler < source && value.lastIndexOf("[!tip] Upward traveler") === traveler;
+			},
+			{ timeout: 8000, timeoutMsg: "upward cross-block move did not commit exactly once" },
+		);
+	});
+
+	it("ID-less blocks expose no cross-block drop target", async function () {
+		const fixture = "```mica\ntab: Src\n> [!tip] Cannot cross\n```\n\n```mica\ntab: Dst\ndestination\n```\n";
+		await seedAndOpen("CrossBlockIdless.md", fixture);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length === 2),
+			{ timeout: 8000, timeoutMsg: "both ID-less blocks never rendered" },
+		);
+		const offered = await browser.executeObsidian(async () => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Cannot cross"),
+			) as HTMLElement;
+			const target = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("destination"),
+			) as HTMLElement;
+			const grip = region.querySelector(".mica-region-grip") as HTMLElement;
+			const rr = region.getBoundingClientRect();
+			const rt = target.getBoundingClientRect();
+			const opts = (x: number, y: number): PointerEventInit => ({
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: 0,
+				pointerId: 1,
+			});
+			grip.dispatchEvent(new PointerEvent("pointerdown", opts(rr.right - 10, rr.top + 6)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rr.right - 30, rr.top + 20)));
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(rt.left + 40, rt.top - 2)));
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			const indicator = document.querySelector(".mica-drop-indicator") as HTMLElement | null;
+			const visible = Boolean(indicator && indicator.style.display !== "none");
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rt.left + 40, rt.top - 2)));
+			return visible;
+		});
+		expect(offered).toBe(false);
+		expect(await docContains("")).toBe(fixture);
+	});
+
 	it("a whole GRID drags into another block", async function () {
 		await seedAndOpen(
 			"CrossGrid.md",
@@ -637,9 +734,7 @@ describe("round 11: home-zone inertness", function () {
 			await new Promise((r) => setTimeout(r, 30));
 			const ind = document.querySelector(".mica-drop-indicator") as HTMLElement | null;
 			const shown = Boolean(ind && ind.style.display !== "none");
-			window.dispatchEvent(
-				new PointerEvent("pointerup", opts(rr.left + rr.width / 2, rr.top + rr.height / 2)),
-			);
+			window.dispatchEvent(new PointerEvent("pointerup", opts(rr.left + rr.width / 2, rr.top + rr.height / 2)));
 			return { shown };
 		});
 		expect(probe.shown).toBe(false); // nothing promised inside the home zone

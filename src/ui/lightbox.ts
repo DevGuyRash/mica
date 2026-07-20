@@ -8,14 +8,17 @@ export interface LightboxOpts {
 	initial: string;
 	sourcePath: string;
 	/** Called with the edited markdown on an explicit save. */
-	onSave: (value: string) => void;
+	/** Return false to keep the editor open (for example, a stale pre-image). */
+	onSave: (value: string) => boolean | void | Promise<boolean | void>;
 	/** Optional: called when the box closes without saving. */
 	onDiscard?: () => void;
 	/** Live draft mirror (keeps quick-edit drafts in sync while typing here). */
 	onDraft?: (value: string) => void;
 	/** Optional derivative hook: inject field rows ABOVE the editor. `refresh`
 	 *  re-renders the live preview (call it when a field changes). */
-	header?: (host: HTMLElement, refresh: () => void) => void;
+	header?: (host: HTMLElement, refresh: () => void) => void | (() => void);
+	/** Derivative editors can include header fields in their dirty contract. */
+	isDirty?: (body: string) => boolean;
 	/** Optional derivative hook: what the preview (and only the preview)
 	 *  renders — e.g. the assembled callout around the edited body. */
 	previewTransform?: (body: string) => string;
@@ -37,6 +40,8 @@ export class EditorLightbox extends Modal {
 	private discardArmed = false;
 	private saved = false;
 	private previewTimer: number | null = null;
+	private destroyToolbar: (() => void) | null = null;
+	private destroyHeader: (() => void) | null = null;
 
 	constructor(private readonly opts: LightboxOpts) {
 		super(opts.app);
@@ -49,9 +54,11 @@ export class EditorLightbox extends Modal {
 		const root = this.contentEl.createDiv({ cls: "mica-lightbox-root" });
 		if (this.opts.header) {
 			const head = root.createDiv({ cls: "mica-lightbox-fields" });
-			this.opts.header(head, () => {
-				if (this.previewOn) this.renderPreview();
-			});
+			this.destroyHeader =
+				this.opts.header(head, () => {
+					this.disarmDiscard();
+					if (this.previewOn) this.renderPreview();
+				}) ?? null;
 		}
 		const toolbarRow = root.createDiv({ cls: "mica-lightbox-toolbar" });
 		const split = root.createDiv({ cls: "mica-lightbox-split" });
@@ -63,7 +70,7 @@ export class EditorLightbox extends Modal {
 			app: this.opts.app,
 			initial: this.opts.initial,
 			placeholder: shortcut ? `Write markdown — ${shortcut} saves, Esc cancels` : "Write markdown — Esc cancels",
-			onSave: () => this.save(),
+			onSave: () => void this.save(),
 			onCancel: () => this.requestClose(),
 			onChange: (v) => {
 				this.disarmDiscard();
@@ -74,7 +81,7 @@ export class EditorLightbox extends Modal {
 			onSelection: () => this.refreshStats(this.editor?.getValue() ?? ""),
 		});
 
-		buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
+		this.destroyToolbar = buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
 
 		// Right side of the toolbar: view toggles + preview.
 		const spacer = toolbarRow.createDiv({ cls: "mica-toolbar-spacer" });
@@ -90,7 +97,12 @@ export class EditorLightbox extends Modal {
 				b.toggleClass("is-on", get());
 			});
 		};
-		viewToggle("list-ordered", "Line numbers", () => editorViewPrefs().lineNumbers, () => toggleViewPref("lineNumbers"));
+		viewToggle(
+			"list-ordered",
+			"Line numbers",
+			() => editorViewPrefs().lineNumbers,
+			() => toggleViewPref("lineNumbers"),
+		);
 		viewToggle(
 			"pilcrow",
 			"Show whitespace characters",
@@ -123,7 +135,7 @@ export class EditorLightbox extends Modal {
 		this.cancelBtn = footer.createEl("button", { text: "Cancel", attr: { type: "button" } });
 		this.cancelBtn.addEventListener("click", () => this.requestClose());
 		const saveBtn = footer.createEl("button", { cls: "mod-cta", text: "Save", attr: { type: "button" } });
-		saveBtn.addEventListener("click", () => this.save());
+		saveBtn.addEventListener("click", () => void this.save());
 
 		// Esc goes through OUR dirty check, not straight to Modal.close().
 		this.scope.register([], "Escape", () => {
@@ -133,15 +145,17 @@ export class EditorLightbox extends Modal {
 	}
 
 	private get dirty(): boolean {
-		return (this.editor?.getValue() ?? this.opts.initial) !== this.opts.initial;
+		const value = this.editor?.getValue() ?? this.opts.initial;
+		return this.opts.isDirty?.(value) ?? value !== this.opts.initial;
 	}
 
-	private save(): void {
+	private async save(): Promise<void> {
 		if (!this.editor) return;
-		this.saved = true;
 		const value = this.editor.getValue();
+		const accepted = await this.opts.onSave(value);
+		if (accepted === false) return;
+		this.saved = true;
 		this.close();
-		this.opts.onSave(value);
 	}
 
 	/** Esc / Cancel: close clean editors instantly; arm a confirm when dirty. */
@@ -149,9 +163,10 @@ export class EditorLightbox extends Modal {
 		// Escape aimed at a popover INSIDE the lightbox (the callout type
 		// grid, a toolbar picker) dismisses that popover — it must never arm
 		// "Discard changes?" on the whole editor.
-		const pop = this.contentEl.querySelector(".mica-popover");
+		const pop = this.contentEl.querySelector(".mica-popover") as (HTMLElement & { micaClose?: () => void }) | null;
 		if (pop) {
-			pop.remove();
+			if (pop.micaClose) pop.micaClose();
+			else pop.remove();
 			return;
 		}
 		if (!this.dirty || this.discardArmed) {
@@ -216,6 +231,10 @@ export class EditorLightbox extends Modal {
 	onClose(): void {
 		if (this.previewTimer !== null) window.clearTimeout(this.previewTimer);
 		this.previewChild?.unload();
+		this.destroyHeader?.();
+		this.destroyHeader = null;
+		this.destroyToolbar?.();
+		this.destroyToolbar = null;
 		this.editor?.destroy();
 		this.editor = null;
 		if (!this.saved) this.opts.onDiscard?.();

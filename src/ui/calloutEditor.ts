@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
 import { calloutCatalog, type CalloutFold, type CalloutType } from "./calloutCatalog";
 import { EditorLightbox } from "./lightbox";
 import { buildCalloutTypeGrid } from "./toolbarView";
@@ -67,15 +67,18 @@ export function openCalloutEditor(ctx: RenderCtx, target: RegionTarget): void {
 	const parsed = parseCallout(target.original);
 	if (!parsed) return;
 	openCalloutEditorFor(ctx, parsed, (rebuilt) => {
-		if (rebuilt === target.original) return;
-		ctx.editable?.apply({
-			op: "saveRegion",
-			path: target.path,
-			start: target.start,
-			end: target.end,
-			expected: target.original,
-			text: rebuilt,
-		});
+		if (rebuilt === target.original) return true;
+		const accepted =
+			ctx.editable?.apply({
+				op: "saveRegion",
+				path: target.path,
+				start: target.start,
+				end: target.end,
+				expected: target.original,
+				text: rebuilt,
+			}) ?? false;
+		if (!accepted) new Notice("Mica: the callout changed while you were editing. Your edit is still open.");
+		return accepted;
 	});
 }
 
@@ -87,12 +90,11 @@ export function openCalloutEditor(ctx: RenderCtx, target: RegionTarget): void {
 export function openCalloutEditorFor(
 	ctx: RenderCtx,
 	parsed: ParsedCallout,
-	commit: (rebuilt: string) => void,
+	commit: (rebuilt: string) => boolean | void | Promise<boolean | void>,
 ): void {
 	// Mutable field state shared by the header hook and the save/preview paths.
 	const state = { type: parsed.type, fold: parsed.fold, title: parsed.title };
-	const assemble = (body: string): string =>
-		buildCallout({ ...state, body, suffix: parsed.suffix });
+	const assemble = (body: string): string => buildCallout({ ...state, body, suffix: parsed.suffix });
 
 	new EditorLightbox({
 		app: ctx.app,
@@ -100,8 +102,14 @@ export function openCalloutEditorFor(
 		initial: parsed.body,
 		sourcePath: ctx.sourcePath,
 		previewTransform: assemble,
+		isDirty: (body) =>
+			body !== parsed.body ||
+			state.type !== parsed.type ||
+			state.fold !== parsed.fold ||
+			state.title !== parsed.title,
 		header: (host, refresh) => {
 			const row = host.createDiv({ cls: "mica-coedit-row" });
+			let closeTypePicker: (() => void) | null = null;
 
 			// Type: current icon + name in the type's real (theme-driven) color;
 			// clicking opens the same searchable grid the toolbar uses.
@@ -121,12 +129,20 @@ export function openCalloutEditorFor(
 			};
 			paintType();
 			typeBtn.addEventListener("click", () => {
-				host.querySelector(".mica-popover")?.remove();
-				const panel = row.createDiv({ cls: "mica-popover mica-coedit-typepop" });
+				closeTypePicker?.();
+				const panel = row.createDiv({ cls: "mica-popover mica-coedit-typepop" }) as HTMLElement & {
+					micaClose?: () => void;
+				};
+				let closed = false;
 				const close = (): void => {
+					if (closed) return;
+					closed = true;
 					panel.remove();
 					document.removeEventListener("pointerdown", onOut, true);
+					if (closeTypePicker === close) closeTypePicker = null;
 				};
+				closeTypePicker = close;
+				panel.micaClose = close;
 				const onOut = (ev: PointerEvent): void => {
 					if (!panel.contains(ev.target as Node)) close();
 				};
@@ -167,6 +183,7 @@ export function openCalloutEditorFor(
 				state.title = titleInput.value.trim();
 				refresh();
 			});
+			return () => closeTypePicker?.();
 		},
 		onSave: (body) => commit(assemble(body)),
 	}).open();

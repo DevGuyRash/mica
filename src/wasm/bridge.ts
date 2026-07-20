@@ -1,5 +1,7 @@
 import init, {
 	apply_op,
+	apply_op_text,
+	apply_ops_text,
 	content_signature,
 	diff,
 	ensure_ids,
@@ -12,10 +14,13 @@ import init, {
 	new_id,
 	parse_block,
 	reconcile,
+	rewrite_block_id_at,
 	replace_block_content,
 	scan_view,
 	serialize,
 	set_block_attr,
+	set_block_attr_edit,
+	guarded_block_content_edit,
 } from "./pkg/mica_core.js";
 import wasmBinary from "./pkg/mica_core_bg.wasm";
 
@@ -121,6 +126,13 @@ export interface BlockView {
 	readonly attrs: readonly (readonly [string, string])[];
 }
 
+/** A minimal CodeMirror-compatible full-document change in UTF-16 offsets. */
+export interface BlockEdit {
+	readonly from: number;
+	readonly to: number;
+	readonly insert: string;
+}
+
 // scan_view is a pure function of the document, and independent subsystems
 // (Live Preview, widget ops, the version engine, the versions modal, the
 // public API) re-scan the same text within one interaction. A single
@@ -146,6 +158,32 @@ export function replaceBlockContent(doc: string, id: string, newContent: string)
 	return replace_block_content(doc, id, c) as string | null;
 }
 
+/** Guarded full-block replacement from a fresh document scan. */
+export function guardedBlockContentEdit(
+	doc: string,
+	id: string,
+	expected: string,
+	newContent: string,
+): BlockEdit | null {
+	const content = normalizeBlockContent(newContent);
+	return guarded_block_content_edit(doc, id, expected, content) as BlockEdit | null;
+}
+
+/** Rewrite exactly one scanned block occurrence's id, never a textual lookalike. */
+export function rewriteBlockIdAt(
+	doc: string,
+	blockStartUtf16: number,
+	expectedId: string,
+	newId: string,
+): BlockEdit | null {
+	return rewrite_block_id_at(doc, blockStartUtf16, expectedId, newId) as BlockEdit | null;
+}
+
+/** Header-only attribute change suitable for a minimal editor transaction. */
+export function setBlockAttrEdit(doc: string, id: string, key: string, value: string | null): BlockEdit | null {
+	return set_block_attr_edit(doc, id, key, value ?? undefined) as BlockEdit | null;
+}
+
 /** Insert a fresh `id=` into any ` ```mica ` block that lacks one. */
 export function ensureIds(doc: string): string {
 	return ensure_ids(doc);
@@ -167,6 +205,25 @@ export function setBlockAttr(doc: string, id: string, key: string, value: string
  */
 export function applyOpCore(cst: Cst, op: unknown): { changed: boolean; cst: Cst } {
 	return apply_op(cst, op) as { changed: boolean; cst: Cst };
+}
+
+/** Parse, reduce, and serialize inside Rust to avoid two CST structured clones. */
+export function applyOpText(content: string, op: unknown): { changed: boolean; text: string } {
+	return apply_op_text(content, op) as { changed: boolean; text: string };
+}
+
+/** Atomically apply a reducer batch, normalizing once and rejecting as a unit. */
+export function applyOpsText(content: string, ops: readonly unknown[]): { changed: boolean; text: string } {
+	return apply_ops_text(content, ops) as { changed: boolean; text: string };
+}
+
+/** Apply a UTF-16 edit to a JavaScript string. */
+export function applyBlockEdit(doc: string, edit: BlockEdit): string {
+	return `${doc.slice(0, edit.from)}${edit.insert}${doc.slice(edit.to)}`;
+}
+
+function normalizeBlockContent(content: string): string {
+	return content.length > 0 && !content.endsWith("\n") ? `${content}\n` : content;
 }
 
 // --- Versioning (mirrors the Rust ledger types) --------------------------

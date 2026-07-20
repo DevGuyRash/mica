@@ -1,4 +1,5 @@
-import { setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
+import type { StructOp } from "../cst/ops";
 import type { RenderCtx } from "./blockShell";
 import { EditorLightbox } from "./lightbox";
 import { MdEditor, saveShortcutLabel } from "./mdEditor";
@@ -13,7 +14,7 @@ export interface RegionTarget {
 
 /** The draft key for a region (drafts survive widget rebuilds + mode flips). */
 export function draftKey(t: RegionTarget): string {
-	return `${t.path.join(",")}:${t.start}:${t.end}`;
+	return `${t.path.join(",")}:${t.start}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -30,12 +31,19 @@ export function setEditorBehavior(mode: ClickOutsideMode): void {
 }
 
 interface OpenEditor {
+	blockOrder: number;
 	region: HTMLElement;
 	target: RegionTarget;
 	getValue: () => string;
-	applyOp: (value: string) => void;
+	applyOp: (value: string) => boolean;
+	applyMany: (ops: readonly StructOp[]) => boolean;
+	opFor: (value: string) => StructOp;
 	/** Destroy the editor locally (no doc change, draft cleared). */
 	closeLocal: () => void;
+	/** A widget rebuild detached the host: release CM/listeners but retain draft. */
+	destroyDetached: () => void;
+	preserveDraft: (value: string) => void;
+	clearDraft: () => void;
 	/** The editor's own cancel path (dirty editors arm "Discard changes?"). */
 	cancel: () => void;
 }
@@ -61,16 +69,30 @@ function byDocOrderDesc(a: OpenEditor, b: OpenEditor): number {
 export function commitAllOpen(): void {
 	sweepDetached();
 	const jobs = [...openEditors].map((e) => ({ e, value: e.getValue() }));
-	for (const { e } of jobs) e.closeLocal();
-	jobs.filter((j) => j.value !== j.e.target.original)
-		.sort((a, b) => byDocOrderDesc(a.e, b.e))
-		.forEach((j) => j.e.applyOp(j.value));
+	for (const job of jobs.filter((j) => j.value === j.e.target.original)) job.e.closeLocal();
+	const changed = jobs.filter((j) => j.value !== j.e.target.original).sort((a, b) => byDocOrderDesc(a.e, b.e));
+	const groups = new Map<OpenEditor["applyMany"], typeof changed>();
+	for (const job of changed) {
+		const group = groups.get(job.e.applyMany) ?? [];
+		group.push(job);
+		groups.set(job.e.applyMany, group);
+	}
+	const orderedGroups = [...groups].sort(([, a], [, b]) => b[0].e.blockOrder - a[0].e.blockOrder);
+	for (const [applyMany, group] of orderedGroups) {
+		for (const job of group) job.e.clearDraft();
+		if (applyMany(group.map((j) => j.e.opFor(j.value)))) {
+			for (const job of group) job.e.closeLocal();
+		} else {
+			for (const job of group) job.e.preserveDraft(job.value);
+			new Notice("Mica: the block changed while you were editing. Your draft is still open.");
+		}
+	}
 }
 
 /** Widget rebuilds (mode flips, cursor overlap) can destroy an editor's DOM
  *  without unregistering it — drop entries whose region left the document. */
 function sweepDetached(): void {
-	for (const ed of [...openEditors]) if (!ed.region.isConnected) openEditors.delete(ed);
+	for (const ed of [...openEditors]) if (!ed.region.isConnected) ed.destroyDetached();
 }
 
 function onDocPointerDown(e: PointerEvent): void {
@@ -85,14 +107,17 @@ function onDocPointerDown(e: PointerEvent): void {
 		if (ed.region.contains(t)) continue;
 		if (clickOutsideMode === "save") {
 			const value = ed.getValue();
-			ed.closeLocal();
-			if (value !== ed.target.original) ed.applyOp(value);
+			ed.clearDraft();
+			if (value === ed.target.original || ed.applyOp(value)) ed.closeLocal();
+			else {
+				ed.preserveDraft(value);
+				new Notice("Mica: the block changed while you were editing. Your draft is still open.");
+			}
 		} else {
 			ed.closeLocal();
 		}
 	}
 }
-document.addEventListener("pointerdown", onDocPointerDown, true);
 
 /** Escape cancels the most recent open editor even when focus is elsewhere
  *  (the editor's own keymap only sees Esc while focused). Modals, menus,
@@ -110,7 +135,29 @@ function onDocKeydown(e: KeyboardEvent): void {
 	e.stopPropagation();
 	last.cancel();
 }
-document.addEventListener("keydown", onDocKeydown, true);
+
+let removeGlobalListeners: (() => void) | null = null;
+
+/** Install document listeners under the plugin lifecycle, never at module
+ * import time. The disposer is idempotent and releases every live CM editor. */
+export function installQuickEditGlobalListeners(): () => void {
+	if (!removeGlobalListeners) {
+		document.addEventListener("pointerdown", onDocPointerDown, true);
+		document.addEventListener("keydown", onDocKeydown, true);
+		removeGlobalListeners = () => {
+			document.removeEventListener("pointerdown", onDocPointerDown, true);
+			document.removeEventListener("keydown", onDocKeydown, true);
+			for (const ed of [...openEditors]) ed.destroyDetached();
+			removeGlobalListeners = null;
+		};
+	}
+	let disposed = false;
+	return () => {
+		if (disposed) return;
+		disposed = true;
+		removeGlobalListeners?.();
+	};
+}
 
 /**
  * The inline quick editor: a compact CodeMirror markdown editor with a mini
@@ -150,7 +197,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	const key = draftKey(target);
 	const setDraft = (text: string | null): void => {
 		if (!ctx.ui) return;
-		ctx.ui.draft = text === null ? null : { key, text };
+		ctx.ui.draft = text === null ? null : { key, text, expected: target.original };
 	};
 
 	// --- Action bar (TOP, fixed): Save · Cancel · spacer · tools · Expand ----
@@ -189,31 +236,45 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		},
 	});
 
-	buildToolbar(tools, ctx.app, () => editor.view, true);
+	const destroyToolbar = buildToolbar(tools, ctx.app, () => editor.view, true);
 
 	const closeToView = (): void => {
 		openEditors.delete(entry);
 		setDraft(null);
+		destroyToolbar();
 		editor.destroy();
 		region.removeClass("is-editing");
-		ctx.repaintRegion?.(region, target);
+		if (region.isConnected) ctx.repaintRegion?.(region, target);
 	};
+	const preserveDraft = (value: string): void => setDraft(value === target.original ? null : value);
+	const destroyDetached = (): void => {
+		openEditors.delete(entry);
+		preserveDraft(editor.getValue());
+		destroyToolbar();
+		editor.destroy();
+	};
+	const opFor = (value: string): StructOp => ({
+		op: "saveRegion",
+		path: target.path,
+		start: target.start,
+		end: target.end,
+		expected: target.original,
+		text: value,
+	});
 
 	const entry: OpenEditor = {
+		blockOrder: ctx.editable?.order ?? 0,
 		region,
 		target,
 		cancel: () => requestCancel(),
 		getValue: () => editor.getValue(),
-		applyOp: (value) =>
-			ctx.editable?.apply({
-				op: "saveRegion",
-				path: target.path,
-				start: target.start,
-				end: target.end,
-				expected: target.original,
-				text: value,
-			}),
+		applyOp: (value) => ctx.editable?.apply(opFor(value)) ?? false,
+		applyMany: ctx.editable?.applyMany ?? (() => false),
+		opFor,
 		closeLocal: closeToView,
+		destroyDetached,
+		preserveDraft,
+		clearDraft: () => setDraft(null),
 	};
 	openEditors.add(entry);
 
@@ -239,6 +300,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	expand.addEventListener("click", () => {
 		openEditors.delete(entry);
 		const value = editor.getValue();
+		destroyToolbar();
 		editor.destroy();
 		region.removeClass("is-editing");
 		ctx.repaintRegion?.(region, target);
@@ -255,22 +317,32 @@ export function openLightboxFor(ctx: RenderCtx, target: RegionTarget, initial?: 
 		initial: initial ?? ctx.ui?.draft?.text ?? target.original,
 		sourcePath: ctx.sourcePath,
 		onDraft: (v) => {
-			if (ctx.ui) ctx.ui.draft = v === target.original ? null : { key, text: v };
+			if (ctx.ui) ctx.ui.draft = v === target.original ? null : { key, text: v, expected: target.original };
 		},
 		onDiscard: () => {
 			if (ctx.ui?.draft?.key === key) ctx.ui.draft = null;
 		},
 		onSave: (value) => {
+			if (value === target.original) {
+				if (ctx.ui?.draft?.key === key) ctx.ui.draft = null;
+				return true;
+			}
 			if (ctx.ui?.draft?.key === key) ctx.ui.draft = null;
-			if (value === target.original) return;
-			ctx.editable?.apply({
-				op: "saveRegion",
-				path: target.path,
-				start: target.start,
-				end: target.end,
-				expected: target.original,
-				text: value,
-			});
+			const accepted =
+				ctx.editable?.apply({
+					op: "saveRegion",
+					path: target.path,
+					start: target.start,
+					end: target.end,
+					expected: target.original,
+					text: value,
+				}) ?? false;
+			if (accepted) {
+				return true;
+			}
+			if (ctx.ui) ctx.ui.draft = { key, text: value, expected: target.original };
+			new Notice("Mica: the section changed while you were editing. Your draft is still open.");
+			return false;
 		},
 	}).open();
 }

@@ -10,8 +10,6 @@ export interface NestedCallout {
 	/** Line range within the region source (`[startLine, endLine)`). */
 	startLine: number;
 	endLine: number;
-	/** The nested callout with ONE quote level stripped (a plain callout). */
-	dedented: string;
 	/** Quote depth of its own header (2 = directly inside the region's callout). */
 	depth: number;
 }
@@ -54,27 +52,31 @@ export function requoteOnce(text: string): string {
 export function findNestedCallouts(md: string): NestedCallout[] {
 	const lines = md.split("\n");
 	const out: NestedCallout[] = [];
+	const active: number[] = [];
 	for (let i = 0; i < lines.length; i++) {
 		const depth = quoteDepth(lines[i]);
-		if (depth < 2 || !afterQuotes(lines[i]).startsWith("[!")) continue;
-		let j = i + 1;
-		while (j < lines.length) {
-			const dj = quoteDepth(lines[j]);
-			if (dj < depth) break;
-			if (dj === depth && afterQuotes(lines[j]).startsWith("[!")) break; // sibling
-			j++;
+		const header = depth >= 2 && afterQuotes(lines[i]).startsWith("[!");
+		while (active.length) {
+			const top = out[active[active.length - 1]];
+			if (depth > top.depth || (depth === top.depth && !header)) break;
+			top.endLine = i;
+			active.pop();
 		}
-		out.push({
-			startLine: i,
-			endLine: j,
-			dedented: lines
-				.slice(i, j)
-				.map((l) => stripOneQuote(l))
-				.join("\n"),
-			depth,
-		});
+		if (!header) continue;
+		out.push({ startLine: i, endLine: lines.length, depth });
+		active.push(out.length - 1);
 	}
 	return out;
+}
+
+/** Materialize a nested callout only when a user starts an action. Keeping
+ * discovery range-only avoids reconstructing every overlapping subtree. */
+export function dedentNested(md: string, callout: NestedCallout): string {
+	return md
+		.split("\n")
+		.slice(callout.startLine, callout.endLine)
+		.map((line) => stripOneQuote(line))
+		.join("\n");
 }
 
 /** Replace `[startLine, endLine)` with `replacement` (null removes them). */

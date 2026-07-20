@@ -1,4 +1,9 @@
-import { applyOpCore, type Cst } from "../wasm/bridge";
+import {
+	applyOpCore,
+	applyOpsText as applyOpsTextCore,
+	applyOpText as applyOpTextCore,
+	type Cst,
+} from "../wasm/bridge";
 
 /**
  * A structural edit to a block, expressed against the CST. Every user gesture
@@ -48,6 +53,16 @@ export function applyOp(cst: Cst, op: StructOp): { changed: boolean; cst: Cst } 
 	return applyOpCore(cst, op);
 }
 
+/** Parse, reduce, and serialize entirely in Rust for mutation hot paths. */
+export function applyOpText(content: string, op: StructOp): { changed: boolean; text: string } {
+	return applyOpTextCore(content, op);
+}
+
+/** Apply a multi-block gesture's reducer operations atomically. */
+export function applyOpsText(content: string, ops: readonly StructOp[]): { changed: boolean; text: string } {
+	return applyOpsTextCore(content, ops);
+}
+
 /** After an insert, focus the thing that was just created. */
 export function revealFor(op: StructOp): Reveal | null {
 	switch (op.op) {
@@ -56,7 +71,7 @@ export function revealFor(op: StructOp): Reveal | null {
 		case "insertCell":
 			return { path: [...op.path, op.at], kind: "region-edit" };
 		case "insertGroup":
-			return { path: [...op.path, op.at, 0], kind: op.kind === "grid" ? "region-edit" : "tab-edit" };
+			return op.kind === "tabs" ? { path: [...op.path, op.at, 0], kind: "tab-edit" } : null;
 		default:
 			return null;
 	}

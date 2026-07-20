@@ -53,6 +53,10 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 				ui,
 				blockAttrs: attrs,
 				headerMode: plugin.settings.blockHeaderMode,
+				copyOptions: () => ({
+					includeMicaSyntax: plugin.settings.copyIncludeMicaSyntax,
+					includeOuterContainer: plugin.settings.copyIncludeOuterContainer,
+				}),
 			});
 		} catch (e) {
 			// A render error must never blank the block — show it and keep the source.

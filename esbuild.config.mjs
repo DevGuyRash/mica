@@ -6,7 +6,7 @@ const production = process.argv[2] === "production";
 
 const banner = `/*
  * Mica — generated bundle, do not edit directly.
- * Source: https://github.com/DevGuyRash/mica
+ * License: MIT
  */`;
 
 const context = await esbuild.context({

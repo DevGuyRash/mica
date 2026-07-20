@@ -4,10 +4,11 @@ import type { EditorState, Extension, Text } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { parseBlock, scanBlocksView, serializeCst, setBlockAttr, type BlockView } from "../wasm/bridge";
+import { guardedBlockContentEdit, parseBlock, scanBlocksView, setBlockAttrEdit, type BlockView } from "../wasm/bridge";
 import { renderCst, type BlockUi } from "../ui/blockShell";
-import { applyOp, revealFor, type StructOp } from "../cst/ops";
+import { applyOpsText, applyOpText, revealFor, type StructOp } from "../cst/ops";
 import { getBlockUi } from "../render/blockUiState";
+import type { BlockApplyHost, CrossBlockMove } from "../ui/dnd";
 
 /**
  * The rendered widget shown in place of a ` ```mica ` block in Live Preview.
@@ -61,14 +62,22 @@ class MicaWidget extends WidgetType {
 		const ui = this.blockUi(sourcePath);
 		// Cross-block drops need the TARGET block's op hook: expose it on the
 		// root (apply relocates the block by id, so a stale widget stays safe).
-		(el as HTMLElement & { micaApply?: (op: StructOp) => void }).micaApply = (op) => this.apply(view, op, ui);
+		el.dataset.micaBlockId = this.id ?? "";
+		const host = el as BlockApplyHost;
+		host.micaContent = this.content;
+		host.micaApply = (op) => this.apply(view, op, ui);
+		const applyMany = (ops: readonly StructOp[]): boolean => this.applyMany(view, ops, ui);
+		host.micaApplyMany = applyMany;
+		host.micaMoveAcross = (move) => this.moveAcross(view, move);
 		renderCst(parseBlock(this.content), el, {
 			app: this.plugin.app,
 			sourcePath,
 			component: child,
 			editable: {
+				order: this.start,
 				apply: (op) => this.apply(view, op, ui),
-				replaceAll: (content) => this.replaceAll(view, content),
+				applyMany,
+				replaceAll: (expected, content) => this.replaceAll(view, expected, content),
 				setAttr: (key, value) => this.setAttr(view, key, value),
 			},
 			editorAutosize: this.plugin.settings.editorAutosize,
@@ -76,6 +85,10 @@ class MicaWidget extends WidgetType {
 			ui,
 			blockAttrs: this.attrs,
 			headerMode: this.plugin.settings.blockHeaderMode,
+			copyOptions: () => ({
+				includeMicaSyntax: this.plugin.settings.copyIncludeMicaSyntax,
+				includeOuterContainer: this.plugin.settings.copyIncludeOuterContainer,
+			}),
 			preImage: () => this.liveContent(view) ?? this.content,
 		});
 		return el;
@@ -89,50 +102,100 @@ class MicaWidget extends WidgetType {
 	/** The block's CURRENT content from a live scan (never the cached copy). */
 	private liveContent(view: EditorView): string | null {
 		const doc = view.state.doc.toString();
-		const live = scanBlocksView(doc).find((b) => (this.id ? b.id === this.id : b.start === this.start));
+		const matches = scanBlocksView(doc).filter((b) => (this.id ? b.id === this.id : b.start === this.start));
+		const live = matches.length === 1 ? matches[0] : null;
 		return live ? doc.slice(live.content_start, live.content_end) : null;
 	}
 
 	/** Apply one structural op via the shared Rust reducer and dispatch it live. */
-	private apply(view: EditorView, op: StructOp, ui: BlockUi): void {
+	private apply(view: EditorView, op: StructOp, ui: BlockUi): boolean {
 		ui.reveal = revealFor(op);
-		this.structuralEdit(view, (content) => {
-			const { changed, cst } = applyOp(parseBlock(content), op);
+		return this.structuralEdit(view, (content) => {
+			const { changed, text } = applyOpText(content, op);
 			if (!changed) {
 				ui.reveal = null;
 				return null;
 			}
-			return serializeCst(cst);
+			return text;
 		});
 	}
 
+	/** Apply all edits to one fresh tree and dispatch once. Any rejection leaves
+	 * the document byte-for-byte unchanged. */
+	private applyMany(view: EditorView, ops: readonly StructOp[], ui: BlockUi): boolean {
+		if (!ops.length) return true;
+		ui.reveal = null;
+		return this.structuralEdit(view, (content) => {
+			const result = applyOpsText(content, ops);
+			return result.changed ? result.text : null;
+		});
+	}
+
+	/** Reduce a source deletion and target insertion from one fresh document,
+	 * then dispatch both non-overlapping changes as one CodeMirror transaction. */
+	private moveAcross(view: EditorView, move: CrossBlockMove): boolean {
+		if (!this.id || move.sourceId === this.id) return false;
+		const doc = view.state.doc.toString();
+		const blocks = scanBlocksView(doc);
+		const targets = blocks.filter((b) => b.id === this.id);
+		const sources = blocks.filter((b) => b.id === move.sourceId);
+		if (targets.length !== 1 || sources.length !== 1) return false;
+		const target = targets[0];
+		const source = sources[0];
+		const targetBefore = doc.slice(target.content_start, target.content_end);
+		const sourceBefore = doc.slice(source.content_start, source.content_end);
+		if (targetBefore !== move.targetExpected || sourceBefore !== move.sourceExpected) return false;
+		const targetResult = applyOpText(targetBefore, move.targetOp);
+		const sourceResult = applyOpText(sourceBefore, move.sourceOp);
+		if (!targetResult.changed || !sourceResult.changed) return false;
+		const targetAfter = terminated(targetResult.text);
+		const sourceAfter = terminated(sourceResult.text);
+		const changes = [
+			{ from: target.content_start, to: target.content_end, insert: targetAfter },
+			{ from: source.content_start, to: source.content_end, insert: sourceAfter },
+		].sort((a, b) => a.from - b.from);
+		view.dispatch({ changes });
+		return true;
+	}
+
 	/** Replace the whole block body (undo toasts, whole-block lightbox edits). */
-	private replaceAll(view: EditorView, content: string): void {
-		this.structuralEdit(view, () => content);
+	private replaceAll(view: EditorView, expected: string, content: string): boolean {
+		if (this.id) {
+			const edit = guardedBlockContentEdit(view.state.doc.toString(), this.id, expected, content);
+			if (!edit) return false;
+			view.dispatch({ changes: edit });
+			return true;
+		}
+		return this.structuralEdit(view, (live) => (live === expected ? content : null));
 	}
 
 	/** Write / remove one fence-header attribute (name, accent, density, …). */
 	private setAttr(view: EditorView, key: string, value: string | null): void {
 		if (!this.id) return;
 		const doc = view.state.doc.toString();
-		const next = setBlockAttr(doc, this.id, key, value);
-		if (next === null || next === doc) return;
-		view.dispatch({ changes: { from: 0, to: doc.length, insert: next } });
+		const edit = setBlockAttrEdit(doc, this.id, key, value);
+		if (!edit) return;
+		view.dispatch({ changes: edit });
 	}
 
-	private structuralEdit(view: EditorView, mutate: (content: string) => string | null): void {
+	private structuralEdit(view: EditorView, mutate: (content: string) => string | null): boolean {
 		const doc = view.state.doc.toString();
-		const live = scanBlocksView(doc).find((b) => (this.id ? b.id === this.id : b.start === this.start));
-		if (!live) return;
+		const matches = scanBlocksView(doc).filter((b) => (this.id ? b.id === this.id : b.start === this.start));
+		// An id must identify exactly one live block. Choosing the first duplicate
+		// silently edits the original after copy/paste, which is worse than a
+		// visible rejected operation.
+		if (matches.length !== 1) return false;
+		const live = matches[0];
 		const before = doc.slice(live.content_start, live.content_end);
 		let after = mutate(before);
-		if (after === null) return;
+		if (after === null) return false;
 		// A closed block's content always ends at the closing fence's line start,
 		// so it must end in a newline — otherwise newline-free text would glue the
 		// last line onto the ``` and break the fence.
-		if (after.length && !after.endsWith("\n")) after += "\n";
-		if (after === before) return; // no change — never churn the doc
+		after = terminated(after);
+		if (after === before) return false; // no change — never churn the doc
 		view.dispatch({ changes: { from: live.content_start, to: live.content_end, insert: after } });
+		return true;
 	}
 
 	destroy(): void {
@@ -145,6 +208,10 @@ class MicaWidget extends WidgetType {
 	ignoreEvent(): boolean {
 		return true;
 	}
+}
+
+function terminated(content: string): string {
+	return content.length && !content.endsWith("\n") ? `${content}\n` : content;
 }
 
 function sameAttrs(a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean {

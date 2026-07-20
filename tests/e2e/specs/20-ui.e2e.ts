@@ -294,6 +294,267 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(ghost.hasIcon).toBe(true); // …and it reads as an affordance, not stray text
 	});
 
+	it("a new grid starts empty and adds its first cell only on request", async function () {
+		await seedAndOpen("NewGridEmpty.md", "Intro line.\n\n```mica id=ng-1\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-ghost"))),
+			{ timeout: 8000, timeoutMsg: "the empty block invitation never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-ghost") as HTMLElement | null)?.click();
+		});
+		await browser.waitUntil(() => browser.executeObsidian(() => Boolean(document.querySelector("body > .menu"))), {
+			timeout: 8000,
+			timeoutMsg: "the insert menu never opened",
+		});
+		await browser.executeObsidian(() => {
+			const menus = Array.from(document.querySelectorAll<HTMLElement>("body > .menu"));
+			const item = Array.from(menus.at(-1)?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+				(el) => el.querySelector(".menu-item-title")?.textContent?.trim() === "Grid",
+			);
+			item?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) =>
+					(app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "").includes(
+						":::grid {cols=2}\n:::\n",
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the empty grid was not added to the document" },
+		);
+		const empty = await browser.executeObsidian(({ app, obsidian }) => {
+			const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+			return {
+				cells: view?.containerEl.querySelectorAll(".mica-lp .mica-cell").length ?? -1,
+				addCell: view?.containerEl.querySelectorAll(".mica-lp .mica-cell-ghost").length ?? -1,
+				editors: view?.containerEl.querySelectorAll(".mica-lp .mica-mdeditor").length ?? -1,
+				source: view?.editor.getValue() ?? "",
+			};
+		});
+		expect(empty.cells).toBe(0);
+		expect(empty.addCell).toBe(1);
+		expect(empty.editors).toBe(0);
+		expect(empty.source).not.toContain(":::cell");
+
+		await browser.executeObsidian(({ app, obsidian }) => {
+			const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+			(view?.containerEl.querySelector(".mica-lp .mica-cell-ghost") as HTMLElement | null)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).some((menu) =>
+						Array.from(menu.querySelectorAll(".menu-item-title")).some(
+							(title) => title.textContent?.trim() === "Grid (nested)",
+						),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the cell type menu never opened" },
+		);
+		await browser.executeObsidian(() => {
+			// Mobile keeps the dismissed palette mounted through its exit animation;
+			// identify the cell palette by its unique nested-grid entry so an older
+			// root palette's Text item cannot receive this click.
+			const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).find((candidate) =>
+				Array.from(candidate.querySelectorAll(".menu-item-title")).some(
+					(title) => title.textContent?.trim() === "Grid (nested)",
+				),
+			);
+			const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+				(el) => el.querySelector(".menu-item-title")?.textContent?.trim() === "Text",
+			);
+			item?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+					return (
+						(view?.editor.getValue() ?? "").includes(":::cell\n:::\n") &&
+						Boolean(view?.containerEl.querySelector(".mica-lp .mica-cell .mica-mdeditor"))
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "the requested first text cell did not open" },
+		);
+	});
+
+	it("copies every section type with live, independent copy settings", async function () {
+		const source = [
+			"Intro line.",
+			"",
+			"````mica id=copy-1",
+			":::tabs",
+			":::tab One",
+			"alpha",
+			"",
+			"> [!note] Parent",
+			"> body",
+			"> > [!tip] Child",
+			"> > nested",
+			"",
+			":::grid {cols=1}",
+			":::cell",
+			"cell text",
+			":::",
+			":::",
+			":::",
+			":::tab Two",
+			"```js",
+			"const value = 1;",
+			"```",
+			":::",
+			":::",
+			"````",
+			"",
+		].join("\n");
+		await seedAndOpen("CopySections.md", source, "live");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+					return Boolean(
+						view?.containerEl.querySelector('[data-mica-copy-kind="grid"]') &&
+						view.containerEl.querySelector('[data-mica-copy-kind="nested-callout"]') &&
+						view.containerEl.querySelector('[data-mica-copy-kind="code"]'),
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "section copy controls never rendered" },
+		);
+
+		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+			type CopyPlugin = {
+				settings: { copyIncludeMicaSyntax: boolean; copyIncludeOuterContainer: boolean };
+			};
+			const plugin = (
+				app as unknown as { plugins: { getPlugin(id: string): CopyPlugin | null } }
+			).plugins.getPlugin("mica");
+			const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+			if (!plugin || !view) throw new Error("Mica or the active Markdown view is unavailable");
+			const root = view.containerEl;
+			const kinds = Array.from(root.querySelectorAll<HTMLElement>("[data-mica-copy-kind]")).map(
+				(button) => button.dataset.micaCopyKind ?? "",
+			);
+			const button = root.querySelector<HTMLElement>('[data-mica-copy-kind="grid"]');
+			if (!button) throw new Error("grid copy control is unavailable");
+
+			const clipboard = navigator.clipboard;
+			const originalWrite = clipboard.writeText;
+			let copied = "";
+			Object.defineProperty(clipboard, "writeText", {
+				configurable: true,
+				value: async (text: string) => {
+					copied = text;
+				},
+			});
+			const previous = {
+				syntax: plugin.settings.copyIncludeMicaSyntax,
+				outer: plugin.settings.copyIncludeOuterContainer,
+			};
+			const outputs: string[] = [];
+			const before = view.editor.getValue();
+			const activeBefore = root.querySelector(".mica-tab-btn.is-active")?.textContent ?? "";
+			try {
+				for (const [syntax, outer] of [
+					[false, false],
+					[true, false],
+					[false, true],
+					[true, true],
+				] as const) {
+					plugin.settings.copyIncludeMicaSyntax = syntax;
+					plugin.settings.copyIncludeOuterContainer = outer;
+					copied = "";
+					button.click();
+					await Promise.resolve();
+					outputs.push(copied);
+				}
+			} finally {
+				plugin.settings.copyIncludeMicaSyntax = previous.syntax;
+				plugin.settings.copyIncludeOuterContainer = previous.outer;
+				Object.defineProperty(clipboard, "writeText", { configurable: true, value: originalWrite });
+			}
+			const keyboardCopy = root.querySelector<HTMLElement>('[data-mica-copy-kind="text"]');
+			keyboardCopy?.focus();
+			// The toolbar intentionally fades in; wait past that visual transition
+			// before asserting the keyboard-revealed state.
+			await new Promise((resolve) => window.setTimeout(resolve, 160));
+			const keyboardTools = keyboardCopy?.closest<HTMLElement>(".mica-region-tools");
+			return {
+				kinds,
+				outputs,
+				sourceUnchanged: view.editor.getValue() === before,
+				activeUnchanged: (root.querySelector(".mica-tab-btn.is-active")?.textContent ?? "") === activeBefore,
+				editors: root.querySelectorAll(".mica-mdeditor").length,
+				keyboardVisible:
+					Boolean(keyboardCopy && document.activeElement === keyboardCopy) &&
+					Boolean(keyboardTools && getComputedStyle(keyboardTools).opacity === "1"),
+			};
+		});
+
+		for (const kind of ["block", "tabs", "tab", "grid", "cell", "text", "callout", "code", "nested-callout"])
+			expect(result.kinds).toContain(kind);
+		const gridSyntax = ":::grid {cols=1}\n:::cell\ncell text\n:::\n:::\n";
+		expect(result.outputs).toEqual([
+			"cell text\n",
+			gridSyntax,
+			"```mica\ncell text\n```",
+			`\`\`\`mica\n${gridSyntax}\`\`\``,
+		]);
+		expect(result.sourceUnchanged).toBe(true);
+		expect(result.activeUnchanged).toBe(true);
+		expect(result.editors).toBe(0);
+		expect(result.keyboardVisible).toBe(true);
+	});
+
+	it("shows the two clipboard settings and copy controls in Reading view", async function () {
+		const reading = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const el = document.createElement("div");
+			document.body.appendChild(el);
+			const comp = new obsidian.Component();
+			comp.load();
+			await obsidian.MarkdownRenderer.render(
+				app,
+				"```mica id=copy-read\n:::grid {cols=1}\n:::cell\nread me\n:::\n:::\n```\n",
+				el,
+				"CopyReading.md",
+				comp,
+			);
+			const result = {
+				mode: el.querySelector(".mica")?.getAttribute("data-mica-mode") ?? "",
+				kinds: Array.from(el.querySelectorAll<HTMLElement>("[data-mica-copy-kind]")).map(
+					(button) => button.dataset.micaCopyKind ?? "",
+				),
+			};
+			comp.unload();
+			el.remove();
+			return result;
+		});
+		expect(reading.mode).toBe("read");
+		for (const kind of ["block", "grid", "cell", "text"]) expect(reading.kinds).toContain(kind);
+
+		await browser.executeObsidian(({ app }) => {
+			const setting = (app as unknown as { setting: { open(): void; openTabById(id: string): void } }).setting;
+			setting.open();
+			setting.openTabById("mica");
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const names = Array.from(document.querySelectorAll<HTMLElement>(".setting-item-name")).map(
+						(el) => el.textContent?.trim() ?? "",
+					);
+					return (
+						names.includes("Include Mica layout syntax") &&
+						names.includes("Wrap copies in an outer Mica block")
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "the clipboard settings did not render" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			(app as unknown as { setting: { close(): void } }).setting.close();
+		});
+	});
+
 	it("deleting the last tab removes the whole group", async function () {
 		await seedAndOpen("DelTab.md", "Intro line.\n\n```mica id=dt-1\ntab: Only\nbody\n```\n", "live");
 		await browser.waitUntil(
@@ -365,11 +626,14 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 		// Drive the pointer-based DnD: down on the chip, move past the threshold to
 		// the append slot after the last chip, release.
-		await browser.executeObsidian(async () => {
+		const dragDiagnostic = await browser.executeObsidian(async () => {
 			const chips = Array.from(document.querySelectorAll(".mica-lp .mica-tab-chip")) as HTMLElement[];
 			const [src, dst] = chips;
 			const rs = src.getBoundingClientRect();
 			const rd = dst.getBoundingClientRect();
+			const nav = src.parentElement?.getBoundingClientRect();
+			if (!nav) throw new Error("tab strip is unavailable");
+			const appendX = Math.min(rd.right + 4, nav.right - 2);
 			const opts = (x: number, y: number): PointerEventInit => ({
 				bubbles: true,
 				cancelable: true,
@@ -379,22 +643,40 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				pointerId: 1,
 			});
 			src.dispatchEvent(new PointerEvent("pointerdown", opts(rs.left + 4, rs.top + rs.height / 2)));
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.right - 2, rd.top + rd.height / 2)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(appendX - 6, rd.top + rd.height / 2)));
 			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointermove", opts(rd.right + 4, rd.top + rd.height / 2)));
+			window.dispatchEvent(new PointerEvent("pointermove", opts(appendX, rd.top + rd.height / 2)));
 			await new Promise((r) => setTimeout(r, 30));
-			window.dispatchEvent(new PointerEvent("pointerup", opts(rd.right + 4, rd.top + rd.height / 2)));
+			const indicator = document.querySelector<HTMLElement>(".mica-drop-indicator");
+			const diagnostic = {
+				source: { left: rs.left, right: rs.right, top: rs.top, bottom: rs.bottom },
+				destination: { left: rd.left, right: rd.right, top: rd.top, bottom: rd.bottom },
+				nav: { left: nav.left, right: nav.right, top: nav.top, bottom: nav.bottom },
+				active: document.body.classList.contains("mica-dnd-active"),
+				indicator: indicator
+					? { display: getComputedStyle(indicator).display, transform: indicator.style.transform }
+					: null,
+			};
+			window.dispatchEvent(new PointerEvent("pointerup", opts(appendX, rd.top + rd.height / 2)));
+			return diagnostic;
 		});
-		await browser.waitUntil(
-			() =>
-				browser.executeObsidian(({ app, obsidian }) => {
-					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
-					const two = v.indexOf("tab: Two");
-					const one = v.indexOf("tab: One");
-					return two >= 0 && one >= 0 && two < one; // Two now precedes One
-				}),
-			{ timeout: 8000, timeoutMsg: "the tab order did not change after drag" },
-		);
+		expect(dragDiagnostic.active).toBe(true);
+		expect(dragDiagnostic.indicator?.display).toBe("block");
+		try {
+			await browser.waitUntil(
+				() =>
+					browser.executeObsidian(({ app, obsidian }) => {
+						const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+						const two = v.indexOf("tab: Two");
+						const one = v.indexOf("tab: One");
+						return two >= 0 && one >= 0 && two < one; // Two now precedes One
+					}),
+				{ timeout: 8000, timeoutMsg: "the tab order did not change after drag" },
+			);
+		} catch (error) {
+			console.log("TAB DRAG FAIL DIAG:", JSON.stringify(dragDiagnostic));
+			throw error;
+		}
 	});
 
 	it("dragging a grid cell up drops it above the target (vertical axis)", async function () {
@@ -412,7 +694,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 		await browser.executeObsidian(async () => {
 			const cells = Array.from(document.querySelectorAll(".mica-lp .mica-cell")) as HTMLElement[];
-			const handle = cells[3].querySelector(".mica-cell-tool") as HTMLElement | null; // delta's grip
+			const handle = cells[3].querySelector('[aria-label="Drag to move this cell"]') as HTMLElement | null;
 			const dst = cells[0]; // alpha
 			if (!handle) return;
 			const rd = dst.getBoundingClientRect();

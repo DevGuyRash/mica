@@ -232,6 +232,10 @@ export class MdEditor {
 		const mount = document.createElement("div");
 		mount.style.display = "contents";
 		root.appendChild(mount);
+		// CodeMirror normalizes line endings internally unless a separator is
+		// configured. Match the incoming text so editing a stored CRLF version
+		// cannot silently rewrite it as LF on save.
+		const lineSeparator = opts.initial.match(/\r\n|\n/)?.[0] ?? "\n";
 
 		// Global hotkeys (Obsidian's own, or a community plugin's Ctrl+Enter)
 		// run at window capture and consume REAL keystrokes before the shadow
@@ -300,6 +304,7 @@ export class MdEditor {
 			state: EditorState.create({
 				doc: opts.initial,
 				extensions: [
+					EditorState.lineSeparator.of(lineSeparator),
 					// Order matters: our save/cancel keys must beat the defaults.
 					saveKeys,
 					history(),
@@ -311,7 +316,7 @@ export class MdEditor {
 					EditorView.lineWrapping,
 					cmPlaceholder(opts.placeholder ?? "Write markdown…"),
 					EditorView.updateListener.of((u) => {
-						if (u.docChanged) opts.onChange?.(u.state.doc.toString());
+						if (u.docChanged) opts.onChange?.(u.state.sliceDoc());
 						if (u.selectionSet || u.docChanged) opts.onSelection?.();
 					}),
 				],
@@ -341,7 +346,7 @@ export class MdEditor {
 	}
 
 	getValue(): string {
-		return this.view.state.doc.toString();
+		return this.view.state.sliceDoc();
 	}
 
 	setValue(value: string): void {

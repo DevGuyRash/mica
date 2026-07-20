@@ -1,16 +1,11 @@
 import { Menu, Modal, Notice, setIcon, TFile } from "obsidian";
 import type MicaPlugin from "../main";
-import {
-	contentSignature,
-	diffText,
-	makePatch,
-	newId,
-	scanBlocksView,
-	type VersionMeta,
-} from "../wasm/bridge";
-import { appendEvents, readObject } from "../storage/sidecar";
+import { contentSignature, diffText, makePatch, scanBlocksView, type VersionMeta } from "../wasm/bridge";
+import { readObject } from "../storage/sidecar";
+import { interactiveDiffIssue } from "../diff/budget";
 import { renderDiff, renderNUp, renderPatch } from "../diff/diffView";
 import { EditorLightbox } from "./lightbox";
+import { matchingVersions, VERSION_ROW_PAGE_SIZE, versionPageBounds } from "./versionWindow";
 
 interface Row {
 	meta: VersionMeta;
@@ -20,6 +15,8 @@ interface Row {
 }
 
 const WORKING = "__working__";
+const CONTENT_CACHE_LIMIT = 12;
+const MULTI_COMPARE_LIMIT = 4;
 
 /**
  * The version history browser: a timeline (labels, relative times, origin,
@@ -30,7 +27,10 @@ const WORKING = "__working__";
 export class VersionsModal extends Modal {
 	private rows: Row[] = [];
 	private contents = new Map<string, string>();
+	private readonly missing = new Set<string>();
+	private readonly loading = new Map<string, Promise<boolean>>();
 	private working = "";
+	private blockConflict: string | null = null;
 	private selected: string = WORKING; // hash or WORKING
 	private baseMode: "previous" | "head" | string = "head"; // or a hash
 	private refine: "none" | "word" | "char";
@@ -42,6 +42,7 @@ export class VersionsModal extends Modal {
 	private surface: HTMLElement | null = null;
 	private listEl: HTMLElement | null = null;
 	private initialized = false;
+	private rowPageStart = 0;
 
 	constructor(
 		private readonly plugin: MicaPlugin,
@@ -100,13 +101,17 @@ export class VersionsModal extends Modal {
 
 	/** Move the selection up/down the timeline (working copy included). */
 	private step(delta: number): void {
-		const keys: string[] = [];
-		if (this.isDirty() || this.selected === WORKING) keys.push(WORKING);
-		keys.push(...this.rows.map((r) => r.meta.hash));
-		const at = keys.indexOf(this.selected);
-		const next = keys[Math.min(keys.length - 1, Math.max(0, at + delta))];
+		const includesWorking = this.isDirty() || this.selected === WORKING;
+		const offset = includesWorking ? 1 : 0;
+		const at =
+			this.selected === WORKING
+				? 0
+				: Math.max(0, this.rows.findIndex((row) => row.meta.hash === this.selected) + offset);
+		const nextIndex = Math.min(this.rows.length + offset - 1, Math.max(0, at + delta));
+		const next = includesWorking && nextIndex === 0 ? WORKING : this.rows[nextIndex - offset]?.meta.hash;
 		if (next && next !== this.selected) {
 			this.selected = next;
+			this.revealRowPage(next);
 			this.renderList();
 			this.renderDiffSurface();
 		}
@@ -117,29 +122,82 @@ export class VersionsModal extends Modal {
 		const versions = state?.versions ?? [];
 		this.rows = versions.map((meta, i) => ({ meta, n: i + 1, head: state?.head === meta.hash })).reverse(); // newest first
 		this.contents.clear();
-		for (const r of this.rows) {
-			this.contents.set(r.meta.hash, (await readObject(this.plugin.app.vault, this.file, r.meta.hash)) ?? "");
-		}
+		this.missing.clear();
 		// The live block content = the "working copy" pseudo-version.
 		const doc = await this.plugin.app.vault.read(this.file);
-		const b = scanBlocksView(doc).find((x) => x.id === this.blockId);
-		this.working = b ? doc.slice(b.content_start, b.content_end) : "";
+		const matches = scanBlocksView(doc).filter((block) => block.id === this.blockId);
+		this.blockConflict =
+			matches.length === 1
+				? null
+				: matches.length === 0
+					? "This block no longer exists in the note."
+					: "This note contains duplicate block IDs. Run Mica: Repair history before using version actions.";
+		this.working = matches.length === 1 ? doc.slice(matches[0].content_start, matches[0].content_end) : "";
+		const head = this.rows.find((r) => r.head);
+		if (head) await this.loadContent(head.meta.hash);
 		// First open: a dirty block compares its working copy against head; a
 		// clean one shows the LAST CHANGE (head vs previous) — never an empty diff.
 		if (!this.initialized) {
 			this.initialized = true;
 			if (!this.isDirty() && this.rows.length) this.selected = this.rows[0].meta.hash;
 		}
+		this.revealRowPage(this.selected);
 		this.render();
 	}
 
+	private revealRowPage(key: string): void {
+		if (key === WORKING) {
+			if (this.rowPageStart >= this.rows.length) this.rowPageStart = 0;
+			return;
+		}
+		const index = this.rows.findIndex((row) => row.meta.hash === key);
+		if (index >= 0 && (index < this.rowPageStart || index >= this.rowPageStart + VERSION_ROW_PAGE_SIZE)) {
+			this.rowPageStart = Math.floor(index / VERSION_ROW_PAGE_SIZE) * VERSION_ROW_PAGE_SIZE;
+		}
+	}
+
 	private text(key: string): string {
-		return key === WORKING ? this.working : (this.contents.get(key) ?? "");
+		if (key === WORKING) return this.working;
+		const value = this.contents.get(key);
+		if (value === undefined) return "";
+		// LRU touch: selected/base versions stay hot without retaining history.
+		this.contents.delete(key);
+		this.contents.set(key, value);
+		return value;
+	}
+
+	private loadContent(hash: string): Promise<boolean> {
+		if (this.contents.has(hash)) return Promise.resolve(true);
+		if (this.missing.has(hash)) return Promise.resolve(false);
+		const pending = this.loading.get(hash);
+		if (pending) return pending;
+		const task = readObject(this.plugin.app.vault, this.file, hash)
+			.then((content) => {
+				if (content === null) {
+					this.missing.add(hash);
+					return false;
+				}
+				this.contents.set(hash, content);
+				while (this.contents.size > CONTENT_CACHE_LIMIT) {
+					const oldest = this.contents.keys().next().value as string | undefined;
+					if (!oldest) break;
+					this.contents.delete(oldest);
+				}
+				return true;
+			})
+			.catch(() => {
+				this.missing.add(hash);
+				return false;
+			})
+			.finally(() => this.loading.delete(hash));
+		this.loading.set(hash, task);
+		return task;
 	}
 
 	private isDirty(): boolean {
 		const head = this.rows.find((r) => r.head);
 		if (!head) return contentSignature(this.working) !== contentSignature("");
+		if (this.missing.has(head.meta.hash) || !this.contents.has(head.meta.hash)) return true;
 		return contentSignature(this.text(head.meta.hash)) !== contentSignature(this.working);
 	}
 
@@ -166,6 +224,10 @@ export class VersionsModal extends Modal {
 	private render(): void {
 		const { contentEl } = this;
 		contentEl.empty();
+		if (this.blockConflict) {
+			contentEl.createEl("p", { cls: "mod-warning", text: this.blockConflict });
+			return;
+		}
 		if (!this.rows.length && !this.working.trim()) {
 			contentEl.createEl("p", {
 				text: "No stored versions yet. Edit the block, or run “Save versions now”.",
@@ -202,7 +264,9 @@ export class VersionsModal extends Modal {
 		}
 
 		const baseHash = this.baseKey();
-		for (const r of this.rows) {
+		const page = versionPageBounds(this.rows.length, this.rowPageStart);
+		this.rowPageStart = page.start;
+		for (const r of this.rows.slice(page.start, page.end)) {
 			const row = list.createDiv({
 				cls: `mica-vrow ${this.selected === r.meta.hash ? "is-selected" : ""} ${r.head ? "is-head" : ""} ${
 					baseHash === r.meta.hash ? "is-base" : ""
@@ -218,11 +282,13 @@ export class VersionsModal extends Modal {
 			}
 			const sub = row.createDiv({ cls: "mica-vrow-sub" });
 			sub.createSpan({ text: relTime(r.meta.ts) });
-			const preview = firstLine(this.text(r.meta.hash));
+			const preview = this.contents.has(r.meta.hash) ? firstLine(this.text(r.meta.hash)) : "";
+			if (this.missing.has(r.meta.hash)) sub.createSpan({ cls: "mica-vrow-preview", text: " · object missing" });
 			if (preview) sub.createSpan({ cls: "mica-vrow-preview", text: ` · ${preview}` });
 
-			row.addEventListener("click", () => {
+			row.addEventListener("click", async () => {
 				this.selected = r.meta.hash;
+				await this.loadContent(r.meta.hash);
 				this.renderList();
 				this.renderDiffSurface();
 			});
@@ -237,7 +303,13 @@ export class VersionsModal extends Modal {
 			setIcon(cmp, "columns-3");
 			cmp.addEventListener("click", (e) => {
 				e.stopPropagation();
-				if (!this.compareSet.delete(r.meta.hash)) this.compareSet.add(r.meta.hash);
+				if (!this.compareSet.delete(r.meta.hash)) {
+					if (this.compareSet.size >= MULTI_COMPARE_LIMIT) {
+						new Notice(`Choose at most ${MULTI_COMPARE_LIMIT} versions at once.`);
+						return;
+					}
+					this.compareSet.add(r.meta.hash);
+				}
 				this.render();
 			});
 			const more = row.createEl("button", {
@@ -250,6 +322,26 @@ export class VersionsModal extends Modal {
 				this.versionMenu(e, r);
 			});
 		}
+		if (this.rows.length > VERSION_ROW_PAGE_SIZE) {
+			const pager = list.createDiv({ cls: "mica-vrow mica-vrow-pager" });
+			pager.createSpan({
+				text: `Versions ${page.start + 1}–${page.end} of ${this.rows.length}`,
+			});
+			if (this.rowPageStart > 0) {
+				const newer = pager.createEl("button", { text: "Newer", attr: { type: "button" } });
+				newer.addEventListener("click", () => {
+					this.rowPageStart = Math.max(0, this.rowPageStart - VERSION_ROW_PAGE_SIZE);
+					this.renderList();
+				});
+			}
+			if (page.end < this.rows.length) {
+				const older = pager.createEl("button", { text: "Older", attr: { type: "button" } });
+				older.addEventListener("click", () => {
+					this.rowPageStart += VERSION_ROW_PAGE_SIZE;
+					this.renderList();
+				});
+			}
+		}
 	}
 
 	private versionMenu(e: MouseEvent, r: Row): void {
@@ -259,25 +351,42 @@ export class VersionsModal extends Modal {
 				.setTitle("Restore this version")
 				.setIcon("archive-restore")
 				.onClick(async () => {
-					await this.plugin.engine.revert(this.file, this.blockId, r.meta.hash);
-					new Notice(`Restored v${r.n} (previous state was snapshotted first).`);
-					await this.reload();
+					try {
+						await this.plugin.engine.revert(this.file, this.blockId, r.meta.hash);
+						new Notice(`Restored v${r.n} (previous state was snapshotted first).`);
+						await this.reload();
+					} catch (error) {
+						new Notice(`Mica: restore failed — ${error instanceof Error ? error.message : String(error)}`);
+					}
 				}),
 		);
 		menu.addItem((i) =>
 			i
 				.setTitle("Edit as new version (branch)")
 				.setIcon("git-branch")
-				.onClick(() => {
+				.onClick(async () => {
+					if (!(await this.loadContent(r.meta.hash))) {
+						new Notice("Mica: this version object is missing or unreadable.");
+						this.render();
+						return;
+					}
 					new EditorLightbox({
 						app: this.app,
 						title: `Branch from v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`,
 						initial: this.text(r.meta.hash),
 						sourcePath: this.file.path,
 						onSave: async (value) => {
-							await this.plugin.engine.editVersion(this.file, this.blockId, r.meta.hash, value);
-							new Notice(`New version created (branched from v${r.n}).`);
-							await this.reload();
+							try {
+								await this.plugin.engine.editVersion(this.file, this.blockId, r.meta.hash, value);
+								new Notice(`New version created (branched from v${r.n}).`);
+								await this.reload();
+								return true;
+							} catch (error) {
+								new Notice(
+									`Mica: branch edit failed — ${error instanceof Error ? error.message : String(error)}`,
+								);
+								return false;
+							}
 						},
 					}).open();
 				}),
@@ -289,17 +398,12 @@ export class VersionsModal extends Modal {
 				.onClick(async () => {
 					const label = window.prompt("Label for this version (empty removes):", r.meta.label ?? "");
 					if (label === null) return;
-					await appendEvents(this.plugin.app.vault, this.file, [
-						{
-							type: "label",
-							eid: newId(),
-							ts: Date.now(),
-							block: this.blockId,
-							hash: r.meta.hash,
-							label: label.trim() || null,
-						},
-					]);
-					await this.reload();
+					try {
+						await this.plugin.engine.labelVersion(this.file, this.blockId, r.meta.hash, label.trim());
+						await this.reload();
+					} catch (error) {
+						new Notice(`Mica: label failed — ${error instanceof Error ? error.message : String(error)}`);
+					}
 				}),
 		);
 		menu.addSeparator();
@@ -307,7 +411,12 @@ export class VersionsModal extends Modal {
 			i
 				.setTitle("Copy content")
 				.setIcon("copy")
-				.onClick(() => {
+				.onClick(async () => {
+					if (!(await this.loadContent(r.meta.hash))) {
+						new Notice("Mica: this version object is missing or unreadable.");
+						this.render();
+						return;
+					}
 					void navigator.clipboard.writeText(this.text(r.meta.hash)).then(
 						() => new Notice("Version content copied."),
 						() => new Notice("Couldn't access the clipboard."),
@@ -359,7 +468,11 @@ export class VersionsModal extends Modal {
 		const bk = this.baseKey();
 		const resolved = bk === WORKING ? "working copy" : this.nameOf(bk);
 		const suffix =
-			this.baseMode === "previous" ? " · auto: before selected" : this.baseMode === "head" ? " · head" : " · pinned";
+			this.baseMode === "previous"
+				? " · auto: before selected"
+				: this.baseMode === "head"
+					? " · head"
+					: " · pinned";
 		const baseHost = group("Compare against");
 		const baseBtn = baseHost.createEl("button", {
 			cls: "mica-base-pick",
@@ -381,21 +494,38 @@ export class VersionsModal extends Modal {
 					.onClick(() => this.setBase("head")),
 			);
 			menu.addSeparator();
-			for (const r of this.rows) {
-				menu.addItem((i) =>
-					i
-						.setTitle(`Pin v${r.n}${r.meta.label ? ` — ${r.meta.label}` : ""}`)
-						.setChecked(this.baseMode === r.meta.hash)
-						.onClick(() => this.setBase(r.meta.hash)),
-				);
+			if (this.selected !== WORKING) {
+				const selected = this.rows.find((row) => row.meta.hash === this.selected);
+				if (selected) {
+					menu.addItem((i) =>
+						i
+							.setTitle(
+								`Selected — v${selected.n}${selected.meta.label ? ` — ${selected.meta.label}` : ""}`,
+							)
+							.setChecked(this.baseMode === selected.meta.hash)
+							.onClick(() => this.setBase(selected.meta.hash)),
+					);
+				}
 			}
+			menu.addItem((i) =>
+				i.setTitle("Find version by number, label, or hash…").onClick(() => this.promptForBase()),
+			);
 			menu.showAtMouseEvent(e);
 		});
 
 		// Meld-style refinement: word/char highlights are exclusive checkboxes;
 		// both off = plain line colors.
-		const check = (host: HTMLElement, label: string, tip: string, on: boolean, flip: (next: boolean) => void): void => {
-			const lab = host.createEl("label", { cls: `mica-diff-check ${on ? "is-on" : ""}`, attr: { "aria-label": tip } });
+		const check = (
+			host: HTMLElement,
+			label: string,
+			tip: string,
+			on: boolean,
+			flip: (next: boolean) => void,
+		): void => {
+			const lab = host.createEl("label", {
+				cls: `mica-diff-check ${on ? "is-on" : ""}`,
+				attr: { "aria-label": tip },
+			});
 			const box = lab.createEl("input", { attr: { type: "checkbox" } });
 			box.checked = on;
 			lab.createSpan({ text: label });
@@ -461,7 +591,24 @@ export class VersionsModal extends Modal {
 
 	private setBase(mode: "previous" | "head" | string): void {
 		this.baseMode = mode;
+		this.revealRowPage(mode);
 		this.render();
+	}
+
+	private promptForBase(): void {
+		const query = window.prompt("Version to use as base (v123, exact label, or hash prefix):", "");
+		if (query === null || !query.trim()) return;
+		const normalized = query.trim();
+		const matches = matchingVersions(this.rows, normalized);
+		if (matches.length !== 1) {
+			new Notice(
+				matches.length
+					? `Mica: “${normalized}” matches ${matches.length} versions; enter more hash characters.`
+					: `Mica: no version matches “${normalized}”.`,
+			);
+			return;
+		}
+		this.setBase(matches[0].meta.hash);
 	}
 
 	private nameOf(hash: string): string {
@@ -474,8 +621,29 @@ export class VersionsModal extends Modal {
 		if (!surface) return;
 		surface.empty();
 		const bk = this.baseKey();
-		const base = this.prep(this.text(bk));
-		const to = this.prep(this.text(this.selected));
+		const needed = new Set<string>();
+		if (bk !== WORKING) needed.add(bk);
+		if (this.selected !== WORKING) needed.add(this.selected);
+		if (this.compareSet.size >= 2) for (const hash of this.compareSet) needed.add(hash);
+		const missing = [...needed].filter((hash) => this.missing.has(hash));
+		if (missing.length) {
+			surface.createDiv({
+				cls: "mica-diff-caption",
+				text: `Version object missing or unreadable: ${missing.map((hash) => hash.slice(0, 12)).join(", ")}`,
+			});
+			return;
+		}
+		const unloaded = [...needed].filter((hash) => !this.contents.has(hash));
+		if (unloaded.length) {
+			surface.createDiv({ cls: "mica-diff-caption", text: "Loading selected versions…" });
+			void Promise.all(unloaded.map((hash) => this.loadContent(hash))).then(() => {
+				this.renderList();
+				this.renderDiffSurface();
+			});
+			return;
+		}
+		const baseRaw = this.text(bk);
+		const selectedRaw = this.text(this.selected);
 		const caption = surface.createDiv({ cls: "mica-diff-caption" });
 		const names = `${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${
 			this.selected === WORKING ? "working copy" : this.nameOf(this.selected)
@@ -485,6 +653,14 @@ export class VersionsModal extends Modal {
 			// N-up: every picked version diffed against the SAME base, column each.
 			const gran = this.gran();
 			const picked = this.rows.filter((r) => this.compareSet.has(r.meta.hash));
+			for (const row of picked) {
+				const issue = interactiveDiffIssue(baseRaw, this.text(row.meta.hash), gran);
+				if (issue) {
+					caption.setText(`Interactive diff unavailable: ${issue}. Use the mica CLI for this comparison.`);
+					return;
+				}
+			}
+			const base = this.prep(baseRaw);
 			caption.setText(`${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${picked.length} versions`);
 			renderNUp(
 				body,
@@ -498,10 +674,24 @@ export class VersionsModal extends Modal {
 			return;
 		}
 		if (this.layout === "patch") {
+			const issue = interactiveDiffIssue(baseRaw, selectedRaw, "line");
+			if (issue) {
+				caption.setText(`Interactive diff unavailable: ${issue}. Use the mica CLI for this comparison.`);
+				return;
+			}
+			const base = this.prep(baseRaw);
+			const to = this.prep(selectedRaw);
 			caption.setText(names);
 			renderPatch(body, makePatch(base, to, 3));
 			return;
 		}
+		const issue = interactiveDiffIssue(baseRaw, selectedRaw, this.gran());
+		if (issue) {
+			caption.setText(`Interactive diff unavailable: ${issue}. Use the mica CLI for this comparison.`);
+			return;
+		}
+		const base = this.prep(baseRaw);
+		const to = this.prep(selectedRaw);
 		const result = diffText(base, to, this.gran(), 3);
 		if (this.refine === "none") {
 			for (const h of result.hunks) for (const c of h.changes) c.inline = [];
@@ -511,7 +701,22 @@ export class VersionsModal extends Modal {
 	}
 
 	private async copyPatch(): Promise<void> {
-		const patch = makePatch(this.prep(this.text(this.baseKey())), this.prep(this.text(this.selected)), 3);
+		const keys = [this.baseKey(), this.selected].filter((key) => key !== WORKING);
+		if (!(await Promise.all(keys.map((hash) => this.loadContent(hash)))).every(Boolean)) {
+			new Notice("Mica: a selected version object is missing or unreadable.");
+			this.render();
+			return;
+		}
+		const baseRaw = this.text(this.baseKey());
+		const selectedRaw = this.text(this.selected);
+		const issue = interactiveDiffIssue(baseRaw, selectedRaw, "line");
+		if (issue) {
+			new Notice(`Mica: ${issue}. Use the mica CLI for this comparison.`);
+			return;
+		}
+		const base = this.prep(baseRaw);
+		const selected = this.prep(selectedRaw);
+		const patch = makePatch(base, selected, 3);
 		if (!patch.trim()) {
 			new Notice("No differences to copy.");
 			return;
@@ -525,6 +730,10 @@ export class VersionsModal extends Modal {
 	}
 
 	onClose(): void {
+		this.surface = null;
+		this.listEl = null;
+		this.contents.clear();
+		this.missing.clear();
 		this.contentEl.empty();
 	}
 }
@@ -540,10 +749,19 @@ function relTime(ts: number): string {
 }
 
 function firstLine(content: string): string {
-	for (const line of content.split("\n")) {
+	const prefix = content.slice(0, 64 * 1024);
+	let start = 0;
+	while (start <= prefix.length) {
+		const newline = prefix.indexOf("\n", start);
+		const end = newline < 0 ? prefix.length : newline;
+		const sampleEnd = Math.min(end, start + 256);
+		const line = prefix.slice(start, sampleEnd);
 		const t = line.trim();
-		if (!t || t.startsWith(":::") || t.startsWith("tab:") || t.startsWith("```")) continue;
-		return t.length > 48 ? `${t.slice(0, 48)}…` : t;
+		if (t && !t.startsWith(":::") && !t.startsWith("tab:") && !t.startsWith("```")) {
+			return t.length > 48 ? `${t.slice(0, 48)}…` : t;
+		}
+		if (newline < 0) break;
+		start = newline + 1;
 	}
 	return "";
 }

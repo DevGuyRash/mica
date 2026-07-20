@@ -26,7 +26,7 @@ export interface DragSpec {
 	region?: { start: number; end: number };
 	/** The dragged thing's serialization — enables CROSS-BLOCK moves (the
 	 *  target block re-parses it via insertLeaf). Regions/groups only. */
-	text?: string;
+	text?: string | (() => string);
 	/** Virtual drags (nested callouts): the payload isn't a leaf run but a
 	 *  text span INSIDE a region — dropping inserts `text` at the target and
 	 *  rewrites the source region to `without` (expected-guarded). */
@@ -35,9 +35,9 @@ export interface DragSpec {
 		start: number;
 		end: number;
 		expected: string;
-		without: string;
+		without: string | (() => string);
 		/** How many CST nodes `text` parses into (same-container index shift). */
-		insertCount: number;
+		insertCount: number | (() => number);
 	};
 }
 
@@ -82,7 +82,20 @@ interface SlotContainer {
 }
 
 /** Block roots expose their op hook for cross-block drops. */
-export type BlockApplyHost = HTMLElement & { micaApply?: (op: StructOp) => void };
+export interface CrossBlockMove {
+	sourceId: string;
+	sourceExpected: string;
+	targetExpected: string;
+	targetOp: StructOp;
+	sourceOp: StructOp;
+}
+
+export type BlockApplyHost = HTMLElement & {
+	micaApply?: (op: StructOp) => boolean;
+	micaApplyMany?: (ops: readonly StructOp[]) => boolean;
+	micaMoveAcross?: (move: CrossBlockMove) => boolean;
+	micaContent?: string;
+};
 
 interface ActiveDrag {
 	spec: DragSpec;
@@ -119,7 +132,7 @@ export function makeDraggable(
 	handle: HTMLElement,
 	spec: DragKind | DragSpec,
 	path: number[],
-	apply: (op: StructOp) => void,
+	apply: (op: StructOp) => boolean | void,
 	itemEl?: HTMLElement,
 ): void {
 	const resolved: DragSpec = typeof spec === "string" ? { kind: spec, fromPath: path } : spec;
@@ -167,7 +180,7 @@ function swallowClick(e: MouseEvent): void {
 	e.stopPropagation();
 }
 
-function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (op: StructOp) => void): void {
+function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (op: StructOp) => boolean | void): void {
 	const root = item.closest(".mica") as HTMLElement | null;
 	if (!root) return;
 
@@ -219,7 +232,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		},
 	};
 	// Stash the apply hook on the drag (typed loosely to keep the struct lean).
-	(active as ActiveDrag & { apply?: (op: StructOp) => void }).apply = apply;
+	(active as ActiveDrag & { apply?: (op: StructOp) => boolean | void }).apply = apply;
 	dragMove(e);
 }
 
@@ -238,10 +251,16 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 	// Regions and groups can move BETWEEN blocks (their serialization rides
 	// the drag) — sweep every block in the same editor pane. Numeric paths
 	// collide across blocks, so subtree/no-op exclusions stay source-scoped.
-	const crossable = Boolean(spec.text) && (kind === "region" || kind === "group");
+	const crossable =
+		Boolean(spec.text) && Boolean(root.dataset.micaBlockId) && (kind === "region" || kind === "group");
 	// Virtual drags have no leaf-run subtree either.
 	const scope = root.closest(".cm-editor, .markdown-preview-view");
-	const roots: HTMLElement[] = crossable && scope ? Array.from(scope.querySelectorAll<HTMLElement>(".mica")) : [root];
+	const roots: HTMLElement[] =
+		crossable && scope
+			? Array.from(scope.querySelectorAll<HTMLElement>(".mica")).filter(
+					(candidate) => candidate === root || Boolean(candidate.dataset.micaBlockId),
+				)
+			: [root];
 	for (const rootEl of roots) {
 		for (const el of Array.from(rootEl.querySelectorAll<HTMLElement>(`[data-mica-container="${wanted}"]`))) {
 			if (el.closest(".mica") !== rootEl) continue; // nested block safety
@@ -443,16 +462,21 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLE
 		// Append slot after the last child.
 		const last = kids[kids.length - 1];
 		const r = last.el.getBoundingClientRect();
+		// A horizontally scrolling tab strip may clip the last chip. Keep the
+		// append target on its visible trailing edge so a drag can still move a
+		// tab to the end without pointing through the sticky group controls.
+		const lastIntersectsViewport = r.right > rect.left && r.left < rect.right;
+		const appendX = lastIntersectsViewport ? Math.min(r.right, rect.right - 2) : r.right;
 		slots.push(
 			horizontal
 				? {
 						parentPath,
 						index: len,
-						x: r.right - 1,
+						x: appendX - 1,
 						y: r.top,
 						w: 3,
 						h: r.height,
-						cx: r.right,
+						cx: appendX,
 						cy: r.top + r.height / 2,
 						container,
 					}
@@ -615,54 +639,51 @@ function finishDrag(commit: boolean): void {
 	d.markedEl = null;
 	d.cleanup();
 	if (!commit || !d.current) return;
-	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => void }).apply;
+	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => boolean | void }).apply;
 	const vs = d.spec.virtualSplice;
-	if (vs && d.spec.text) {
+	const text = materialize(d.spec.text);
+	if (vs && text) {
 		// Nested-callout drag: insert the dedented callout at the target, then
 		// rewrite the source region without it. Same-container inserts shift
 		// the region's indices — adjust by the payload's parsed node count.
-		const targetApply =
-			d.current.container.rootEl === d.sourceRoot
-				? apply
-				: (d.current.container.rootEl as BlockApplyHost).micaApply;
-		if (!targetApply) return;
-		targetApply({ op: "insertLeaf", path: d.current.parentPath, at: d.current.index, text: d.spec.text });
+		const targetOp: StructOp = { op: "insertLeaf", path: d.current.parentPath, at: d.current.index, text };
 		const sameContainer =
 			d.current.container.rootEl === d.sourceRoot &&
 			d.current.parentPath.join(".") === vs.path.join(".") &&
 			d.current.index <= vs.start;
-		const shift = sameContainer ? vs.insertCount : 0;
-		apply?.({
+		const shift = sameContainer ? materializeNumber(vs.insertCount) : 0;
+		const sourceOp: StructOp = {
 			op: "saveRegion",
 			path: vs.path,
 			start: vs.start + shift,
 			end: vs.end + shift,
 			expected: vs.expected,
-			text: vs.without,
-		});
+			text: materialize(vs.without) ?? "",
+		};
+		if (d.current.container.rootEl === d.sourceRoot) {
+			// Same block: one reducer batch and one document transaction.
+			const host = d.sourceRoot as BlockApplyHost;
+			// Virtual indices may shift, so preserve the existing target-then-source order.
+			host.micaApplyMany?.([targetOp, sourceOp]);
+		} else {
+			applyCrossBlock(d, targetOp, sourceOp);
+		}
 		return;
 	}
 	if (d.current.container.rootEl !== d.sourceRoot) {
-		// CROSS-BLOCK: the serialization rides the drag; the target re-parses
-		// it (insertLeaf handles prose, callouts, code, and whole groups), the
-		// source deletes its original. Target first — a failure duplicates,
-		// never loses.
-		const text = d.spec.text;
-		const targetApply = (d.current.container.rootEl as BlockApplyHost).micaApply;
-		if (!text || !targetApply) return;
-		targetApply({ op: "insertLeaf", path: d.current.parentPath, at: d.current.index, text });
-		if (d.spec.region) {
-			apply?.({
-				op: "saveRegion",
-				path: d.spec.fromPath,
-				start: d.spec.region.start,
-				end: d.spec.region.end,
-				expected: text,
-				text: "",
-			});
-		} else {
-			apply?.({ op: "deleteNode", path: d.spec.fromPath });
-		}
+		if (!text) return;
+		const targetOp: StructOp = { op: "insertLeaf", path: d.current.parentPath, at: d.current.index, text };
+		const sourceOp: StructOp = d.spec.region
+			? {
+					op: "saveRegion",
+					path: d.spec.fromPath,
+					start: d.spec.region.start,
+					end: d.spec.region.end,
+					expected: text,
+					text: "",
+				}
+			: { op: "deleteNode", path: d.spec.fromPath };
+		applyCrossBlock(d, targetOp, sourceOp);
 		return;
 	}
 	if (d.spec.region) {
@@ -692,5 +713,31 @@ function finishDrag(commit: boolean): void {
 		from: d.spec.fromPath,
 		toParent: d.current.parentPath,
 		toIndex: d.current.index,
+	});
+}
+
+function materialize(value: string | (() => string) | undefined): string | undefined {
+	return typeof value === "function" ? value() : value;
+}
+
+function materializeNumber(value: number | (() => number)): number {
+	return typeof value === "function" ? value() : value;
+}
+
+/** Cross-block moves inside one editor are reduced against two fresh block
+ * CSTs and dispatched together by the target widget. Stable ids and exact
+ * whole-block pre-images make a stale drag reject instead of duplicate. */
+function applyCrossBlock(d: ActiveDrag, targetOp: StructOp, sourceOp: StructOp): boolean {
+	if (!d.current) return false;
+	const source = d.sourceRoot as BlockApplyHost;
+	const target = d.current.container.rootEl as BlockApplyHost;
+	const sourceId = source.dataset.micaBlockId;
+	if (!sourceId || !source.micaContent || !target.micaContent || !target.micaMoveAcross) return false;
+	return target.micaMoveAcross({
+		sourceId,
+		sourceExpected: source.micaContent,
+		targetExpected: target.micaContent,
+		targetOp,
+		sourceOp,
 	});
 }

@@ -1,4 +1,5 @@
 import { browser } from "@wdio/globals";
+import { Key } from "webdriverio";
 
 /** Round-5 features that MUTATE the document: column resize + wrap toggle. */
 
@@ -128,7 +129,10 @@ describe("round 6: folds, click-outside, region delete", function () {
 		});
 		await seedAndOpen("ClickOut.md", "Intro.\n\n```mica id=co-1\ntab: Main\noriginal text\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "region never rendered" },
 		);
 		await browser.executeObsidian(() => {
@@ -138,9 +142,9 @@ describe("round 6: folds, click-outside, region delete", function () {
 			() =>
 				browser.executeObsidian(() =>
 					Boolean(
-						(document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null)?.shadowRoot?.querySelector(
-							".cm-content",
-						),
+						(
+							document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null
+						)?.shadowRoot?.querySelector(".cm-content"),
 					),
 				),
 			{ timeout: 8000, timeoutMsg: "editor never opened" },
@@ -171,7 +175,119 @@ describe("round 6: folds, click-outside, region delete", function () {
 		});
 	});
 
-	it("the region ✕ deletes the section (with undo pre-image applied)", async function () {
+	it("a stale quick-edit save keeps its draft and preserves the external edit", async function () {
+		await seedAndOpen("QuickConflict.md", "Intro.\n\n```mica id=qc-1\ntab: Main\noriginal text\n```\n");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
+			{ timeout: 8000, timeoutMsg: "region never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-region.is-editable") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-mdeditor"))),
+			{ timeout: 8000, timeoutMsg: "quick editor never opened" },
+		);
+		await browser.executeObsidian(({ app, obsidian }) => {
+			const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { setValue(value: string): void };
+			};
+			host.dataset.testStaleHost = "1";
+			host.micaEditor?.setValue("my unsaved draft");
+			const outer = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor;
+			if (!outer) throw new Error("no active editor");
+			outer.setValue(outer.getValue().replace("original text", "external edit"));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+						micaEditor?: { getValue(): string };
+					};
+					return !host.dataset.testStaleHost && host.micaEditor?.getValue() === "my unsaved draft";
+				}),
+			{ timeout: 8000, timeoutMsg: "draft did not survive the widget rebuild" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-qe-save") as HTMLButtonElement).click();
+		});
+		await browser
+			.waitUntil(
+				async () => {
+					const doc = await docContains("");
+					const draft = await browser.executeObsidian(() => {
+						const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+							micaEditor?: { getValue(): string };
+						};
+						return host.micaEditor?.getValue() ?? "";
+					});
+					return (
+						doc.includes("external edit") &&
+						!doc.includes("my unsaved draft") &&
+						draft === "my unsaved draft"
+					);
+				},
+				{ timeout: 8000, timeoutMsg: "stale save overwrote the external edit or lost the draft" },
+			)
+			.catch(async (error: Error) => {
+				const diagnostic = await browser.executeObsidian(({ app, obsidian }) => {
+					const host = document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement & {
+						micaEditor?: { getValue(): string };
+					};
+					return {
+						doc: app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "",
+						draft: host.micaEditor?.getValue() ?? null,
+						editors: document.querySelectorAll(".mica-lp .mica-mdeditor").length,
+					};
+				});
+				console.log("STALE QUICK-EDIT DIAG", diagnostic);
+				throw error;
+			});
+	});
+
+	it("Save all commits length-changing drafts in two ID-less blocks bottom-up", async function () {
+		await seedAndOpen(
+			"IdlessSaveAll.md",
+			"```mica\ntab: First\nfirst old\n```\n\nbetween\n\n```mica\ntab: Second\nsecond old\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length === 2),
+			{ timeout: 8000, timeoutMsg: "two ID-less blocks never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const blocks = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp"));
+			for (const block of blocks) {
+				(block.querySelector(".mica-region.is-editable") as HTMLElement).click();
+			}
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-mdeditor").length === 2),
+			{ timeout: 8000, timeoutMsg: "both quick editors never stayed open" },
+		);
+		await browser.executeObsidian(() => {
+			const hosts = Array.from(document.querySelectorAll(".mica-lp .mica-mdeditor")) as Array<
+				HTMLElement & { micaEditor?: { setValue(value: string): void } }
+			>;
+			hosts[0].micaEditor?.setValue("first replacement is substantially longer");
+			hosts[1].micaEditor?.setValue("second replacement is longer too");
+			(document.querySelector(".mica-lp .mica-qe-save") as HTMLButtonElement).click();
+		});
+		await browser.waitUntil(
+			async () => {
+				const doc = await docContains("");
+				return (
+					doc.includes("first replacement is substantially longer") &&
+					doc.includes("second replacement is longer too")
+				);
+			},
+			{ timeout: 8000, timeoutMsg: "one ID-less block draft was lost after the other shifted the document" },
+		);
+	});
+
+	it("the region ✕ deletes the section and Undo restores its exact pre-image", async function () {
 		await seedAndOpen("RegionDel.md", "Intro.\n\n```mica id=rd-1\ntab: Main\nkeep me\n\n> [!tip] Delete me\n```\n");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
@@ -191,10 +307,186 @@ describe("round 6: folds, click-outside, region delete", function () {
 				}),
 			{ timeout: 8000, timeoutMsg: "the section was not deleted" },
 		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".notice .mica-undo-btn") as HTMLButtonElement | null)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app, obsidian }) => {
+					const v = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor.getValue() ?? "";
+					return v.includes("Delete me") && v.includes("keep me");
+				}),
+			{ timeout: 8000, timeoutMsg: "Undo did not restore the deleted section" },
+		);
+	});
+
+	it("Undo rejects a stale pre-image instead of overwriting a later edit", async function () {
+		await seedAndOpen(
+			"RegionUndoConflict.md",
+			"Intro.\n\n```mica id=ruc-1\ntab: Main\nkeep me\n\nremove me\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
+			{ timeout: 8000, timeoutMsg: "regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("remove me"),
+			) as HTMLElement;
+			(region.querySelector('[aria-label="Delete this section"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(async () => !(await docContains("")).includes("remove me"), {
+			timeout: 8000,
+			timeoutMsg: "the section was not deleted",
+		});
+		await browser.executeObsidian(({ app, obsidian }) => {
+			const editor = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.editor;
+			if (!editor) throw new Error("no active editor");
+			editor.setValue(editor.getValue().replace("keep me", "keep me — edited later"));
+			(document.querySelector(".notice .mica-undo-btn") as HTMLButtonElement | null)?.click();
+		});
+		await browser.waitUntil(
+			async () => {
+				const value = await docContains("");
+				return value.includes("keep me — edited later") && !value.includes("remove me");
+			},
+			{ timeout: 8000, timeoutMsg: "stale Undo overwrote the later edit" },
+		);
 	});
 });
 
 describe("structured callout editor", function () {
+	it("header-only callout edits require discard confirmation", async function () {
+		await seedAndOpen("CalloutHeaderDirty.md", "```mica id=chd-1\ntab: Main\n> [!note] Old title\n> Body\n```\n");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-region"))),
+			{ timeout: 8000, timeoutMsg: "callout never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
+				r.textContent?.includes("Old title"),
+			) as HTMLElement;
+			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-coedit-title"))),
+			{ timeout: 8000, timeoutMsg: "callout editor never opened" },
+		);
+		const result = await browser.executeObsidian(() => {
+			const modal = document.querySelector(".mica-lightbox") as HTMLElement;
+			const input = modal.querySelector(".mica-coedit-title") as HTMLInputElement;
+			input.value = "Header only change";
+			input.dispatchEvent(new Event("input", { bubbles: true }));
+			const cancel = Array.from(modal.querySelectorAll("button")).find(
+				(button) => button.textContent === "Cancel",
+			) as HTMLButtonElement | undefined;
+			cancel?.click();
+			return {
+				open: Boolean(document.querySelector(".mica-lightbox")),
+				label: cancel?.textContent ?? "",
+			};
+		});
+		expect(result).toEqual({ open: true, label: "Discard changes?" });
+		await browser.executeObsidian(() => {
+			const button = Array.from(document.querySelectorAll(".mica-lightbox button")).find(
+				(candidate) => candidate.textContent === "Discard changes?",
+			) as HTMLButtonElement | undefined;
+			button?.click();
+		});
+	});
+
+	it("releases the callout type-picker listener when a previewed lightbox closes", async function () {
+		await seedAndOpen(
+			"CalloutPickerLifecycle.md",
+			"```mica id=cpl-1\ntab: Main\n> [!note] Lifecycle\n> Body\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-region"))),
+			{ timeout: 8000, timeoutMsg: "callout never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((candidate) =>
+				candidate.textContent?.includes("Lifecycle"),
+			) as HTMLElement;
+			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-coedit-type"))),
+			{ timeout: 8000, timeoutMsg: "callout editor never opened" },
+		);
+
+		const opened = await browser.executeObsidian(() => {
+			const modal = document.querySelector(".mica-lightbox") as HTMLElement;
+			(modal.querySelector('[aria-label="Toggle live preview pane"]') as HTMLButtonElement).click();
+
+			const listeners = new Set<EventListenerOrEventListenerObject>();
+			const originalAdd = document.addEventListener;
+			const originalRemove = document.removeEventListener;
+			type PointerProbe = {
+				listeners: Set<EventListenerOrEventListenerObject>;
+				originalAdd: typeof document.addEventListener;
+				originalRemove: typeof document.removeEventListener;
+			};
+			const globals = globalThis as typeof globalThis & { __micaPointerProbe?: PointerProbe };
+			globals.__micaPointerProbe = { listeners, originalAdd, originalRemove };
+			document.addEventListener = function (
+				type: string,
+				listener: EventListenerOrEventListenerObject,
+				options?: boolean | AddEventListenerOptions,
+			): void {
+				if (type === "pointerdown") listeners.add(listener);
+				originalAdd.call(document, type, listener, options);
+			} as typeof document.addEventListener;
+			document.removeEventListener = function (
+				type: string,
+				listener: EventListenerOrEventListenerObject,
+				options?: boolean | EventListenerOptions,
+			): void {
+				if (type === "pointerdown") listeners.delete(listener);
+				originalRemove.call(document, type, listener, options);
+			} as typeof document.removeEventListener;
+
+			(modal.querySelector(".mica-coedit-type") as HTMLButtonElement).click();
+			return Boolean(modal.querySelector(".mica-coedit-typepop"));
+		});
+		expect(opened).toBe(true);
+		try {
+			await browser.waitUntil(() => browser.executeObsidian(() => !document.querySelector(".notice")), {
+				timeout: 8000,
+				timeoutMsg: "an Obsidian notice kept covering the modal close button",
+			});
+			await browser.$(".mica-lightbox .modal-close-button").click();
+			await browser.waitUntil(() => browser.executeObsidian(() => !document.querySelector(".mica-lightbox")), {
+				timeout: 8000,
+				timeoutMsg: "callout editor did not close",
+			});
+			const remainingPointerListeners = await browser.executeObsidian(() => {
+				type PointerProbe = {
+					listeners: Set<EventListenerOrEventListenerObject>;
+					originalAdd: typeof document.addEventListener;
+					originalRemove: typeof document.removeEventListener;
+				};
+				const globals = globalThis as typeof globalThis & { __micaPointerProbe?: PointerProbe };
+				return globals.__micaPointerProbe?.listeners.size ?? -1;
+			});
+			expect(remainingPointerListeners).toBe(0);
+		} finally {
+			await browser.executeObsidian(() => {
+				type PointerProbe = {
+					listeners: Set<EventListenerOrEventListenerObject>;
+					originalAdd: typeof document.addEventListener;
+					originalRemove: typeof document.removeEventListener;
+				};
+				const globals = globalThis as typeof globalThis & { __micaPointerProbe?: PointerProbe };
+				const probe = globals.__micaPointerProbe;
+				if (!probe) return;
+				document.addEventListener = probe.originalAdd;
+				document.removeEventListener = probe.originalRemove;
+				delete globals.__micaPointerProbe;
+			});
+		}
+	});
+
 	it("edits type/title/fold and re-quotes the body — nested callouts nest automatically", async function () {
 		await seedAndOpen(
 			"CalloutEdit.md",
@@ -225,7 +517,11 @@ describe("structured callout editor", function () {
 			const title = modal.querySelector(".mica-coedit-title") as HTMLInputElement;
 			title.value = "New title";
 			title.dispatchEvent(new Event("input", { bubbles: true }));
-			(Array.from(modal.querySelectorAll(".mica-pop-seg")).find((b) => b.textContent === "Collapsed") as HTMLElement).click();
+			(
+				Array.from(modal.querySelectorAll(".mica-pop-seg")).find(
+					(b) => b.textContent === "Collapsed",
+				) as HTMLElement
+			).click();
 			const host = modal.querySelector(".mica-mdeditor") as HTMLElement & {
 				micaEditor?: { setValue(v: string): void };
 			};
@@ -436,84 +732,104 @@ describe("syntax highlighting", function () {
 
 	it("revealed raw source tints mica structure lines", async function () {
 		await seedAndOpen("SrcHl.md", "Intro.\n\n```mica id=hl-2\ntab: Main\nbody text\n```\n");
-		// Keep the cursor INSIDE the block while polling: Obsidian restores a
-		// remembered cursor shortly after open, which would un-reveal it.
+		// Wait until the rendered widget proves Obsidian's late cursor restore and
+		// Live Preview decoration pass have settled. Then establish the state a
+		// real user creates: a TRUSTED click in the editor followed by ArrowDown
+		// key actions into the block. Programmatic focus/setCursor is not enough:
+		// Obsidian's own code-preview widget also requires actual document focus.
 		await browser.waitUntil(
-			() =>
-				browser.executeObsidian(({ app, obsidian }) => {
-					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-					// Reassert only when Obsidian's late cursor-restore moved it —
-					// hammering setCursor every poll churns the very updates we
-					// are waiting for.
-					// A real user's in-block cursor always implies editor FOCUS —
-					// Obsidian's own code-fence preview widget only reveals for a
-					// focused editor, so an unfocused programmatic cursor leaves
-					// its widget covering the range ours correctly released
-					// (root-caused via DOM capture: cm-preview-code-block held
-					// the lines in every failing run).
-					view?.editor.focus();
-					const cur = view?.editor.getCursor();
-					if (cur && cur.line !== 3) {
-						// Reveal now requires a USER-driven selection (the field
-						// ignores programmatic cursor moves) — annotate like a
-						// real keyboard/pointer select.
-						const cm = (
-							view?.editor as unknown as {
-								cm: { dispatch(spec: { selection: { anchor: number }; userEvent: string }): void };
-							}
-						).cm;
-						const pos = view?.editor.posToOffset({ line: 3, ch: 0 }) ?? 0;
-						cm.dispatch({ selection: { anchor: pos }, userEvent: "select" });
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length === 1),
+			{ timeout: 8000, timeoutMsg: "mica widget never rendered before source reveal" },
+		);
+		const revealWithUserInput = async (): Promise<void> => {
+			const intro = await browser.$(".workspace-leaf.mod-active .cm-content > .cm-line");
+			await intro.waitForDisplayed({ timeout: 8000 });
+			await intro.click();
+			await browser
+				.action("key")
+				.down(Key.Home)
+				.up(Key.Home)
+				.down(Key.ArrowDown)
+				.up(Key.ArrowDown)
+				.down(Key.ArrowDown)
+				.up(Key.ArrowDown)
+				.down(Key.ArrowDown)
+				.up(Key.ArrowDown)
+				.perform();
+		};
+		await revealWithUserInput();
+		// Re-run the same trusted gesture only if the Xvfb window loses focus or
+		// Obsidian performs another late cursor restore while the gate is under
+		// load. The product assertion itself remains exact and unchanged.
+		await browser
+			.waitUntil(
+				async () => {
+					const state = await browser.executeObsidian(({ app, obsidian }) => {
+						const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+						return {
+							focused: document.hasFocus(),
+							line: view?.editor.getCursor().line ?? -1,
+							tinted:
+								document.querySelectorAll(".cm-line.mica-src-tab").length >= 1 &&
+								document.querySelectorAll(".cm-line.mica-src-fence").length >= 1,
+						};
+					});
+					const cursorInsideBlock = state.line >= 2 && state.line <= 5;
+					if (!state.focused || !cursorInsideBlock) {
+						await revealWithUserInput();
+						return false;
 					}
-					return (
-						document.querySelectorAll(".cm-line.mica-src-tab").length >= 1 &&
-						document.querySelectorAll(".cm-line.mica-src-fence").length >= 1
+					return state.tinted;
+				},
+				{ timeout: 12000, timeoutMsg: "structure lines never tinted in source view" },
+			)
+			.catch(async (err: Error) => {
+				const diag = await browser.executeObsidian(({ app, obsidian }) => {
+					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+					const lines = Array.from(document.querySelectorAll(".cm-line")).map((l) =>
+						(l.textContent ?? "").slice(0, 24),
 					);
-				}),
-			{ timeout: 12000, timeoutMsg: "structure lines never tinted in source view" },
-		).catch(async (err: Error) => {
-			const diag = await browser.executeObsidian(({ app, obsidian }) => {
-				const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-				const lines = Array.from(document.querySelectorAll(".cm-line")).map((l) =>
-					(l.textContent ?? "").slice(0, 24),
-				);
-				const vc = view?.contentEl;
-				const sc = vc?.querySelector(".cm-scroller") as HTMLElement | null;
-				const cnt = vc?.querySelector(".cm-content") as HTMLElement | null;
-				return JSON.stringify({
-					file: view?.file?.path,
-					cursor: view?.editor.getCursor(),
-					docFocus: document.hasFocus(),
-					active: (document.activeElement?.className ?? "").toString().slice(0, 40),
-					lp: document.querySelectorAll(".mica-lp").length,
-					srcClasses: document.querySelectorAll("[class*=mica-src]").length,
-					cmLines: lines.length,
-					lines: lines.slice(0, 8),
-					vcRect: vc ? `${Math.round(vc.getBoundingClientRect().top)}h${Math.round(vc.getBoundingClientRect().height)}` : "n/a",
-					vcTransform: vc ? getComputedStyle(vc).transform : "n/a",
-					scRect: sc ? `${Math.round(sc.getBoundingClientRect().top)}h${Math.round(sc.getBoundingClientRect().height)}` : "n/a",
-					contentH: cnt ? Math.round(cnt.getBoundingClientRect().height) : -1,
-					scrollTop: sc?.scrollTop ?? -1,
-					kids: cnt
-						? Array.from(cnt.children).map(
-								(c) =>
-									`${c.tagName.toLowerCase()}.${(c.className.toString().split(" ")[0] || "?").slice(0, 22)}@h${(c as HTMLElement).offsetHeight}`,
-							)
-						: [],
+					const vc = view?.contentEl;
+					const sc = vc?.querySelector(".cm-scroller") as HTMLElement | null;
+					const cnt = vc?.querySelector(".cm-content") as HTMLElement | null;
+					return JSON.stringify({
+						file: view?.file?.path,
+						cursor: view?.editor.getCursor(),
+						docFocus: document.hasFocus(),
+						active: (document.activeElement?.className ?? "").toString().slice(0, 40),
+						lp: document.querySelectorAll(".mica-lp").length,
+						srcClasses: document.querySelectorAll("[class*=mica-src]").length,
+						cmLines: lines.length,
+						lines: lines.slice(0, 8),
+						vcRect: vc
+							? `${Math.round(vc.getBoundingClientRect().top)}h${Math.round(vc.getBoundingClientRect().height)}`
+							: "n/a",
+						vcTransform: vc ? getComputedStyle(vc).transform : "n/a",
+						scRect: sc
+							? `${Math.round(sc.getBoundingClientRect().top)}h${Math.round(sc.getBoundingClientRect().height)}`
+							: "n/a",
+						contentH: cnt ? Math.round(cnt.getBoundingClientRect().height) : -1,
+						scrollTop: sc?.scrollTop ?? -1,
+						kids: cnt
+							? Array.from(cnt.children).map(
+									(c) =>
+										`${c.tagName.toLowerCase()}.${(c.className.toString().split(" ")[0] || "?").slice(0, 22)}@h${(c as HTMLElement).offsetHeight}`,
+								)
+							: [],
+					});
 				});
+				console.log("TINT FAIL DIAG:", diag);
+				try {
+					const logs = (await browser.getLogs("browser")) as { level: string; message: string }[];
+					const bad = logs
+						.filter((l) => /error|Error|mica/.test(l.message))
+						.map((l) => l.message.slice(0, 300));
+					console.log("TINT FAIL CONSOLE:", JSON.stringify(bad.slice(-8)));
+				} catch (logErr) {
+					console.log("TINT FAIL CONSOLE: unavailable", String(logErr).slice(0, 120));
+				}
+				throw err;
 			});
-			console.log("TINT FAIL DIAG:", diag);
-			try {
-				const logs = (await browser.getLogs("browser")) as { level: string; message: string }[];
-				const bad = logs
-					.filter((l) => /error|Error|mica/.test(l.message))
-					.map((l) => l.message.slice(0, 300));
-				console.log("TINT FAIL CONSOLE:", JSON.stringify(bad.slice(-8)));
-			} catch (logErr) {
-				console.log("TINT FAIL CONSOLE: unavailable", String(logErr).slice(0, 120));
-			}
-			throw err;
-		});
 	});
 });
 
@@ -521,7 +837,10 @@ describe("escape cancels everywhere", function () {
 	it("Escape cancels an open inline editor even when focus is elsewhere", async function () {
 		await seedAndOpen("EscEditor.md", "Intro.\n\n```mica id=esc-1\ntab: Main\nuntouched text\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "region never rendered" },
 		);
 		await browser.executeObsidian(() => {
@@ -545,8 +864,7 @@ describe("escape cancels everywhere", function () {
 	});
 
 	it("Escape aborts a column resize and the header keeps its old value", async function () {
-		const fixture =
-			"Intro.\n\n```mica id=esc-2\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n```\n";
+		const fixture = "Intro.\n\n```mica id=esc-2\n:::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n```\n";
 		await seedAndOpen("EscResize.md", fixture);
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-col-resizer").length >= 1),
@@ -568,9 +886,7 @@ describe("escape cancels everywhere", function () {
 			strip.dispatchEvent(new PointerEvent("pointerdown", opts(r.left + 4, cy)));
 			window.dispatchEvent(new PointerEvent("pointermove", opts(r.left + 70, cy)));
 			await new Promise((res) => setTimeout(res, 30));
-			window.dispatchEvent(
-				new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
-			);
+			window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
 			await new Promise((res) => setTimeout(res, 30));
 			window.dispatchEvent(new PointerEvent("pointerup", opts(r.left + 70, cy)));
 		});
@@ -582,10 +898,7 @@ describe("escape cancels everywhere", function () {
 
 describe("round 12: chip ✕, nested callout tools", function () {
 	it("the RIGHTMOST tab's ✕ deletes that tab", async function () {
-		await seedAndOpen(
-			"LastTabX.md",
-			"Intro.\n\n```mica id=ltx-1\ntab: One\na\ntab: Two\nb\ntab: Three\nc\n```\n",
-		);
+		await seedAndOpen("LastTabX.md", "Intro.\n\n```mica id=ltx-1\ntab: One\na\ntab: Two\nb\ntab: Three\nc\n```\n");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tab-chip").length >= 3),
 			{ timeout: 8000, timeoutMsg: "chips never rendered" },
@@ -823,9 +1136,7 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 				new PointerEvent("pointermove", opts(target.left + 20, target.top + target.height / 2)),
 			);
 			await new Promise((res) => setTimeout(res, 30));
-			window.dispatchEvent(
-				new PointerEvent("pointerup", opts(target.left + 20, target.top + target.height / 2)),
-			);
+			window.dispatchEvent(new PointerEvent("pointerup", opts(target.left + 20, target.top + target.height / 2)));
 		});
 		await browser.waitUntil(
 			() =>
@@ -864,7 +1175,10 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 	it("a section inserted against another section stays its own section", async function () {
 		await seedAndOpen("NoMerge.md", "Intro.\n\n```mica id=nm-1\ntab: Main\nfirst paragraph\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "region never rendered" },
 		);
 		// The tail insert zone → Text: the new section must land with a
@@ -983,7 +1297,10 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 	it("one visual gap offers one insert line (tab tail owns the gap below the group)", async function () {
 		await seedAndOpen("OneGap.md", "Intro.\n\n```mica id=og-1\ntab: Main\nsome body text\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-insert-zone.is-tail").length > 0),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-insert-zone.is-tail").length > 0,
+				),
 			{ timeout: 8000, timeoutMsg: "tail zones never rendered" },
 		);
 		const tails = await browser.executeObsidian(() => {
@@ -1000,7 +1317,10 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 	it("clicking below the lightbox text places the caret at the end", async function () {
 		await seedAndOpen("ClickEnd.md", "Intro.\n\n```mica id=cke-1\ntab: Main\nshort text\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "region never rendered" },
 		);
 		await browser.executeObsidian(() => {
@@ -1008,7 +1328,8 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 			region.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
 		});
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lightbox .mica-mdeditor").length === 1),
+			() =>
+				browser.executeObsidian(() => document.querySelectorAll(".mica-lightbox .mica-mdeditor").length === 1),
 			{ timeout: 8000, timeoutMsg: "lightbox never opened" },
 		);
 		const at = await browser.executeObsidian(() => {
@@ -1017,7 +1338,12 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 			};
 			const r = host.getBoundingClientRect();
 			host.dispatchEvent(
-				new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.bottom - 10 }),
+				new MouseEvent("mousedown", {
+					bubbles: true,
+					cancelable: true,
+					clientX: r.left + 40,
+					clientY: r.bottom - 10,
+				}),
 			);
 			const view = host.micaEditor?.view;
 			return view ? `${view.state.selection.main.head}/${view.state.doc.length}` : "no view";
@@ -1025,39 +1351,80 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 		const [head, len] = at.split("/").map(Number);
 		expect(head).toBe(len);
 		await browser.executeObsidian(() => {
-			(Array.from(document.querySelectorAll(".mica-lightbox button")).find(
-				(b) => b.textContent === "Cancel",
-			) as HTMLElement)?.click();
+			(
+				Array.from(document.querySelectorAll(".mica-lightbox button")).find(
+					(b) => b.textContent === "Cancel",
+				) as HTMLElement
+			)?.click();
 		});
 	});
 
-	it("the toolbar overflow popover opens at body level (never clipped)", async function () {
+	it("an overflowed tool opens its picker and returns home after close", async function () {
 		await seedAndOpen("Overflow.md", "Intro.\n\n```mica id=ov-1\ntab: Main\nsome text\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "region never rendered" },
 		);
 		await browser.executeObsidian(() => {
 			(document.querySelector(".mica-lp .mica-region.is-editable") as HTMLElement).click();
 		});
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-toolbar .mica-tool").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-toolbar .mica-tool").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "quick toolbar never appeared" },
 		);
-		const state = await browser.executeObsidian(() => {
-			// Open a picker popover from the toolbar (callout button exists in
-			// the default layout) — it must mount on BODY and have real size.
-			const btn = Array.from(
-				document.querySelectorAll(".mica-lp .mica-toolbar .mica-tool"),
-			).find((b) => b.getAttribute("aria-label")?.toLowerCase().includes("callout")) as HTMLElement | undefined;
-			if (!btn) return "no callout button (overflowed)";
-			btn.click();
-			const pop = document.body.querySelector(":scope > .mica-tb-popover") as HTMLElement | null;
-			if (!pop) return "no popover";
-			const r = pop.getBoundingClientRect();
-			return r.width > 100 && r.height > 60 ? "ok" : `too small ${Math.round(r.width)}x${Math.round(r.height)}`;
+		await browser.executeObsidian(() => {
+			const bar = document.querySelector(".mica-lp .mica-toolbar") as HTMLElement;
+			bar.style.width = "120px";
+			window.dispatchEvent(new Event("resize"));
 		});
-		expect(["ok", "no callout button (overflowed)"]).toContain(state);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const more = document.querySelector(".mica-lp .mica-toolbar-more") as HTMLElement | null;
+					return Boolean(more && getComputedStyle(more).display !== "none");
+				}),
+			{ timeout: 8000, timeoutMsg: "toolbar never overflowed" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-toolbar-more") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.body.querySelector(":scope > .mica-overflow-panel"))),
+			{ timeout: 8000, timeoutMsg: "overflow panel never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const callout = Array.from(document.querySelectorAll("body > .mica-overflow-panel .mica-tool")).find(
+				(button) => button.getAttribute("aria-label")?.toLowerCase().includes("callout"),
+			) as HTMLElement | undefined;
+			if (!callout) throw new Error("callout tool was not returned by overflow layout");
+			callout.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() => document.body.querySelectorAll(":scope > .mica-tb-popover .mica-callout-type").length > 0,
+				),
+			{ timeout: 8000, timeoutMsg: "overflowed callout tool did not open its picker" },
+		);
+		await browser.executeObsidian(() => {
+			document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+			(document.querySelector(".mica-lp .mica-toolbar-more") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll("body > .mica-overflow-panel .mica-tool")).some((button) =>
+						button.getAttribute("aria-label")?.toLowerCase().includes("callout"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "callout tool disappeared after closing its picker" },
+		);
 	});
 });
 
@@ -1205,7 +1572,10 @@ describe("round 17: configurable save shortcut", function () {
 		});
 		await seedAndOpen("SaveKey.md", "Intro.\n\n```mica id=sk-1\ntab: Main\noriginal words\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1),
+			() =>
+				browser.executeObsidian(
+					() => document.querySelectorAll(".mica-lp .mica-region.is-editable").length >= 1,
+				),
 			{ timeout: 8000, timeoutMsg: "region never rendered" },
 		);
 		await browser.executeObsidian(() => {
@@ -1215,9 +1585,9 @@ describe("round 17: configurable save shortcut", function () {
 			() =>
 				browser.executeObsidian(() =>
 					Boolean(
-						(document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null)?.shadowRoot?.querySelector(
-							".cm-content",
-						),
+						(
+							document.querySelector(".mica-lp .mica-mdeditor") as HTMLElement | null
+						)?.shadowRoot?.querySelector(".cm-content"),
 					),
 				),
 			{ timeout: 8000, timeoutMsg: "editor never opened" },
@@ -1241,7 +1611,13 @@ describe("round 17: configurable save shortcut", function () {
 			const content = host.shadowRoot?.querySelector(".cm-content") as HTMLElement;
 			content.focus();
 			content.dispatchEvent(
-				new KeyboardEvent("keydown", { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true }),
+				new KeyboardEvent("keydown", {
+					key: "Enter",
+					code: "Enter",
+					shiftKey: true,
+					bubbles: true,
+					cancelable: true,
+				}),
 			);
 		});
 		await browser.waitUntil(

@@ -74,6 +74,10 @@ export interface MicaSettings {
 	editorLineNumbers: boolean;
 	/** Render whitespace characters in the markdown editors. */
 	editorWhitespace: boolean;
+	/** Preserve tab/grid/cell layout directives in section clipboard copies. */
+	copyIncludeMicaSyntax: boolean;
+	/** Wrap section clipboard copies in a fresh, identity-free Mica code fence. */
+	copyIncludeOuterContainer: boolean;
 	/** Ordered editor-toolbar item ids ("|" = separator). */
 	toolbarLayout: string[];
 	/** Variant-group defaults (group id → variant id), following last use. */
@@ -113,6 +117,8 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	saveShortcut: "mod-enter",
 	editorLineNumbers: false,
 	editorWhitespace: false,
+	copyIncludeMicaSyntax: false,
+	copyIncludeOuterContainer: false,
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
 	toolbarDefaults: {},
 	customTools: [],
@@ -475,7 +481,33 @@ export class MicaSettingTab extends PluginSettingTab {
 			"Finer visual tuning — colors, radii, control sizes — is exposed as CSS custom properties on `body` (see the plugin's styles.css). Override them with the Style Settings plugin or your theme.",
 		);
 
-		// ---------- Editor toolbar ----------
+		// ---------- Copying ----------
+		new Setting(containerEl).setHeading().setName("Copying");
+
+		new Setting(containerEl)
+			.setName("Include Mica layout syntax")
+			.setDesc(
+				"Keep tab, grid, and cell wrapper lines in section copies. Standard Markdown such as callouts and code fences is always preserved.",
+			)
+			.addToggle((t) =>
+				t.setValue(s.copyIncludeMicaSyntax).onChange(async (v) => {
+					s.copyIncludeMicaSyntax = v;
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Wrap copies in an outer Mica block")
+			.setDesc(
+				"Put copied content inside a safely sized Mica code fence. The source block id and appearance attributes are never copied.",
+			)
+			.addToggle((t) =>
+				t.setValue(s.copyIncludeOuterContainer).onChange(async (v) => {
+					s.copyIncludeOuterContainer = v;
+					await save();
+				}),
+			);
+
 		// ---------- Editors ----------
 		new Setting(containerEl).setHeading().setName("Editors");
 

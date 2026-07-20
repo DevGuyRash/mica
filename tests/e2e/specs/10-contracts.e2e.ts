@@ -66,6 +66,7 @@ describe("runtime contracts (window.mica)", function () {
 
 		const versions = await browser.executeObsidian(() => window.mica.versionsList("Versioned.md", "blk-e2e-1"));
 		expect(versions.length).toBe(2);
+		expect(versions.every((version) => /^b3:[0-9a-f]{64}$/.test(version.hash))).toBe(true);
 
 		const diff = await browser.executeObsidian(
 			(_obs, base, other) => window.mica.versionsDiff("Versioned.md", base, other, "line"),
@@ -106,6 +107,7 @@ describe("runtime contracts (window.mica)", function () {
 		});
 
 		const doc = await readNote("Legacy Tabs.md");
+		expect(/^mica-id:\s*[0-9a-f-]+$/m.test(doc)).toBe(true);
 		expect(doc).not.toContain("`````tabs");
 		expect(doc).toContain("tab: Kernel"); // friendly, closer-free syntax
 		expect(doc).toContain("tab: Frame Gate");
@@ -145,6 +147,162 @@ describe("runtime contracts (window.mica)", function () {
 		expect(labels).toContain("V0.3"); // [!bug]- Frame Gate (V0.3)
 		expect(labels).toContain("V2.5"); // [!info]- Field Notes — a non-default callout type
 		expect(versions.length).toBeGreaterThanOrEqual(4); // imported + migrated head
+		const journal = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const af = app.vault.getAbstractFileByPath("Legacy Tabs.mica/migration.json");
+			if (!(af instanceof obsidian.TFile)) throw new Error("migration journal was not retained");
+			return JSON.parse(await app.vault.read(af)) as {
+				format: number;
+				status: string;
+				note: string;
+				original: string;
+				migrated: string;
+			};
+		});
+		expect(journal).toMatchObject({ format: 1, status: "complete", note: "Legacy Tabs.md" });
+		expect(journal.original).toMatch(/^b3:[0-9a-f]{64}$/);
+		expect(journal.migrated).toMatch(/^b3:[0-9a-f]{64}$/);
+	});
+
+	it("recovers a torn ledger tail and an append that partially commits before throwing", async function () {
+		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+			type Plugin = { settings: { autoSnapshotEnabled: boolean } };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, Plugin> } }).plugins.plugins["mica"];
+			const previousAuto = plugin.settings.autoSnapshotEnabled;
+			plugin.settings.autoSnapshotEnabled = false;
+			const name = "LedgerRecovery.md";
+			const id = "ledger-recovery";
+			await app.vault.create(name, `\`\`\`mica id=${id}\ntab: A\nv1\n\`\`\`\n`);
+			const file = app.vault.getAbstractFileByPath(name);
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing recovery note");
+			try {
+				await window.mica.versionsSnapshot(name);
+				const ledger = app.vault.getAbstractFileByPath("LedgerRecovery.mica/ledger.jsonl");
+				if (!(ledger instanceof obsidian.TFile)) throw new Error("missing recovery ledger");
+				await app.vault.append(ledger, '{"type":'); // torn JSON, deliberately no newline
+				await app.vault.process(file, (doc) => doc.replace("v1", "v2"));
+				await window.mica.versionsSnapshot(name);
+
+				const mutableVault = app.vault as unknown as { append: typeof app.vault.append };
+				const originalAppend = mutableVault.append;
+				let injected = false;
+				mutableVault.append = async (target, data, options) => {
+					if (!injected && target.path.endsWith("LedgerRecovery.mica/ledger.jsonl")) {
+						injected = true;
+						const firstLine = data.slice(0, data.indexOf("\n") + 1);
+						await originalAppend.call(app.vault, target, firstLine, options);
+						throw new Error("injected post-commit append failure");
+					}
+					return originalAppend.call(app.vault, target, data, options);
+				};
+				try {
+					await app.vault.process(file, (doc) => doc.replace("v2", "v3"));
+					await window.mica.versionsSnapshot(name);
+				} finally {
+					mutableVault.append = originalAppend;
+				}
+				const text = await app.vault.read(ledger);
+				const valid = text
+					.split("\n")
+					.map((line) => {
+						try {
+							return JSON.parse(line) as { eid?: string };
+						} catch {
+							return null;
+						}
+					})
+					.filter((event): event is { eid: string } => typeof event?.eid === "string");
+				const versions = await window.mica.versionsList(name, id);
+				return {
+					injected,
+					separated: text.includes('{"type":\n{'),
+					uniqueEids: new Set(valid.map((event) => event.eid)).size === valid.length,
+					versionCount: versions.length,
+				};
+			} finally {
+				plugin.settings.autoSnapshotEnabled = previousAuto;
+			}
+		});
+		expect(result.injected).toBe(true);
+		expect(result.separated).toBe(true);
+		expect(result.uniqueEids).toBe(true);
+		expect(result.versionCount).toBe(3);
+	});
+
+	it("rejects a corrupt successful object create and dual object representations", async function () {
+		const result = await browser.executeObsidian(async ({ app }) => {
+			type Plugin = { settings: { autoSnapshotEnabled: boolean } };
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, Plugin> } }).plugins.plugins["mica"];
+			const previousAuto = plugin.settings.autoSnapshotEnabled;
+			plugin.settings.autoSnapshotEnabled = false;
+			const mutableVault = app.vault as unknown as { create: typeof app.vault.create };
+			const originalCreate = mutableVault.create;
+			try {
+				const corruptName = "CorruptObjectCreate.md";
+				await originalCreate.call(app.vault, corruptName, "```mica id=corrupt-object\ntab: A\noriginal\n```\n");
+				let corruptedCreateRejected = false;
+				mutableVault.create = async (path, data, options) => {
+					if (path.includes("CorruptObjectCreate.mica/objects/") && path.endsWith(".mica.md")) {
+						return originalCreate.call(app.vault, path, `${data}CORRUPTED`, options);
+					}
+					return originalCreate.call(app.vault, path, data, options);
+				};
+				try {
+					await window.mica.versionsSnapshot(corruptName);
+				} catch (error) {
+					corruptedCreateRejected = String(error).includes("corrupt history object");
+				} finally {
+					mutableVault.create = originalCreate;
+				}
+
+				const dualName = "DualObject.md";
+				await originalCreate.call(app.vault, dualName, "```mica id=dual-object\ntab: A\nvalid\n```\n");
+				await window.mica.versionsSnapshot(dualName);
+				const versions = await window.mica.versionsList(dualName, "dual-object");
+				const hash = versions[0]?.hash;
+				if (!hash) throw new Error("missing dual-object version");
+				const gzPath = `DualObject.mica/objects/${hash.replace(":", "-")}.mica.gz`;
+				await app.vault.createBinary(gzPath, new Uint8Array().buffer);
+				let dualRejected = false;
+				try {
+					await window.mica.versionsDiff(dualName, hash, hash);
+				} catch (error) {
+					dualRejected = String(error).includes("both plaintext and compressed forms");
+				}
+				return { corruptedCreateRejected, dualRejected };
+			} finally {
+				mutableVault.create = originalCreate;
+				plugin.settings.autoSnapshotEnabled = previousAuto;
+			}
+		});
+		expect(result.corruptedCreateRejected).toBe(true);
+		expect(result.dualRejected).toBe(true);
+	});
+
+	it("does not rehome a sidecar whose represented blocks resolve to different notes", async function () {
+		const result = await browser.executeObsidian(async ({ app }) => {
+			await app.vault.create("RehomeA.md", "```mica id=rehome-a\ntab: A\na\n```\n");
+			await app.vault.create("RehomeB.md", "```mica id=rehome-b\ntab: B\nb\n```\n");
+			await app.vault.createFolder("Shared.mica");
+			await app.vault.createFolder("Shared.mica/objects");
+			const ts = Date.now();
+			const hashA = `b3:${"a".repeat(64)}`;
+			const hashB = `b3:${"b".repeat(64)}`;
+			await app.vault.create(
+				"Shared.mica/ledger.jsonl",
+				[
+					JSON.stringify({ type: "set-head", eid: "shared-a", ts, block: "rehome-a", hash: hashA }),
+					JSON.stringify({ type: "set-head", eid: "shared-b", ts, block: "rehome-b", hash: hashB }),
+				].join("\n") + "\n",
+			);
+			const report = await window.mica.repair();
+			return {
+				stillThere: Boolean(app.vault.getAbstractFileByPath("Shared.mica")),
+				conflict: report.conflicted.find((item) => item.sidecar === "Shared.mica"),
+			};
+		});
+		expect(result.stillThere).toBe(true);
+		expect(result.conflict?.reason).toBe("multiple-live-targets");
+		expect(result.conflict?.notes).toEqual(["RehomeA.md", "RehomeB.md"]);
 	});
 
 	it("migrate.scan verb reports (and is empty once converted)", async function () {
@@ -192,8 +350,70 @@ describe("runtime contracts (window.mica)", function () {
 		expect(c.insBg).not.toBe("rgba(0, 0, 0, 0)");
 		expect(c.delBg).not.toBe(c.insBg); // red vs green
 		await browser.executeObsidian(() =>
-			(document.querySelector(".modal-close-button") as HTMLElement | null)?.click(),
+			(document.querySelector(".mica-versions-modal .modal-close-button") as HTMLElement | null)?.click(),
 		);
+		await browser.waitUntil(() => browser.executeObsidian(() => !document.querySelector(".mica-versions-modal")), {
+			timeout: 8_000,
+			timeoutMsg: "compare modal did not close",
+		});
+	});
+
+	it("branch editor preserves a stored version's CRLF line endings", async function () {
+		await browser.executeObsidian(async ({ app, obsidian }) => {
+			const path = "CrlfVersion.md";
+			const content = "```mica id=crlf-1\r\ntab: Main\r\nline one\r\nline two\r\n```\r\n";
+			const existing = app.vault.getAbstractFileByPath(path);
+			const file = existing instanceof obsidian.TFile ? existing : await app.vault.create(path, content);
+			if (existing instanceof obsidian.TFile) await app.vault.modify(existing, content);
+			await window.mica.versionsSnapshot(path);
+			await app.workspace.getLeaf(false).openFile(file, { state: { mode: "source" } });
+		});
+		await browser.executeObsidianCommand("mica:diff-versions");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector('.mica-versions-modal .mica-vrow [aria-label="Version actions"]')),
+				),
+			{ timeout: 10_000, timeoutMsg: "version actions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			(
+				document.querySelector(
+					'.mica-versions-modal .mica-vrow [aria-label="Version actions"]',
+				) as HTMLButtonElement
+			).click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".menu-item-title")).some(
+						(item) => item.textContent === "Edit as new version (branch)",
+					),
+				),
+			{ timeout: 8_000, timeoutMsg: "branch action menu never opened" },
+		);
+		await browser.executeObsidian(() => {
+			const branch = Array.from(document.querySelectorAll(".menu-item-title")).find(
+				(item) => item.textContent === "Edit as new version (branch)",
+			) as HTMLElement;
+			branch.click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-mdeditor"))),
+			{ timeout: 8_000, timeoutMsg: "branch editor never opened" },
+		);
+
+		const value = await browser.executeObsidian(() => {
+			const host = document.querySelector(".mica-lightbox .mica-mdeditor") as HTMLElement & {
+				micaEditor?: { getValue(): string };
+			};
+			return host.micaEditor?.getValue() ?? "";
+		});
+		expect(value).toBe("tab: Main\r\nline one\r\nline two\r\n");
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lightbox .modal-close-button") as HTMLButtonElement | null)?.click();
+			(document.querySelector(".mica-versions-modal .modal-close-button") as HTMLButtonElement | null)?.click();
+		});
 	});
 
 	it("smart auto-save ignores structural churn, versions only real content", async function () {
@@ -221,6 +441,30 @@ describe("runtime contracts (window.mica)", function () {
 		});
 		versions = await browser.executeObsidian(() => window.mica.versionsList("SmartAuto.md", "sa-1"));
 		expect(versions.length).toBe(2);
+	});
+
+	it("snapshot rejects duplicate live ids before creating merged history", async function () {
+		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const path = "DuplicateSnapshot.md";
+			const content = "```mica id=duplicate-live\none\n```\n\n```mica id=duplicate-live\ntwo\n```\n";
+			const existing = app.vault.getAbstractFileByPath(path);
+			if (existing instanceof obsidian.TFile) await app.vault.modify(existing, content);
+			else await app.vault.create(path, content);
+			try {
+				await window.mica.versionsSnapshot(path);
+				return {
+					message: null,
+					hasLedger: Boolean(app.vault.getAbstractFileByPath("DuplicateSnapshot.mica/ledger.jsonl")),
+				};
+			} catch (error) {
+				return {
+					message: error instanceof Error ? error.message : String(error),
+					hasLedger: Boolean(app.vault.getAbstractFileByPath("DuplicateSnapshot.mica/ledger.jsonl")),
+				};
+			}
+		});
+		expect(result.message).toContain("duplicate block id");
+		expect(result.hasLedger).toBe(false);
 	});
 
 	it("file-bridge: inbox instruction produces an outbox result", async function () {

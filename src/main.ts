@@ -1,6 +1,6 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
-import { setEditorBehavior } from "./ui/quickEdit";
+import { installQuickEditGlobalListeners, setEditorBehavior } from "./ui/quickEdit";
 import { registerViewPrefsPersistence, setEditorViewPrefs, setSaveShortcut } from "./ui/mdEditor";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
 import { micaSourceHighlight } from "./cm/micaSourceHighlight";
@@ -15,6 +15,7 @@ import { MicaApi } from "./api/mica";
 import { migrateFile, migrateVault, type MigrateFileReport } from "./migrate/migrate";
 import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings";
 import { setToolbarConfig } from "./ui/toolSpec";
+import { disposeToolbarUi } from "./ui/toolbarView";
 import type { BlockUi } from "./ui/blockShell";
 
 /**
@@ -35,6 +36,8 @@ export default class MicaPlugin extends Plugin {
 		this.applyStyleVars();
 		this.applyToolbarConfig();
 		this.engine = new VersionEngine(this);
+		this.register(installQuickEditGlobalListeners());
+		this.register(disposeToolbarUi);
 		this.api = new MicaApi(this);
 		this.api.registerBridge();
 		(window as unknown as { mica?: MicaApi }).mica = this.api;
@@ -58,7 +61,6 @@ export default class MicaPlugin extends Plugin {
 		this.registerEvent(this.app.vault.on("delete", (file) => this.engine.forgetFile(file.path)));
 
 		this.app.workspace.onLayoutReady(() => {
-			this.registerSidecarExclusion();
 			if (this.settings.reconcileOnLoad) void this.reconcileOnLoad();
 		});
 
@@ -157,6 +159,7 @@ export default class MicaPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		this.engine?.dispose();
 		delete (window as unknown as { mica?: MicaApi }).mica;
 		const b = document.body;
 		for (const c of Array.from(b.classList)) if (c.startsWith("mica-theme-")) b.removeClass(c);
@@ -215,22 +218,6 @@ export default class MicaPlugin extends Plugin {
 		}
 	}
 
-	/**
-	 * Keep `.mica/` sidecars out of search/graph/switcher: add a regex filter
-	 * to Obsidian's "Excluded files" once (idempotent; user can remove it).
-	 */
-	private registerSidecarExclusion(): void {
-		const FILTER = "/\\.mica\\//";
-		type Cfg = { getConfig?(k: string): unknown; setConfig?(k: string, v: unknown): void };
-		const vault = this.app.vault as unknown as Cfg;
-		const current = vault.getConfig?.("userIgnoreFilters");
-		if (!Array.isArray(current)) {
-			if (current === undefined || current === null) vault.setConfig?.("userIgnoreFilters", [FILTER]);
-			return;
-		}
-		if (!current.includes(FILTER)) vault.setConfig?.("userIgnoreFilters", [...current, FILTER]);
-	}
-
 	applyStyleVars(): void {
 		const s = this.settings;
 		const b = document.body;
@@ -262,12 +249,12 @@ export default class MicaPlugin extends Plugin {
 
 	private async reconcileOnLoad(): Promise<void> {
 		try {
-			const { actions, rehomed, forked, buried } = await repair(this);
-			if (actions.length || rehomed.length || forked.length || buried.length) {
+			const { actions, rehomed, conflicted, forked, buried } = await repair(this);
+			if (actions.length || rehomed.length || conflicted.length || forked.length || buried.length) {
 				new Notice(
-					`Mica: reconciled — ${rehomed.length} rehomed, ${forked.length} forked, ${buried.length} buried, ${actions.length} issue(s). See console.`,
+					`Mica: reconciled — ${rehomed.length} rehomed, ${forked.length} forked, ${buried.length} buried, ${conflicted.length} conflict(s), ${actions.length} issue(s). See console.`,
 				);
-				console.info("Mica startup reconcile:", { rehomed, forked, buried, actions });
+				console.info("Mica startup reconcile:", { rehomed, conflicted, forked, buried, actions });
 			}
 		} catch (e) {
 			console.error("Mica: startup reconcile failed", e);
@@ -277,19 +264,39 @@ export default class MicaPlugin extends Plugin {
 	private async prepareActiveNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return;
-		await ensureNoteId(this, file);
-		await ensureBlockIds(this, file);
+		try {
+			await ensureNoteId(this, file);
+			await ensureBlockIds(this, file);
+			new Notice("Mica: note prepared.");
+		} catch (error) {
+			this.noticeFailure("prepare note", error);
+		}
 	}
 
 	private async snapshotActiveNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
-		if (file) await this.engine.snapshot(file);
+		if (!file) return;
+		try {
+			await this.engine.snapshot(file);
+			new Notice("Mica: versions saved.");
+		} catch (error) {
+			new Notice(`Mica: could not save versions — ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private async diffActiveBlock(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return;
-		const block = scanBlocksView(await this.app.vault.read(file)).find((b) => b.id);
+		const blocks = scanBlocksView(await this.app.vault.read(file));
+		const counts = new Map<string, number>();
+		for (const candidate of blocks) {
+			if (candidate.id) counts.set(candidate.id, (counts.get(candidate.id) ?? 0) + 1);
+		}
+		if ([...counts.values()].some((count) => count > 1)) {
+			new Notice("Mica block ids are duplicated in this note. Run “Repair history” before comparing versions.");
+			return;
+		}
+		const block = blocks.find((candidate) => candidate.id);
 		if (!block?.id) {
 			new Notice("No Mica block with an id in this note. Run “Prepare note for Mica” first.");
 			return;
@@ -304,9 +311,23 @@ export default class MicaPlugin extends Plugin {
 	}
 
 	private async runRepair(): Promise<void> {
-		const { actions, rehomed } = await repair(this);
-		new Notice(`Mica repair: ${rehomed.length} rehomed, ${actions.length} issue(s). See console.`);
-		if (actions.length || rehomed.length) console.info("Mica repair:", { rehomed, actions });
+		try {
+			const report = await repair(this);
+			new Notice(
+				`Mica repair: ${report.rehomed.length} rehomed, ${report.forked.length} forked, ${report.buried.length} buried, ${report.conflicted.length} conflict(s), ${report.actions.length} issue(s). See console.`,
+			);
+			if (
+				report.actions.length ||
+				report.rehomed.length ||
+				report.conflicted.length ||
+				report.forked.length ||
+				report.buried.length
+			) {
+				console.info("Mica repair:", report);
+			}
+		} catch (error) {
+			this.noticeFailure("repair history", error);
+		}
 	}
 
 	private async runInstructionFromClipboard(): Promise<void> {
@@ -322,21 +343,35 @@ export default class MicaPlugin extends Plugin {
 	private async migrateActive(dryRun: boolean): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return;
-		const report = await migrateFile(this, file, dryRun);
-		if (!report) {
-			new Notice("No convertible obsidian-tabs blocks found (Templater notes are skipped).");
-			return;
+		try {
+			const report = await migrateFile(this, file, dryRun);
+			if (!report) {
+				new Notice("No convertible obsidian-tabs blocks found (Templater notes are skipped).");
+				return;
+			}
+			this.noticeMigration([report], dryRun);
+		} catch (error) {
+			this.noticeFailure("migrate note", error);
 		}
-		this.noticeMigration([report], dryRun);
 	}
 
 	private async migrateWholeVault(dryRun: boolean): Promise<void> {
-		const reports = await migrateVault(this, dryRun);
-		if (!reports.length) {
-			new Notice("No convertible obsidian-tabs blocks found anywhere in the vault.");
-			return;
+		try {
+			const reports = await migrateVault(this, dryRun);
+			if (!reports.length) {
+				new Notice("No convertible obsidian-tabs blocks found anywhere in the vault.");
+				return;
+			}
+			this.noticeMigration(reports, dryRun);
+		} catch (error) {
+			this.noticeFailure("migrate vault", error);
 		}
-		this.noticeMigration(reports, dryRun);
+	}
+
+	private noticeFailure(action: string, error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		new Notice(`Mica: could not ${action} — ${message}`);
+		console.error(`Mica: could not ${action}`, error);
 	}
 
 	private noticeMigration(reports: MigrateFileReport[], dryRun: boolean): void {

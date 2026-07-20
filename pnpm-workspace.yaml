@@ -7,3 +7,9 @@ allowBuilds:
     edgedriver: false
     esbuild: true
     geckodriver: false
+
+# Mocha and WDIO still request vulnerable transitive versions. These patched
+# releases preserve the APIs they consume and support this repo's Node 22 floor.
+overrides:
+    diff: 8.0.4
+    serialize-javascript: 7.0.7

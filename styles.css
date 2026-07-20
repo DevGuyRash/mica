@@ -220,8 +220,42 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
  * (so the nav's overflow-x never clips it, and it reads as part of the tab).
  * Editable tabs reserve that right padding; reading-mode tabs don't.
  */
-.mica-chip-editable .mica-tab-btn {
+.mica-chip-copyable .mica-tab-btn {
 	padding-right: 28px;
+}
+
+.mica-chip-editable.mica-chip-copyable .mica-tab-btn {
+	padding-right: 46px;
+}
+
+.mica-chip-copy {
+	position: absolute;
+	z-index: 3;
+	pointer-events: auto;
+	right: 4px;
+	top: 50%;
+	transform: translateY(-50%);
+	display: grid;
+	place-items: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s;
+}
+
+.mica-chip-editable .mica-chip-copy {
+	right: 22px;
+}
+
+.mica-chip-copy .svg-icon {
+	width: 12px !important;
+	height: 12px !important;
 }
 
 .mica-chip-x {
@@ -247,8 +281,16 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	transition: opacity 0.12s;
 }
 
-.mica-tab-chip:hover .mica-chip-x {
+.mica-tab-chip:hover .mica-chip-x,
+.mica-tab-chip:hover .mica-chip-copy,
+.mica-chip-copy:focus-visible {
 	opacity: 0.7;
+}
+
+.mica-chip-copy:hover {
+	opacity: 1;
+	color: var(--mica-accent);
+	background: var(--background-modifier-hover);
 }
 
 .mica-chip-x:hover {
@@ -1066,7 +1108,7 @@ body.mica-theme-solar {
 	position: absolute;
 	top: 4px;
 	right: 4px;
-	display: none;
+	display: inline-flex;
 	gap: 2px;
 	padding: 1px;
 	border: 1px solid var(--background-modifier-border);
@@ -1074,19 +1116,26 @@ body.mica-theme-solar {
 	background: var(--background-primary);
 	box-shadow: var(--shadow-s);
 	z-index: 3;
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.12s;
 }
 body[data-mica-grip="left"] .mica-region-tools {
 	right: auto;
 	left: 4px;
 }
-.mica-region.is-editable:hover:not(:has(.mica-nested-callout:hover)) > .mica-region-tools {
-	display: inline-flex;
+.mica-region:hover:not(:has(.mica-nested-callout:hover)) > .mica-region-tools,
+.mica-region-tools:focus-within {
+	opacity: 1;
+	pointer-events: auto;
 }
 .mica-nested-callout {
 	position: relative;
 }
-.mica-nested-callout:hover:not(:has(.mica-nested-callout:hover)) > .mica-nested-tools {
-	display: inline-flex;
+.mica-nested-callout:hover:not(:has(.mica-nested-callout:hover)) > .mica-nested-tools,
+.mica-nested-tools:focus-within {
+	opacity: 1;
+	pointer-events: auto;
 }
 .mica-region.is-editing > .mica-region-tools {
 	display: none;
@@ -1590,7 +1639,7 @@ body.mica-dnd-active * {
 	position: absolute;
 	top: 4px;
 	right: 4px;
-	display: none;
+	display: inline-flex;
 	gap: 2px;
 	z-index: 3;
 	background: var(--background-primary);
@@ -1598,9 +1647,14 @@ body.mica-dnd-active * {
 	border-radius: 6px;
 	padding: 1px;
 	box-shadow: var(--shadow-s);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.12s;
 }
-.mica-cell:hover:not(:has(.mica-region:hover, .mica-grid-wrap:hover, .mica-tabs:hover)) > .mica-cell-bar {
-	display: inline-flex;
+.mica-cell:hover:not(:has(.mica-region:hover, .mica-grid-wrap:hover, .mica-tabs:hover)) > .mica-cell-bar,
+.mica-cell-bar:focus-within {
+	opacity: 1;
+	pointer-events: auto;
 }
 body[data-mica-grip="left"] .mica-cell-bar {
 	right: auto;
@@ -1755,6 +1809,19 @@ body[data-mica-grip="left"] .mica-cell-bar {
 }
 .mica-vrow:hover .mica-vrow-more {
 	display: inline-flex;
+}
+.mica-vrow.mica-vrow-pager {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	padding-right: 10px;
+	cursor: default;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+.mica-vrow.mica-vrow-pager:hover {
+	background: transparent;
 }
 .mica-versions-main {
 	flex: 1;
@@ -2043,7 +2110,8 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	align-items: center;
 	gap: 6px;
 	padding: 3px 8px;
-	border: 1px solid color-mix(in srgb, var(--mica-co-color, var(--mica-accent)) 45%, var(--background-modifier-border));
+	border: 1px solid
+		color-mix(in srgb, var(--mica-co-color, var(--mica-accent)) 45%, var(--background-modifier-border));
 	border-radius: 7px;
 	color: var(--mica-co-color, var(--mica-accent));
 	font-family: var(--font-monospace);
@@ -2120,7 +2188,7 @@ body[data-mica-grip="left"] .mica-fold-bar {
 	position: absolute;
 	top: 4px;
 	right: 4px;
-	display: none;
+	display: inline-flex;
 	gap: 2px;
 	padding: 1px;
 	border: 1px solid var(--background-modifier-border);
@@ -2128,6 +2196,9 @@ body[data-mica-grip="left"] .mica-fold-bar {
 	background: var(--background-primary);
 	box-shadow: var(--shadow-s);
 	z-index: 5;
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.12s;
 }
 body[data-mica-grip="left"] .mica-grid-tools {
 	right: auto;
@@ -2136,8 +2207,10 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-grid-wrap:hover:not(
 		:has(.mica-cell:hover, .mica-region:hover, .mica-tabs:hover, .mica-grid-wrap .mica-grid-wrap:hover)
 	)
-	> .mica-grid-tools {
-	display: inline-flex;
+	> .mica-grid-tools,
+.mica-grid-tools:focus-within {
+	opacity: 1;
+	pointer-events: auto;
 }
 .mica-col-resizer {
 	position: absolute;
@@ -2321,10 +2394,14 @@ body[data-mica-grip="left"] .mica-grid-tools {
    toward the 40px comfort zone; resize strips widen.
    ═══════════════════════════════════════════════════════════════════════ */
 @media (hover: none), (pointer: coarse) {
-	.mica-region.is-editable > .mica-region-tools,
+	.mica-region > .mica-region-tools,
 	.mica-cell > .mica-cell-bar,
 	.mica-grid-wrap > .mica-grid-tools {
-		display: inline-flex;
+		opacity: 1;
+		pointer-events: auto;
+	}
+	.mica-chip-copy {
+		opacity: 0.8;
 	}
 	.mica-region.is-editing > .mica-region-tools {
 		display: none;

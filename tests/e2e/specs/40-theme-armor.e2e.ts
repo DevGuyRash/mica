@@ -63,10 +63,17 @@ describe("embedded editor under a hostile theme", function () {
 		expect(m.lineOffset).toBeGreaterThanOrEqual(0); // no negative-margin bleed
 		expect(m.scrollLeft).toBe(0);
 
-		// The quick-edit toolbar's MAIN glyphs must hold their size too — the
-		// theme once collapsed them to dots while carets survived.
+		// A visible quick-edit toolbar glyph must hold its size too — the theme
+		// once collapsed glyphs to dots while carets survived. On a narrow/mobile
+		// viewport the first configured tools may correctly live in overflow, so
+		// measuring a hidden first child would only prove `display: none`.
 		const glyph = await browser.executeObsidian(() => {
-			const icon = document.querySelector(".mica-lp .mica-toolbar .mica-tool .svg-icon");
+			const icon = Array.from(document.querySelectorAll(".mica-lp .mica-toolbar .mica-tool .svg-icon")).find(
+				(candidate) => {
+					const rect = candidate.getBoundingClientRect();
+					return rect.width > 0 && rect.height > 0;
+				},
+			);
 			if (!icon) return { w: -1, h: -1 };
 			const r = icon.getBoundingClientRect();
 			return { w: Math.round(r.width), h: Math.round(r.height) };

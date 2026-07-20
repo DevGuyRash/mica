@@ -25,6 +25,18 @@ const COMMON_LANGS = [
 	"text",
 ];
 
+/** The toolbar owns at most one body-level popover. Calling this disposer is
+ * the only supported removal path: overflow panels temporarily own the real
+ * tool elements and must return them before their DOM is detached. */
+let closeActivePopover: (() => void) | null = null;
+let activePopoverBar: HTMLElement | null = null;
+
+/** Plugin-unload safety for a body-level panel whose editor/modal owner may
+ * be torn down by Obsidian without calling its local destroy path first. */
+export function disposeToolbarUi(): void {
+	closeActivePopover?.();
+}
+
 /**
  * Build the markdown toolbar into `host` from the user's configured layout.
  * One implementation serves the quick editor (compact) and the lightbox
@@ -33,7 +45,7 @@ const COMMON_LANGS = [
  * default. Buttons act on the CM6 view from `getView`, so the toolbar never
  * holds a stale editor reference.
  */
-export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorView, compact: boolean): void {
+export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorView, compact: boolean): () => void {
 	const bar = host.createDiv({ cls: `mica-toolbar ${compact ? "is-compact" : ""}` });
 	const layout = toolbarConfig().layout;
 
@@ -109,7 +121,7 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 			if (!widths.length) {
 				for (const el of pieces) widths.push(el.offsetWidth);
 			}
-			document.body.querySelector(".mica-tb-popover")?.remove();
+			closeActivePopover?.();
 			hidden.length = 0;
 			let used = 34; // reserve room for the "more" button
 			let overflowing = false;
@@ -133,6 +145,10 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 	});
 	ro.observe(bar);
 	relayout();
+	return () => {
+		if (activePopoverBar === bar) closeActivePopover?.();
+		ro.disconnect();
+	};
 }
 
 function toolButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {
@@ -243,20 +259,27 @@ function openPopover(
 	if (!bar.isConnected) return;
 	// BODY-level and fixed: no ancestor overflow (narrow cells, the quick
 	// bar's shrink container) can clip the panel.
-	document.body.querySelector(".mica-tb-popover")?.remove();
+	closeActivePopover?.();
 	const panel = document.body.createDiv({ cls: "mica-popover mica-tb-popover" });
+	activePopoverBar = bar;
 	const r = bar.getBoundingClientRect();
 	panel.style.position = "fixed";
 	panel.style.left = `${Math.min(Math.max(8, r.left), window.innerWidth - 356)}px`;
 	panel.style.top = `${Math.min(r.bottom + 4, window.innerHeight - 120)}px`;
 	panel.style.maxHeight = `${Math.max(120, window.innerHeight - r.bottom - 20)}px`;
 	panel.style.overflowY = "auto";
+	let closed = false;
 	const close = (): void => {
+		if (closed) return;
+		closed = true;
 		onClose?.();
 		panel.remove();
 		document.removeEventListener("pointerdown", onOutside, true);
 		document.removeEventListener("keydown", onEsc, true);
+		if (closeActivePopover === close) closeActivePopover = null;
+		if (activePopoverBar === bar) activePopoverBar = null;
 	};
+	closeActivePopover = close;
 	const onOutside = (e: PointerEvent): void => {
 		if (!panel.contains(e.target as Node)) close();
 	};
