@@ -54,12 +54,12 @@ pub fn find_vault(explicit: Option<&Path>, start: &Path) -> Result<PathBuf> {
                 abs.display()
             )));
         }
-        return Ok(abs);
+        return std::fs::canonicalize(&abs).map_err(io_ctx(abs.display().to_string()));
     }
     let mut cur = absolutize(start)?;
     loop {
         if cur.join(".obsidian").is_dir() {
-            return Ok(cur);
+            return std::fs::canonicalize(&cur).map_err(io_ctx(cur.display().to_string()));
         }
         if !cur.pop() {
             return Err(CliError::NotFound(
@@ -100,18 +100,16 @@ pub fn resolve_note(note: &str, vault: Option<&Path>) -> Result<NoteRef> {
 
     // 1. As given (relative to cwd or absolute).
     if typed.is_file() {
-        let abs = absolutize(&typed)?;
-        let vault = find_vault(vault, abs.parent().unwrap_or(Path::new(".")))?;
-        return Ok(NoteRef { abs, vault });
+        let abs = std::fs::canonicalize(&typed).map_err(io_ctx(typed.display().to_string()))?;
+        let root = find_vault(vault, abs.parent().unwrap_or(Path::new(".")))?;
+        return contained_note(abs, root);
     }
     // 2. Vault-relative.
     let root = find_vault(vault, Path::new("."))?;
     let cand = root.join(&typed);
     if cand.is_file() {
-        return Ok(NoteRef {
-            abs: cand,
-            vault: root,
-        });
+        let abs = std::fs::canonicalize(&cand).map_err(io_ctx(cand.display().to_string()))?;
+        return contained_note(abs, root);
     }
     Err(CliError::NotFound(format!(
         "note not found: {note} — looked at {} and {} (vault-relative)",
@@ -140,7 +138,8 @@ pub fn resolve_note(note: &str, vault: Option<&Path>) -> Result<NoteRef> {
 /// ```
 pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
     let mut notes = Vec::new();
-    let mut stack = vec![vault.to_path_buf()];
+    let root = std::fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
+    let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).map_err(io_ctx(dir.display().to_string()))?;
         for entry in entries {
@@ -148,12 +147,21 @@ pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if path.is_dir() {
+            let file_type = entry
+                .file_type()
+                .map_err(io_ctx(path.display().to_string()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 if name.starts_with('.') || name.ends_with(".mica") {
                     continue; // .obsidian, hidden dirs, sidecars
                 }
                 stack.push(path);
-            } else if name.to_ascii_lowercase().ends_with(".md") && !name.starts_with('.') {
+            } else if file_type.is_file()
+                && name.to_ascii_lowercase().ends_with(".md")
+                && !name.starts_with('.')
+            {
                 notes.push(path);
             }
         }
@@ -181,7 +189,8 @@ pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
 /// ```
 pub fn vault_sidecars(vault: &Path) -> Result<Vec<PathBuf>> {
     let mut sidecars = Vec::new();
-    let mut stack = vec![vault.to_path_buf()];
+    let root = std::fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
+    let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).map_err(io_ctx(dir.display().to_string()))?;
         for entry in entries {
@@ -189,7 +198,10 @@ pub fn vault_sidecars(vault: &Path) -> Result<Vec<PathBuf>> {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !path.is_dir() || name.starts_with('.') {
+            let file_type = entry
+                .file_type()
+                .map_err(io_ctx(path.display().to_string()))?;
+            if file_type.is_symlink() || !file_type.is_dir() || name.starts_with('.') {
                 continue;
             }
             if name.ends_with(".mica") {
@@ -201,6 +213,17 @@ pub fn vault_sidecars(vault: &Path) -> Result<Vec<PathBuf>> {
     }
     sidecars.sort();
     Ok(sidecars)
+}
+
+fn contained_note(abs: PathBuf, vault: PathBuf) -> Result<NoteRef> {
+    if !abs.starts_with(&vault) {
+        return Err(CliError::BadArgs(format!(
+            "note resolves outside the vault: {} — choose a note contained by {}",
+            abs.display(),
+            vault.display()
+        )));
+    }
+    Ok(NoteRef { abs, vault })
 }
 
 /// Make `p` absolute without requiring it to exist (unlike `canonicalize`).
@@ -253,5 +276,30 @@ mod tests {
             normalize(Path::new("/a/b/../c/./d")),
             PathBuf::from("/a/c/d")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_walks_do_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let vault = temp.path().join("vault");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(vault.join(".obsidian")).expect("vault marker");
+        std::fs::create_dir_all(outside.join("Outside.mica")).expect("outside sidecar");
+        std::fs::write(outside.join("Outside.md"), "outside").expect("outside note");
+        symlink(&outside, vault.join("linked")).expect("directory symlink");
+        symlink(outside.join("Outside.md"), vault.join("escape.md")).expect("file symlink");
+
+        assert!(vault_notes(&vault).expect("walk notes").is_empty());
+        assert!(vault_sidecars(&vault).expect("walk sidecars").is_empty());
+        assert!(matches!(
+            resolve_note(
+                vault.join("escape.md").to_str().expect("UTF-8 path"),
+                Some(&vault)
+            ),
+            Err(CliError::BadArgs(_))
+        ));
     }
 }

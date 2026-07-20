@@ -8,15 +8,16 @@ use crate::blocks::{self, Located};
 use crate::cli::{CellCmd, Cli, Cmd, GridCmd, NoteBlock, TabCmd};
 use crate::engine;
 use crate::error::{io_ctx, CliError, Result};
+use crate::fsutil;
 use crate::output::{rel_time, Style};
 use crate::sidecar;
 use crate::vault::{self, NoteRef};
 use mica_core::{
-    apply_op_impl, diff_impl, ensure_ids_impl, hash_content_impl, make_patch_impl,
+    apply_ops_impl, diff_impl, ensure_ids_impl, hash_content_impl, make_patch_impl,
     migrate_tabs_impl, new_id_impl, parse_block_impl, reconcile_impl, scan_impl, serialize_impl,
     ContentRef, Cst, Event, GroupKind, Node, SidecarRef, StructOp, VersionMeta,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -313,31 +314,40 @@ fn apply_structural(
     target: &NoteBlock,
     op: impl FnOnce(&Located, &Cst) -> Result<StructOp>,
 ) -> Result<()> {
-    let (note, _, _) = load(ctx, target)?;
-    engine::snapshot_note(&note, false, true)?; // pre-image + id stamping
-                                                // Reload: stamping may have rewritten the doc.
-    let doc = engine::read_doc(&note.abs)?;
-    let located = blocks::locate(&doc, target.block.as_deref())?;
-    let mut cst = parse_block_impl(&located.content);
-    let op = op(&located, &cst)?;
-    if !apply_op_impl(&mut cst, &op) {
-        return Err(CliError::BadArgs(
-            "the operation does not apply (missing target or invalid move) — check `mica ls --tree`".to_string(),
-        ));
-    }
-    let mut next = serialize_impl(&cst);
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    let mut out = String::with_capacity(
-        doc.len() - (located.span.content_end - located.span.content_start) + next.len(),
-    );
-    out.push_str(&doc[..located.span.content_start]);
-    out.push_str(&next);
-    out.push_str(&doc[located.span.content_end..]);
-    std::fs::write(&note.abs, out).map_err(io_ctx(note.abs.display().to_string()))?;
-    engine::snapshot_note(&note, false, true)?; // change-gated: structure-only stays quiet
-    Ok(())
+    apply_structural_many(ctx, target, |located, cst| {
+        op(located, cst).map(|op| vec![op])
+    })
+}
+
+/// Apply a sequence of dependent reducer operations and publish one note write.
+fn apply_structural_many(
+    ctx: &Ctx,
+    target: &NoteBlock,
+    ops: impl FnOnce(&Located, &Cst) -> Result<Vec<StructOp>>,
+) -> Result<()> {
+    let note = ctx.note(&target.note)?;
+    let published = engine::mutate_exact(&note, |doc| {
+        let located = blocks::locate(doc, target.block.as_deref())?;
+        let mut cst = parse_block_impl(&located.content);
+        let ops = ops(&located, &cst)?;
+        if !apply_ops_impl(&mut cst, &ops) {
+            return Err(CliError::BadArgs(
+                "the operation does not apply (missing target, invalid text, or invalid move) — check `mica ls --tree`".to_string(),
+            ));
+        }
+        let mut next = serialize_impl(&cst);
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push_str(engine::preferred_line_ending(doc));
+        }
+        let mut out = String::with_capacity(
+            doc.len() - (located.span.content_end - located.span.content_start) + next.len(),
+        );
+        out.push_str(&doc[..located.span.content_start]);
+        out.push_str(&next);
+        out.push_str(&doc[located.span.content_end..]);
+        Ok(out)
+    })?;
+    engine::snapshot_published(&note, &published, false)
 }
 
 /// Resolve a tab ORDINAL (0-based among tabs) to a raw child index.
@@ -417,12 +427,8 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
             path,
             at,
         } => {
-            // Two-step when a title is requested: insert, then rename the new tab
-            // (the factory always creates "New tab").
-            let mut inserted_group_path: Option<Vec<usize>> = None;
-            let mut insert_at: Option<usize> = None;
-            apply_structural(ctx, target, |_, cst| {
-                match tabs_path(cst, path.as_deref())? {
+            apply_structural_many(ctx, target, |_, cst| {
+                let (insert, group_path, index) = match tabs_path(cst, path.as_deref())? {
                     Some(gp) => {
                         let raw_at = match at {
                             Some(ordinal) => {
@@ -430,47 +436,39 @@ pub fn tab(ctx: &Ctx, cmd: &TabCmd) -> Result<()> {
                             }
                             None => group_len(cst, &gp)?,
                         };
-                        inserted_group_path = Some(gp.clone());
-                        insert_at = Some(raw_at);
-                        Ok(StructOp::InsertTab {
-                            path: gp,
-                            at: raw_at,
-                        })
+                        (
+                            StructOp::InsertTab {
+                                path: gp.clone(),
+                                at: raw_at,
+                            },
+                            gp,
+                            raw_at,
+                        )
                     }
                     None => {
                         // No tabs group yet: create one at the root's end.
                         let root_len = group_len(cst, &[])?;
-                        inserted_group_path = None;
-                        Ok(StructOp::InsertGroup {
-                            path: vec![],
-                            at: root_len,
-                            kind: GroupKind::Tabs,
-                        })
+                        (
+                            StructOp::InsertGroup {
+                                path: vec![],
+                                at: root_len,
+                                kind: GroupKind::Tabs,
+                            },
+                            vec![root_len],
+                            0,
+                        )
                     }
-                }
-            })?;
-            if title != "New tab" {
-                // Rename the tab we just created (last tab of the target group).
-                apply_structural(ctx, target, |_, cst| {
-                    let gp =
-                        match &inserted_group_path {
-                            Some(gp) => gp.clone(),
-                            None => blocks::first_container_in(&cst.children, "tabs").ok_or_else(
-                                || CliError::Corrupt("tab group vanished after insert".to_string()),
-                            )?,
-                        };
-                    let index = match insert_at {
-                        Some(i) => i,
-                        None => tab_child_index(cst, &gp, 0)?,
-                    };
-                    Ok(StructOp::RenameTab {
-                        path: gp,
+                };
+                let mut ops = vec![insert];
+                if title != "New tab" {
+                    ops.push(StructOp::RenameTab {
+                        path: group_path,
                         index,
                         title: title.clone(),
-                    })
-                })?;
-            }
-            Ok(())
+                    });
+                }
+                Ok(ops)
+            })
         }
         TabCmd::Rm {
             target,
@@ -812,6 +810,11 @@ pub fn snapshot(ctx: &Ctx, note: &str, force: bool) -> Result<()> {
 
 /// `mica watch` — poll the vault, snapshot notes that settle.
 pub fn watch(ctx: &Ctx, debounce: u64, interval: u64) -> Result<()> {
+    if interval == 0 {
+        return Err(CliError::BadArgs(
+            "watch interval must be at least one second — pass --interval 1 or greater".to_string(),
+        ));
+    }
     let root = ctx.vault_root()?;
     let s = &ctx.style;
     eprintln!(
@@ -831,7 +834,10 @@ pub fn watch(ctx: &Ctx, debounce: u64, interval: u64) -> Result<()> {
     }
     loop {
         std::thread::sleep(std::time::Duration::from_secs(interval));
-        for n in vault::vault_notes(&root)? {
+        let notes = vault::vault_notes(&root)?;
+        let current: BTreeSet<PathBuf> = notes.iter().cloned().collect();
+        retain_current_watch_paths(&mut mtimes, &mut dirty, &current);
+        for n in notes {
             let Ok(meta) = std::fs::metadata(&n) else {
                 continue;
             };
@@ -871,6 +877,15 @@ pub fn watch(ctx: &Ctx, debounce: u64, interval: u64) -> Result<()> {
     }
 }
 
+fn retain_current_watch_paths(
+    mtimes: &mut BTreeMap<PathBuf, std::time::SystemTime>,
+    dirty: &mut BTreeMap<PathBuf, std::time::Instant>,
+    current: &BTreeSet<PathBuf>,
+) {
+    mtimes.retain(|path, _| current.contains(path));
+    dirty.retain(|path, _| current.contains(path));
+}
+
 /// `mica migrate` — legacy ```tabs conversion (note or whole vault).
 pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&str>) -> Result<()> {
     let callouts = callouts.unwrap_or(OBSIDIAN_CALLOUT_TYPES);
@@ -890,6 +905,44 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
     let s = &ctx.style;
     let mut reports = Vec::new();
     for n in notes {
+        if let Some(mut journal) = sidecar::read_migration_journal(&n.abs)? {
+            if journal.status == "pending" {
+                let migrated_blocks: BTreeSet<&str> = journal
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::AddVersion {
+                            block,
+                            origin: Some(origin),
+                            ..
+                        } if origin.starts_with("migrated:") => Some(block.as_str()),
+                        Event::SetHead { .. } | Event::Label { .. } => None,
+                        Event::AddVersion { .. } => None,
+                    })
+                    .collect();
+                let imported = journal
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            Event::AddVersion {
+                                origin: Some(origin),
+                                ..
+                            } if origin.starts_with("migrated:")
+                        )
+                    })
+                    .count();
+                let blocks = sidecar::read_object(&n.abs, &journal.original)?
+                    .map(|original| migrate_tabs_impl(&original, callouts).blocks.len())
+                    .unwrap_or(migrated_blocks.len());
+                if !dry_run {
+                    resume_migration(&n, &mut journal)?;
+                }
+                reports.push((n.vault_rel(), blocks, imported));
+                continue;
+            }
+        }
         let doc = engine::read_doc(&n.abs)?;
         let result = migrate_tabs_impl(&doc, callouts);
         if !result.changed {
@@ -897,12 +950,16 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
         }
         let imported: usize = result.blocks.iter().map(|b| b.versions.len()).sum();
         if !dry_run {
-            // Lossless: store the entire original note as a content-addressed
-            // object BEFORE any write.
-            let backup = hash_content_impl(&doc);
-            sidecar::write_object(&n.abs, &backup, &doc)?;
-            std::fs::write(&n.abs, &result.doc).map_err(io_ctx(n.abs.display().to_string()))?;
-            ensure_note_frontmatter_id(&n.abs)?;
+            let migrated = with_note_frontmatter_id(&result.doc);
+            engine::validate_unique_ids(&migrated)?;
+            // Stage both exact whole-note generations and every archive object
+            // before publishing the live note. The pending journal below is the
+            // durable, discoverable reference that makes an interrupted run
+            // resumable rather than an anonymous orphan object.
+            let original_hash = hash_content_impl(&doc);
+            let migrated_hash = hash_content_impl(&migrated);
+            sidecar::write_object(&n.abs, &original_hash, &doc)?;
+            sidecar::write_object(&n.abs, &migrated_hash, &migrated)?;
 
             // Archived callouts become labeled versions, backdated a second
             // apart so the (ts, eid) fold orders them before the head below.
@@ -915,7 +972,7 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                     sidecar::write_object(&n.abs, &hash, &v.content)?;
                     events.push(Event::AddVersion {
                         eid: new_id_impl(),
-                        ts: now - (count - i as u64) * 1000,
+                        ts: now.saturating_sub((count - i as u64).saturating_mul(1000)),
                         block: block.id.clone(),
                         hash,
                         label: Some(v.label.clone()),
@@ -924,8 +981,17 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                     });
                 }
             }
-            sidecar::append_events(&n.abs, &events)?;
-            engine::snapshot_note(&n, false, true)?; // head becomes the newest version
+            let mut journal = sidecar::MigrationJournal {
+                format: 1,
+                status: "pending".to_string(),
+                note: n.vault_rel(),
+                original: original_hash,
+                migrated: migrated_hash,
+                events,
+            };
+            sidecar::write_migration_journal(&n.abs, &journal)?;
+            fsutil::atomic_write_if_unchanged(&n.abs, doc.as_bytes(), migrated.as_bytes())?;
+            finish_migration(&n, &migrated, &mut journal)?;
         }
         reports.push((n.vault_rel(), result.blocks.len(), imported));
     }
@@ -957,39 +1023,119 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
     Ok(())
 }
 
+/// Resume a pending migration from either exact journaled generation.
+fn resume_migration(note: &NoteRef, journal: &mut sidecar::MigrationJournal) -> Result<()> {
+    let original = sidecar::read_object(&note.abs, &journal.original)?.ok_or_else(|| {
+        CliError::Corrupt(format!(
+            "migration pre-image object {} is missing — restore it before retrying",
+            journal.original
+        ))
+    })?;
+    let migrated = sidecar::read_object(&note.abs, &journal.migrated)?.ok_or_else(|| {
+        CliError::Corrupt(format!(
+            "migration result object {} is missing — restore it before retrying",
+            journal.migrated
+        ))
+    })?;
+    let current = engine::read_doc(&note.abs)?;
+    if current == original {
+        fsutil::atomic_write_if_unchanged(&note.abs, current.as_bytes(), migrated.as_bytes())?;
+    } else if current != migrated {
+        return Err(CliError::Corrupt(format!(
+            "note diverged from both generations in pending migration journal: {} — current contents were preserved",
+            note.abs.display()
+        )));
+    }
+    finish_migration(note, &migrated, journal)
+}
+
+fn finish_migration(
+    note: &NoteRef,
+    migrated: &str,
+    journal: &mut sidecar::MigrationJournal,
+) -> Result<()> {
+    let existing = sidecar::read_ledger(&note.abs)?;
+    let existing_ids: std::collections::HashSet<&str> = existing
+        .iter()
+        .map(|event| match event {
+            Event::AddVersion { eid, .. }
+            | Event::SetHead { eid, .. }
+            | Event::Label { eid, .. } => eid.as_str(),
+        })
+        .collect();
+    let missing: Vec<Event> = journal
+        .events
+        .iter()
+        .filter(|event| {
+            let eid = match event {
+                Event::AddVersion { eid, .. }
+                | Event::SetHead { eid, .. }
+                | Event::Label { eid, .. } => eid.as_str(),
+            };
+            !existing_ids.contains(eid)
+        })
+        .cloned()
+        .collect();
+    sidecar::append_events(&note.abs, &missing)?;
+    let blocks = scan_impl(migrated);
+    engine::snapshot_exact(note, migrated, &blocks, false)?;
+    journal.status = "complete".to_string();
+    sidecar::write_migration_journal(&note.abs, journal)
+}
+
 /// `mica prepare` — stamp frontmatter `mica-id` + block ids.
 pub fn prepare(ctx: &Ctx, note: &str) -> Result<()> {
     let note = ctx.note(note)?;
-    ensure_note_frontmatter_id(&note.abs)?;
     let doc = engine::read_doc(&note.abs)?;
-    let next = ensure_ids_impl(&doc);
+    let next = ensure_ids_impl(&with_note_frontmatter_id(&doc));
+    engine::validate_unique_ids(&next)?;
     if next != doc {
-        std::fs::write(&note.abs, next).map_err(io_ctx(note.abs.display().to_string()))?;
+        fsutil::atomic_write_if_unchanged(&note.abs, doc.as_bytes(), next.as_bytes())?;
     }
     eprintln!("mica: {} prepared", note.vault_rel());
     Ok(())
 }
 
-/// Insert `mica-id` into YAML frontmatter (creating the frontmatter if absent).
-/// Never touches other keys.
-fn ensure_note_frontmatter_id(path: &Path) -> Result<()> {
-    let doc = engine::read_doc(path)?;
-    if engine::frontmatter_mica_id(&doc).is_some() {
-        return Ok(());
+/// Return `doc` with a frontmatter `mica-id`, preserving BOM and line endings.
+fn with_note_frontmatter_id(doc: &str) -> String {
+    if engine::frontmatter_mica_id(doc).is_some() {
+        return doc.to_string();
     }
-    let id = new_id_impl();
-    let next = if let Some(body) = doc.strip_prefix("---\n") {
-        if let Some(end) = body.find("\n---") {
-            // Existing frontmatter: append before the closer.
-            let (fm, rest) = body.split_at(end);
-            format!("---\n{fm}\nmica-id: {id}{rest}")
-        } else {
-            format!("---\nmica-id: {id}\n---\n\n{doc}")
-        }
-    } else {
-        format!("---\nmica-id: {id}\n---\n\n{doc}")
+    let (bom, body) = match doc.strip_prefix('\u{feff}') {
+        Some(body) => ("\u{feff}", body),
+        None => ("", doc),
     };
-    std::fs::write(path, next).map_err(io_ctx(path.display().to_string()))
+    let eol = if body.starts_with("---\r\n")
+        || body
+            .find('\n')
+            .is_some_and(|index| index > 0 && body.as_bytes().get(index - 1) == Some(&b'\r'))
+    {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let opener = format!("---{eol}");
+    let id = new_id_impl();
+    if let Some(frontmatter) = body.strip_prefix(&opener) {
+        if let Some(close) = frontmatter_closer(frontmatter) {
+            let (properties, rest) = frontmatter.split_at(close);
+            return format!("{bom}{opener}{properties}mica-id: {id}{eol}{rest}");
+        }
+    }
+    format!("{bom}---{eol}mica-id: {id}{eol}---{eol}{eol}{body}")
+}
+
+fn frontmatter_closer(frontmatter: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in frontmatter.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+        if matches!(trimmed, "---" | "...") {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// `mica repair` — reconcile sidecars ↔ notes; rehome renamed notes.
@@ -1044,23 +1190,15 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     }
     let actions = reconcile_impl(&content, &screfs);
 
-    // Rehome: a sidecar whose blocks live in a note elsewhere follows the note.
-    let note_by_block: BTreeMap<&str, &str> = content
-        .iter()
-        .map(|c| (c.block.as_str(), c.note.as_str()))
-        .collect();
+    // Rehome only when every represented id resolves to one unambiguous note.
+    // A copied block id must never make history follow whichever note sorted last.
+    let occurrences_by_block = content_occurrences(&content);
     let mut rehomed = Vec::new();
     for (sc, events) in sidecars.iter().zip(&ledgers) {
-        let target = events.iter().find_map(|e| {
-            let block = match e {
-                Event::AddVersion { block, .. }
-                | Event::SetHead { block, .. }
-                | Event::Label { block, .. } => block,
-            };
-            note_by_block.get(block.as_str())
-        });
-        let Some(note_rel) = target else { continue };
-        let expected = sidecar::sidecar_dir(&root.join(note_rel));
+        let Some(note_rel) = unambiguous_rehome_target(&occurrences_by_block, events) else {
+            continue;
+        };
+        let expected = sidecar::sidecar_dir(&root.join(&note_rel));
         if &expected != sc && !expected.exists() {
             std::fs::rename(sc, &expected).map_err(io_ctx(sc.display().to_string()))?;
             rehomed.push((sc.clone(), expected));
@@ -1091,6 +1229,45 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+fn content_occurrences(content: &[ContentRef]) -> BTreeMap<&str, Vec<&str>> {
+    let mut occurrences_by_block: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for reference in content {
+        occurrences_by_block
+            .entry(reference.block.as_str())
+            .or_default()
+            .push(reference.note.as_str());
+    }
+    occurrences_by_block
+}
+
+fn unambiguous_rehome_target(
+    occurrences_by_block: &BTreeMap<&str, Vec<&str>>,
+    events: &[Event],
+) -> Option<String> {
+    let mut blocks = std::collections::BTreeSet::new();
+    for event in events {
+        let block = match event {
+            Event::AddVersion { block, .. }
+            | Event::SetHead { block, .. }
+            | Event::Label { block, .. } => block,
+        };
+        blocks.insert(block.as_str());
+    }
+
+    let mut targets = std::collections::BTreeSet::new();
+    for block in blocks {
+        let occurrences = occurrences_by_block.get(block)?;
+        if occurrences.len() != 1 {
+            return None;
+        }
+        targets.insert(occurrences[0]);
+        if targets.len() > 1 {
+            return None;
+        }
+    }
+    targets.pop_first().map(str::to_string)
+}
+
 /// `mica doctor` — sidecar health report.
 pub fn doctor(ctx: &Ctx) -> Result<()> {
     let root = ctx.vault_root()?;
@@ -1114,17 +1291,73 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 "sidecar": sc.display().to_string(), "kind": "orphan-sidecar"
             }));
         }
+        match sidecar::read_migration_journal(&note) {
+            Ok(Some(journal)) => {
+                if journal.status == "pending" {
+                    problems += 1;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(), "kind": "pending-migration"
+                    }));
+                }
+                for (role, hash) in [
+                    ("original", journal.original.as_str()),
+                    ("migrated", journal.migrated.as_str()),
+                ] {
+                    match sidecar::read_object(&note, hash) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            problems += 1;
+                            findings.push(serde_json::json!({
+                                "sidecar": sc.display().to_string(), "kind": "missing-migration-object",
+                                "role": role, "hash": hash
+                            }));
+                        }
+                        Err(error) => {
+                            problems += 1;
+                            findings.push(serde_json::json!({
+                                "sidecar": sc.display().to_string(), "kind": "corrupt-migration-object",
+                                "role": role, "hash": hash, "detail": error.to_string()
+                            }));
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                problems += 1;
+                findings.push(serde_json::json!({
+                    "sidecar": sc.display().to_string(), "kind": "corrupt-migration-journal",
+                    "detail": error.to_string()
+                }));
+            }
+        }
         // Every recorded version must have its object.
         let events = sidecar::read_ledger_at(&ledger)?;
         let st = mica_core::fold_ledger_impl(&events);
         for (block, bs) in &st {
-            for v in &bs.versions {
-                if !object_exists(&sc, &v.hash) {
-                    problems += 1;
-                    findings.push(serde_json::json!({
-                        "sidecar": sc.display().to_string(), "kind": "missing-object",
-                        "block": block, "hash": v.hash
-                    }));
+            let hashes: BTreeSet<&str> = bs
+                .versions
+                .iter()
+                .map(|version| version.hash.as_str())
+                .chain(bs.head.as_deref())
+                .collect();
+            for hash in hashes {
+                match sidecar::read_object(&note, hash) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        problems += 1;
+                        findings.push(serde_json::json!({
+                            "sidecar": sc.display().to_string(), "kind": "missing-object",
+                            "block": block, "hash": hash
+                        }));
+                    }
+                    Err(error) => {
+                        problems += 1;
+                        findings.push(serde_json::json!({
+                            "sidecar": sc.display().to_string(), "kind": "corrupt-object",
+                            "block": block, "hash": hash, "detail": error.to_string()
+                        }));
+                    }
                 }
             }
         }
@@ -1162,18 +1395,41 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 f["count"],
                 sc,
             ),
+            "corrupt-object" => println!(
+                "  {} corrupt object {} for block {} in {}: {}",
+                s.red("•"),
+                s.cyan(f["hash"].as_str().unwrap_or("?")),
+                f["block"].as_str().unwrap_or("?"),
+                sc,
+                f["detail"].as_str().unwrap_or("digest verification failed"),
+            ),
+            "pending-migration" => println!(
+                "  {} pending migration can be resumed in {}",
+                s.yellow("•"),
+                sc,
+            ),
+            "missing-migration-object" | "corrupt-migration-object" => println!(
+                "  {} {} migration {} object {} in {}",
+                s.red("•"),
+                if kind.starts_with("missing") {
+                    "missing"
+                } else {
+                    "corrupt"
+                },
+                f["role"].as_str().unwrap_or("recovery"),
+                f["hash"].as_str().unwrap_or("?"),
+                sc,
+            ),
+            "corrupt-migration-journal" => println!(
+                "  {} corrupt migration journal in {}: {}",
+                s.red("•"),
+                sc,
+                f["detail"].as_str().unwrap_or("invalid journal"),
+            ),
             _ => println!("  • {f}"),
         }
     }
     Ok(())
-}
-
-/// Whether a sidecar contains the recorded object in a supported storage form.
-fn object_exists(sidecar: &Path, hash: &str) -> bool {
-    let objects = sidecar.join("objects");
-    let stem = hash.replace(':', "-");
-    objects.join(format!("{stem}.mica.md")).is_file()
-        || objects.join(format!("{stem}.mica.gz")).is_file()
 }
 
 /// Resolve a version selector (`vN`, `b3:hash`, or unique hash prefix) against
@@ -1207,7 +1463,8 @@ pub fn resolve_version(versions: &[VersionMeta], selector: &str) -> Result<Strin
     {
         return versions
             .get(n.checked_sub(1).unwrap_or(usize::MAX))
-            .map(|v| v.hash.clone())
+            .map(|v| &v.hash)
+            .cloned()
             .ok_or_else(|| {
                 CliError::NotFound(format!("no version v{n} — only {} stored", versions.len()))
             });
@@ -1267,16 +1524,199 @@ mod tests {
     use super::*;
 
     #[test]
-    fn object_exists_accepts_plain_and_compressed_storage() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let sidecar = temp.path().join("N.mica");
-        let objects = sidecar.join("objects");
-        std::fs::create_dir_all(&objects).expect("objects dir");
+    fn watch_state_forgets_deleted_paths() {
+        let kept = PathBuf::from("kept.md");
+        let deleted = PathBuf::from("deleted.md");
+        let mut mtimes = BTreeMap::from([
+            (kept.clone(), std::time::SystemTime::UNIX_EPOCH),
+            (deleted.clone(), std::time::SystemTime::UNIX_EPOCH),
+        ]);
+        let now = std::time::Instant::now();
+        let mut dirty = BTreeMap::from([(kept.clone(), now), (deleted.clone(), now)]);
+        let current = BTreeSet::from([kept.clone()]);
 
-        std::fs::write(objects.join("b3-plain.mica.md"), "plain").expect("plain object");
-        assert!(object_exists(&sidecar, "b3:plain"));
+        retain_current_watch_paths(&mut mtimes, &mut dirty, &current);
 
-        std::fs::write(objects.join("b3-compressed.mica.gz"), b"gzip").expect("gzip object");
-        assert!(object_exists(&sidecar, "b3:compressed"));
+        assert_eq!(mtimes.keys().collect::<Vec<_>>(), vec![&kept]);
+        assert_eq!(dirty.keys().collect::<Vec<_>>(), vec![&kept]);
+    }
+
+    #[test]
+    fn repair_rehome_requires_one_occurrence_not_one_distinct_note() {
+        let content = vec![
+            ContentRef {
+                block: "copied".into(),
+                note: "Note.md".into(),
+            },
+            ContentRef {
+                block: "copied".into(),
+                note: "Note.md".into(),
+            },
+        ];
+        let events = vec![Event::SetHead {
+            eid: "event".into(),
+            ts: 1,
+            block: "copied".into(),
+            hash: hash_content_impl("body"),
+        }];
+        let occurrences = content_occurrences(&content);
+        assert_eq!(unambiguous_rehome_target(&occurrences, &events), None);
+    }
+
+    #[test]
+    fn frontmatter_id_uses_an_existing_empty_block() {
+        let source = "---\n---\n\nbody\n";
+        let prepared = with_note_frontmatter_id(source);
+
+        assert!(prepared.starts_with("---\nmica-id: "));
+        assert_eq!(prepared.matches("---\n").count(), 2);
+        assert!(prepared.ends_with("---\n\nbody\n"));
+    }
+
+    #[test]
+    fn frontmatter_id_preserves_yaml_document_end_marker() {
+        let existing = "---\ntitle: Example\nmica-id: stable-id\n...\nbody\n";
+        assert_eq!(with_note_frontmatter_id(existing), existing);
+
+        let missing = "---\ntitle: Example\n...\nbody\n";
+        let prepared = with_note_frontmatter_id(missing);
+        assert!(prepared.starts_with("---\ntitle: Example\nmica-id: "));
+        assert!(prepared.ends_with("\n...\nbody\n"));
+        assert_eq!(prepared.matches("---\n").count(), 1);
+    }
+
+    fn pending_migration_fixture(
+        current: &str,
+    ) -> (tempfile::TempDir, NoteRef, sidecar::MigrationJournal) {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let note = NoteRef {
+            abs: dir.path().join("Note.md"),
+            vault: dir.path().to_path_buf(),
+        };
+        std::fs::write(&note.abs, current).expect("seed note");
+        let original = "```mica id=block\nold\n```\n";
+        let migrated = "```mica id=block\nnew\n```\n";
+        let archive = "archived\n";
+        let original_hash = hash_content_impl(original);
+        let migrated_hash = hash_content_impl(migrated);
+        let archive_hash = hash_content_impl(archive);
+        sidecar::write_object(&note.abs, &original_hash, original).expect("original object");
+        sidecar::write_object(&note.abs, &migrated_hash, migrated).expect("migrated object");
+        sidecar::write_object(&note.abs, &archive_hash, archive).expect("archive object");
+        let journal = sidecar::MigrationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original: original_hash,
+            migrated: migrated_hash,
+            events: vec![Event::AddVersion {
+                eid: "migration-event".to_string(),
+                ts: 1,
+                block: "block".to_string(),
+                hash: archive_hash,
+                label: Some("archive".to_string()),
+                origin: Some("migrated:test".to_string()),
+                parent: None,
+            }],
+        };
+        sidecar::write_migration_journal(&note.abs, &journal).expect("pending journal");
+        (dir, note, journal)
+    }
+
+    #[test]
+    fn migration_resumes_from_original_or_migrated_generation() {
+        for current in [
+            "```mica id=block\nold\n```\n",
+            "```mica id=block\nnew\n```\n",
+        ] {
+            let (_dir, note, mut journal) = pending_migration_fixture(current);
+            resume_migration(&note, &mut journal).expect("resume migration");
+            assert_eq!(
+                engine::read_doc(&note.abs).expect("read note"),
+                "```mica id=block\nnew\n```\n"
+            );
+            let stored = sidecar::read_migration_journal(&note.abs)
+                .expect("read journal")
+                .expect("journal exists");
+            assert_eq!(stored.status, "complete");
+            assert!(sidecar::read_object(&note.abs, &stored.original)
+                .expect("read original")
+                .is_some());
+            let state = engine::state(&note.abs).expect("state");
+            assert_eq!(state.get("block").expect("block").versions.len(), 2);
+        }
+    }
+
+    #[test]
+    fn pending_migration_never_overwrites_a_divergent_note() {
+        let divergent = "```mica id=block\nuser edit\n```\n";
+        let (_dir, note, mut journal) = pending_migration_fixture(divergent);
+        assert!(matches!(
+            resume_migration(&note, &mut journal),
+            Err(CliError::Corrupt(message)) if message.contains("diverged")
+        ));
+        assert_eq!(engine::read_doc(&note.abs).expect("read note"), divergent);
+        assert_eq!(
+            sidecar::read_migration_journal(&note.abs)
+                .expect("read journal")
+                .expect("journal")
+                .status,
+            "pending"
+        );
+    }
+
+    #[test]
+    fn migration_dry_run_does_not_resume_pending_journal() {
+        let original = "```mica id=block\nold\n```\n";
+        let (_dir, note, _journal) = pending_migration_fixture(original);
+        let ctx = Ctx {
+            vault: Some(note.vault.clone()),
+            json: false,
+            style: Style::forced(false),
+        };
+        migrate(&ctx, Some("Note.md"), true, None).expect("dry run");
+        assert_eq!(engine::read_doc(&note.abs).expect("read note"), original);
+        assert_eq!(
+            sidecar::read_migration_journal(&note.abs)
+                .expect("read journal")
+                .expect("journal")
+                .status,
+            "pending"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_migration_ledger_append_remains_recoverable() {
+        use std::os::unix::fs::symlink;
+
+        let original = "```mica id=block\nold\n```\n";
+        let (_dir, note, mut journal) = pending_migration_fixture(original);
+        let outside = note.vault.join("outside-ledger");
+        std::fs::write(&outside, b"outside").expect("outside file");
+        symlink(&outside, sidecar::ledger_path(&note.abs)).expect("ledger symlink");
+
+        assert!(matches!(
+            resume_migration(&note, &mut journal),
+            Err(CliError::Corrupt(_))
+        ));
+        let pending = sidecar::read_migration_journal(&note.abs)
+            .expect("read journal")
+            .expect("journal");
+        assert_eq!(pending.status, "pending");
+        assert!(sidecar::read_object(&note.abs, &pending.original)
+            .expect("read original")
+            .is_some());
+        assert_eq!(std::fs::read(&outside).expect("outside"), b"outside");
+
+        std::fs::remove_file(sidecar::ledger_path(&note.abs)).expect("remove bad ledger");
+        resume_migration(&note, &mut journal).expect("retry migration");
+        assert_eq!(
+            sidecar::read_migration_journal(&note.abs)
+                .expect("read journal")
+                .expect("journal")
+                .status,
+            "complete"
+        );
     }
 }

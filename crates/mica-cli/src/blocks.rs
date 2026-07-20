@@ -54,11 +54,23 @@ pub fn locate(doc: &str, selector: Option<&str>) -> Result<Located> {
             closed.len()
         )));
     };
-    if let Some(b) = closed.iter().find(|b| b.id() == Some(sel)) {
-        return Ok(pick(b));
+    let mut id_matches = closed.iter().filter(|b| b.id() == Some(sel));
+    if let Some(block) = id_matches.next() {
+        if id_matches.next().is_some() {
+            return Err(CliError::BadArgs(format!(
+                "block id '{sel}' is duplicated in this note — assign unique block ids before editing"
+            )));
+        }
+        return Ok(pick(block));
     }
-    if let Some(b) = closed.iter().find(|b| b.get("name") == Some(sel)) {
-        return Ok(pick(b));
+    let mut name_matches = closed.iter().filter(|b| b.get("name") == Some(sel));
+    if let Some(block) = name_matches.next() {
+        if name_matches.next().is_some() {
+            return Err(CliError::BadArgs(format!(
+                "block name '{sel}' is ambiguous in this note — use a unique block id"
+            )));
+        }
+        return Ok(pick(block));
     }
     if let Ok(idx) = sel.parse::<usize>() {
         if (1..=closed.len()).contains(&idx) {
@@ -230,6 +242,21 @@ mod tests {
         assert!(matches!(
             locate("no blocks here\n", None),
             Err(CliError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_id_and_name_are_rejected_as_ambiguous() {
+        let duplicate_id = "```mica id=same\na\n```\n```mica id=same\nb\n```\n";
+        assert!(matches!(
+            locate(duplicate_id, Some("same")),
+            Err(CliError::BadArgs(_))
+        ));
+
+        let duplicate_name = "```mica id=a name=Same\na\n```\n```mica id=b name=Same\nb\n```\n";
+        assert!(matches!(
+            locate(duplicate_name, Some("Same")),
+            Err(CliError::BadArgs(_))
         ));
     }
 

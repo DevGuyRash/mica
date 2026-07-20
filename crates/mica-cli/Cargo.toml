@@ -22,8 +22,10 @@ clap = { version = "4", default-features = false, features = ["std", "derive", "
 serde = { version = "1", features = ["derive"] }
 # The sidecar ledger/manifest formats ARE JSON(L); core types already derive serde.
 serde_json = "1"
-
-[dev-dependencies]
 # Integration tests create throwaway vaults; trivial to hand-roll but std has no
-# recursive temp-dir with cleanup-on-drop.
+# recursive temp-dir with cleanup-on-drop. Production persistence also uses its
+# cross-platform atomic replacement (`MOVEFILE_REPLACE_EXISTING` on Windows).
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

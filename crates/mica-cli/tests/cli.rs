@@ -126,6 +126,53 @@ fn tab_add_rename_rm_roundtrip() {
 }
 
 #[test]
+fn tab_add_with_invalid_title_is_one_transaction() {
+    let f = fixture(SIMPLE);
+    let before = fs::read(&f.note).expect("read original note");
+    let out = bin()
+        .args(["tab", "add", "Test note.md", "--title", "bad\ntitle"])
+        .current_dir(&f.vault)
+        .output()
+        .expect("spawn mica");
+
+    assert_eq!(out.status.code(), Some(2), "invalid title is rejected");
+    assert_eq!(
+        fs::read(&f.note).expect("read note after rejection"),
+        before,
+        "the inserted default tab must not be committed separately"
+    );
+}
+
+#[test]
+fn tab_add_title_survives_intermediate_path_normalization() {
+    let source = "```mica id=demo\n\n:::tabs\n:::tab One\nbody\n:::\n:::\n```\n";
+    let f = fixture(source);
+
+    run_ok(
+        &[
+            "tab",
+            "add",
+            "Test note.md",
+            "--path",
+            "1",
+            "--title",
+            "Two",
+        ],
+        &f.vault,
+    );
+
+    let doc = fs::read_to_string(&f.note).expect("updated note");
+    assert!(
+        doc.contains(":::tab Two"),
+        "requested title is committed: {doc}"
+    );
+    assert!(
+        !doc.contains(":::tab New tab"),
+        "default title never leaks: {doc}"
+    );
+}
+
+#[test]
 fn snapshot_is_change_gated_and_restore_works() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
@@ -257,6 +304,30 @@ fn prepare_stamps_frontmatter_and_block_ids() {
 }
 
 #[test]
+fn prepare_preserves_bom_and_crlf_frontmatter() {
+    let source = "\u{feff}---\r\ntitle: X\r\n---\r\n\r\n```mica\r\ntab: A\r\nbody\r\n```\r\n";
+    let f = fixture(source);
+
+    run_ok(&["prepare", "Test note.md"], &f.vault);
+
+    let doc = fs::read_to_string(&f.note).expect("prepared note");
+    assert!(
+        doc.starts_with("\u{feff}---\r\n"),
+        "BOM remains first: {doc:?}"
+    );
+    assert!(
+        doc.contains("title: X\r\nmica-id:"),
+        "id joins existing YAML"
+    );
+    assert!(doc.contains("```mica id="), "block id is stamped");
+    assert_eq!(doc.matches("---\r\n").count(), 2, "one frontmatter block");
+    assert!(
+        !doc.replace("\r\n", "").contains('\n'),
+        "no lone LF was introduced: {doc:?}"
+    );
+}
+
+#[test]
 fn unknown_block_exits_3() {
     let f = fixture(SIMPLE);
     let out = bin()
@@ -286,6 +357,50 @@ fn doctor_reports_missing_objects() {
 }
 
 #[test]
+fn doctor_reports_corrupt_objects() {
+    let f = fixture(SIMPLE);
+    run_ok(&["snapshot", "Test note.md"], &f.vault);
+    let objects = f.vault.join("Test note.mica/objects");
+    let object = fs::read_dir(&objects)
+        .unwrap()
+        .next()
+        .expect("one object")
+        .unwrap()
+        .path();
+    fs::write(&object, "CORRUPT").unwrap();
+
+    let report = run_ok(&["doctor"], &f.vault);
+    assert!(
+        report.contains("corrupt"),
+        "reports the corrupt object instead of trusting its filename: {report}"
+    );
+}
+
+#[test]
+fn corrupt_object_cannot_be_restored() {
+    let f = fixture(SIMPLE);
+    run_ok(&["snapshot", "Test note.md"], &f.vault);
+    let objects = f.vault.join("Test note.mica/objects");
+    let object = fs::read_dir(&objects)
+        .unwrap()
+        .next()
+        .expect("one object")
+        .unwrap()
+        .path();
+    fs::write(&object, "CORRUPT").unwrap();
+    let before = fs::read(&f.note).expect("live note");
+
+    let out = bin()
+        .args(["restore", "Test note.md", "v1"])
+        .current_dir(&f.vault)
+        .output()
+        .expect("spawn");
+
+    assert_eq!(out.status.code(), Some(4), "corruption exit code");
+    assert_eq!(fs::read(&f.note).expect("live note"), before);
+}
+
+#[test]
 fn repair_rehomes_renamed_note_sidecar() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
@@ -299,12 +414,43 @@ fn repair_rehomes_renamed_note_sidecar() {
 }
 
 #[test]
+fn repair_does_not_rehome_an_ambiguous_duplicate_id() {
+    let f = fixture(SIMPLE);
+    fs::rename(&f.note, f.vault.join("A.md")).expect("rename note");
+    run_ok(&["snapshot", "A.md"], &f.vault);
+    fs::copy(f.vault.join("A.md"), f.vault.join("B.md")).expect("copy note");
+
+    run_ok(&["repair"], &f.vault);
+
+    assert!(
+        f.vault.join("A.mica").is_dir(),
+        "history stays at its source"
+    );
+    assert!(
+        !f.vault.join("B.mica").exists(),
+        "ambiguous duplicate cannot steal the sidecar"
+    );
+}
+
+#[test]
 fn watch_flag_parses() {
     // Not a daemon test — just prove the arg surface stays stable.
     let out = bin().args(["watch", "--help"]).output().expect("spawn");
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--debounce") && help.contains("--interval"));
+}
+
+#[test]
+fn watch_rejects_zero_poll_interval() {
+    let f = fixture(SIMPLE);
+    let out = bin()
+        .args(["watch", "--interval", "0"])
+        .current_dir(&f.vault)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("at least one second"));
 }
 
 #[test]
