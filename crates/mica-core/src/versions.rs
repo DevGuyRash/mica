@@ -149,7 +149,7 @@ pub fn fold_ledger_impl(events: &[Event]) -> BTreeMap<String, BlockState> {
 /// * `content` - a block's inner source
 ///
 /// # Returns
-/// A `b3:`-tagged hash of the sorted non-empty leaf texts.
+/// A `b3s2:`-tagged full BLAKE3 hash of the sorted non-empty leaf texts.
 ///
 /// # Panics
 /// None.
@@ -165,16 +165,17 @@ pub fn content_signature_impl(content: &str) -> String {
     let mut texts = Vec::new();
     collect_leaf_text(&cst.children, &mut texts);
     texts.sort_unstable();
-    // Stream the exact bytes of `texts.join(" ")` into the hasher — same
-    // digest as hashing the joined string, without materializing it.
+    // Version 2 frames every leaf with its byte length. The previous
+    // space-joined encoding made ["a", "b"] collide with ["a b"]. The
+    // explicit tag makes this one compatibility transition discoverable and
+    // prevents future algorithm changes from silently reusing the namespace.
     let mut hasher = blake3::Hasher::new();
-    for (i, t) in texts.iter().enumerate() {
-        if i > 0 {
-            hasher.update(b" ");
-        }
+    hasher.update(b"mica-content-signature\0v2\0");
+    for t in texts {
+        hasher.update(&(t.len() as u64).to_le_bytes());
         hasher.update(t.as_bytes());
     }
-    crate::b3_tag(&hasher.finalize())
+    format!("b3s2:{}", hasher.finalize().to_hex())
 }
 
 /// Depth-first trimmed non-empty leaf texts (code leaves included — code IS
@@ -413,9 +414,22 @@ mod tests {
         // exact VALUE must never drift across refactors.
         assert_eq!(
             content_signature_impl("tab: A\nhello\n\n```js\nx\n```\n> [!note] Hi\n> body\n"),
-            "b3:175ea6573a0d78c4"
+            "b3s2:59b295a30da5525139eadb8ad09532023f6b4d0c7d370e07f72301dbac463e97"
         );
-        assert_eq!(content_signature_impl(""), crate::hash_content_impl(""));
+        assert_eq!(
+            content_signature_impl(""),
+            "b3s2:5b1b20ab57091d0069745c51f28361a8a52edc8a21037864c0301c742589da98"
+        );
+    }
+
+    #[test]
+    fn signature_frames_leaf_boundaries_without_collisions() {
+        // Joining leaves with one space made these distinct content sets hash
+        // identically: ["a", "b"] and ["a b"].
+        assert_ne!(
+            content_signature_impl("a\n\nb\n"),
+            content_signature_impl("a b\n")
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ name = "mica-core"
 version.workspace = true
 edition.workspace = true
 description = "Pure Rust core for Mica: fence scanner, CST, serializer, structural ops, diff, hashing, and identity."
-license.workspace = true
+license-file = "LICENSE"
 publish = false
 
 [lints]

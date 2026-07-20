@@ -22,11 +22,15 @@ mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
 pub use edit::{
-    block_content_edit_impl, ensure_ids_impl, replace_block_content_impl, set_block_attr_impl,
-    BlockEdit,
+    block_content_edit_impl, ensure_ids_impl, guarded_block_content_edit_impl,
+    replace_block_content_impl, rewrite_block_id_at_impl, set_block_attr_edit_impl,
+    set_block_attr_impl, BlockEdit,
 };
 pub use migrate::{migrate_tabs_impl, MigratedBlock, MigratedVersion, MigrationResult};
-pub use ops::{apply_op_impl, GroupKind, StructOp};
+pub use ops::{
+    apply_op_impl, apply_op_text_impl, apply_ops_impl, apply_ops_text_impl, AppliedText, GroupKind,
+    StructOp,
+};
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
@@ -42,19 +46,17 @@ pub fn mica_version_impl() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Content address of `text`: a BLAKE3 digest truncated to a 64-bit hex prefix,
-/// tagged `b3:`. This is the block dirty-check key and the version-object name.
-///
-/// A 64-bit prefix keeps fence headers and object filenames short while giving
-/// ample collision resistance for per-note dedup.
+/// Content address of `text`: a full 256-bit BLAKE3 digest tagged `b3:`.
+/// This is the block dirty-check key and the version-object name. Readers keep
+/// accepting the legacy 64-bit prefix form, but every new write uses the full
+/// digest so two distinct objects cannot alias through a truncated address.
 pub fn hash_content_impl(text: &str) -> String {
     b3_tag(&blake3::hash(text.as_bytes()))
 }
 
-/// Format a BLAKE3 digest as the `b3:` + 16-hex-char content address.
+/// Format a BLAKE3 digest as the `b3:` + 64-hex-char content address.
 pub(crate) fn b3_tag(hash: &blake3::Hash) -> String {
-    let hex = hash.to_hex();
-    format!("b3:{}", &hex[..16])
+    format!("b3:{}", hash.to_hex())
 }
 
 /// Mint a new time-ordered UUIDv7 — used for block ids (fence header) and note
@@ -71,7 +73,7 @@ pub fn mica_version() -> String {
     mica_version_impl()
 }
 
-/// Content address of `text` (`b3:` + 16-hex-char BLAKE3 prefix).
+/// Content address of `text` (`b3:` + full 64-hex-char BLAKE3 digest).
 #[wasm_bindgen]
 pub fn hash_content(text: &str) -> String {
     hash_content_impl(text)
@@ -118,6 +120,38 @@ pub fn serialize(cst: JsValue) -> Result<String, JsValue> {
 pub fn block_content_edit(doc: &str, id: &str, new_content: &str) -> Result<JsValue, JsValue> {
     match block_content_edit_impl(doc, id, new_content) {
         Some(e) => serde_wasm_bindgen::to_value(&e).map_err(|e| JsValue::from_str(&e.to_string())),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// Build a UTF-16 content edit only when the block still has `expected` text.
+#[wasm_bindgen]
+pub fn guarded_block_content_edit(
+    doc: &str,
+    id: &str,
+    expected: &str,
+    new_content: &str,
+) -> Result<JsValue, JsValue> {
+    match guarded_block_content_edit_impl(doc, id, expected, new_content) {
+        Some(edit) => {
+            serde_wasm_bindgen::to_value(&edit).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// Rewrite the `id=` on one exact UTF-16 block-start occurrence.
+#[wasm_bindgen]
+pub fn rewrite_block_id_at(
+    doc: &str,
+    block_start: usize,
+    expected_id: &str,
+    new_id: &str,
+) -> Result<JsValue, JsValue> {
+    match rewrite_block_id_at_impl(doc, block_start, expected_id, new_id) {
+        Some(edit) => {
+            serde_wasm_bindgen::to_value(&edit).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
         None => Ok(JsValue::NULL),
     }
 }
@@ -207,6 +241,24 @@ pub fn apply_op(cst: JsValue, op: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// Parse, apply one structural op, and serialize without exposing the CST.
+#[wasm_bindgen]
+pub fn apply_op_text(content: &str, op: JsValue) -> Result<JsValue, JsValue> {
+    let op: StructOp =
+        serde_wasm_bindgen::from_value(op).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&apply_op_text_impl(content, &op))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Parse, atomically apply dependent structural ops, and serialize once.
+#[wasm_bindgen]
+pub fn apply_ops_text(content: &str, ops: JsValue) -> Result<JsValue, JsValue> {
+    let ops: Vec<StructOp> =
+        serde_wasm_bindgen::from_value(ops).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&apply_ops_text_impl(content, &ops))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 /// A hash of the block's *content* only (trimmed leaf texts, sorted) — the
 /// key auto-versioning gates on.
 #[wasm_bindgen]
@@ -231,6 +283,22 @@ pub fn set_block_attr(
 ) -> Result<JsValue, JsValue> {
     match set_block_attr_impl(doc, id, key, value.as_deref()) {
         Some(s) => Ok(JsValue::from_str(&s)),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// Build an exact UTF-16 header edit for one non-identity block attribute.
+#[wasm_bindgen]
+pub fn set_block_attr_edit(
+    doc: &str,
+    id: &str,
+    key: &str,
+    value: Option<String>,
+) -> Result<JsValue, JsValue> {
+    match set_block_attr_edit_impl(doc, id, key, value.as_deref()) {
+        Some(edit) => {
+            serde_wasm_bindgen::to_value(&edit).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
         None => Ok(JsValue::NULL),
     }
 }
@@ -329,7 +397,7 @@ mod tests {
     fn hash_is_deterministic_tagged_and_distinct() {
         assert_eq!(hash_content_impl("hello"), hash_content_impl("hello"));
         assert!(hash_content_impl("hello").starts_with("b3:"));
-        assert_eq!(hash_content_impl("hello").len(), 3 + 16);
+        assert_eq!(hash_content_impl("hello").len(), 3 + 64);
         assert_ne!(hash_content_impl("a"), hash_content_impl("b"));
     }
 

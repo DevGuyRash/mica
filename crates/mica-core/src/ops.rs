@@ -15,13 +15,22 @@
 use crate::parser::{parse_block_impl, Cst, Node};
 use serde::{Deserialize, Serialize};
 
+/// Result of parsing, reducing, and serializing one block in core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AppliedText {
+    /// Whether the reducer accepted and changed the CST.
+    pub changed: bool,
+    /// Serialized block content; exact input bytes when `changed` is false.
+    pub text: String,
+}
+
 /// Which kind of group an `InsertGroup` op creates.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupKind {
     /// A tab group (`tab:` friendly form at an empty root, else `:::tabs`).
     Tabs,
-    /// A `:::grid` with two empty cells.
+    /// An empty `:::grid` with a two-column default.
     Grid,
 }
 
@@ -283,13 +292,147 @@ pub enum StructOp {
 /// assert_eq!(serialize_impl(&cst), "tab: B\nbody\n");
 /// ```
 pub fn apply_op_impl(cst: &mut Cst, op: &StructOp) -> bool {
-    let changed = apply_op_inner(cst, op);
-    if changed {
-        // Every successful op re-establishes the leaf-seam invariant tree-wide
-        // (a missed splice site would silently merge sections — see below).
-        normalize_tree(&mut cst.children);
+    apply_ops_impl(cst, std::slice::from_ref(op))
+}
+
+/// Apply dependent structural operations as one all-or-nothing transaction.
+///
+/// Purpose: allow compound gestures such as insert-then-title to share one
+/// fresh CST, normalize once, and never expose a partially applied prefix.
+///
+/// # Arguments
+/// * `cst` - parsed block content, mutated only when every operation succeeds
+/// * `ops` - dependent operations in execution order
+///
+/// # Returns
+/// `true` when every operation succeeded and the final normalized CST differs;
+/// `false` for an empty batch, any rejected operation, or a net no-op.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// use mica_core::{apply_ops_impl, parse_block_impl, serialize_impl, StructOp};
+/// let mut cst = parse_block_impl("tab: A\nbody\n");
+/// let ops = [
+///     StructOp::InsertTab { path: vec![0], at: 1 },
+///     StructOp::RenameTab { path: vec![0], index: 1, title: "B".into() },
+/// ];
+/// assert!(apply_ops_impl(&mut cst, &ops));
+/// assert!(serialize_impl(&cst).contains("tab: B"));
+/// ```
+pub fn apply_ops_impl(cst: &mut Cst, ops: &[StructOp]) -> bool {
+    if ops.is_empty() {
+        return false;
     }
-    changed
+    // Apply against a private candidate so every rejection path is atomic.
+    // This deliberately makes the reducer's documented `false => unchanged`
+    // contract structural instead of relying on every helper to roll back all
+    // of its intermediate edits correctly.
+    let mut candidate = cst.clone();
+    for op in ops {
+        if !apply_op_inner(&mut candidate, op) {
+            return false;
+        }
+    }
+    // One normalization pass after the dependent sequence keeps paths stable
+    // during the batch and re-establishes the seam invariant before commit.
+    normalize_tree(&mut candidate.children);
+    if candidate == *cst {
+        return false;
+    }
+    *cst = candidate;
+    true
+}
+
+/// Parse, reduce, and serialize one structural edit without crossing the host
+/// boundary with a full CST.
+///
+/// Purpose: keep the one-reducer invariant while eliminating repeated
+/// Rust-to-JavaScript tree copies for mutations.
+///
+/// # Arguments
+/// * `content` - current exact block content
+/// * `op` - structural operation to apply
+///
+/// # Returns
+/// [`AppliedText`] with exact original content on rejection.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// use mica_core::{apply_op_text_impl, StructOp};
+/// let result = apply_op_text_impl(
+///     "tab: A\nbody\n",
+///     &StructOp::RenameTab { path: vec![0], index: 0, title: "B".into() },
+/// );
+/// assert!(result.changed);
+/// assert_eq!(result.text, "tab: B\nbody\n");
+/// ```
+pub fn apply_op_text_impl(content: &str, op: &StructOp) -> AppliedText {
+    apply_ops_text_impl(content, std::slice::from_ref(op))
+}
+
+/// Parse, atomically apply dependent operations, and serialize the result.
+///
+/// Purpose: provide the host an all-or-nothing batch without transferring a
+/// full CST across the WASM boundary.
+///
+/// # Arguments
+/// * `content` - current exact block content
+/// * `ops` - dependent structural operations in execution order
+///
+/// # Returns
+/// [`AppliedText`] with exact original content when the batch is rejected.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// use mica_core::{apply_ops_text_impl, StructOp};
+/// let result = apply_ops_text_impl(
+///     "tab: A\nbody\n",
+///     &[
+///         StructOp::InsertTab { path: vec![0], at: 1 },
+///         StructOp::RenameTab { path: vec![0], index: 1, title: "B".into() },
+///     ],
+/// );
+/// assert!(result.changed);
+/// assert!(result.text.contains("tab: B"));
+/// ```
+pub fn apply_ops_text_impl(content: &str, ops: &[StructOp]) -> AppliedText {
+    if ops.is_empty() {
+        return AppliedText {
+            changed: false,
+            text: content.to_string(),
+        };
+    }
+    let mut cst = parse_block_impl(content);
+    for op in ops {
+        if !apply_op_inner(&mut cst, op) {
+            return AppliedText {
+                changed: false,
+                text: content.to_string(),
+            };
+        }
+    }
+    normalize_tree(&mut cst.children);
+    let text = crate::parser::serialize_impl(&cst);
+    if text == content {
+        AppliedText {
+            changed: false,
+            text,
+        }
+    } else {
+        AppliedText {
+            changed: true,
+            text,
+        }
+    }
 }
 
 /// Two content leaves flush against each other re-parse as ONE prose run on
@@ -381,10 +524,11 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             let Some((directive, colons)) = group_form(cst, path, "tabs") else {
                 return false;
             };
+            let style = line_style_at(cst, path);
             let tab = if directive {
-                directive_tab("New tab", colons)
+                directive_tab_styled("New tab", colons, &style)
             } else {
-                friendly_tab("New tab")
+                friendly_tab_styled("New tab", &style)
             };
             let Some(children) = children_at_mut(cst, path) else {
                 return false;
@@ -412,6 +556,9 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             true
         }
         StructOp::RenameTab { path, index, title } => {
+            if title.chars().any(char::is_control) {
+                return false;
+            }
             let Some(tab) = tab_at_mut(cst, path, *index) else {
                 return false;
             };
@@ -427,6 +574,9 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             key,
             value,
         } => {
+            if !valid_attr(key, value.as_deref()) {
+                return false;
+            }
             let Some(tab) = tab_at_mut(cst, path, *index) else {
                 return false;
             };
@@ -438,14 +588,21 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             set_tab_title(tab, &compose_title(&display, &attrs))
         }
         StructOp::InsertCell { path, at } => {
+            if grid_layout_at(cst, path).is_none() {
+                return false;
+            }
+            let style = line_style_at(cst, path);
             let Some(children) = named_children_at_mut(cst, path, "grid") else {
                 return false;
             };
             let at = (*at).min(children.len());
-            children.insert(at, new_cell());
+            children.insert(at, new_cell_styled(&style));
             true
         }
         StructOp::DeleteCell { path, index } => {
+            if grid_layout_at(cst, path).is_none() {
+                return false;
+            }
             let Some(children) = named_children_at_mut(cst, path, "grid") else {
                 return false;
             };
@@ -463,6 +620,9 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             true
         }
         StructOp::SetCols { path, cols } => {
+            if grid_layout_at(cst, path).is_none() {
+                return false;
+            }
             let Some(Node::Container {
                 name,
                 open_line,
@@ -472,7 +632,7 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             else {
                 return false;
             };
-            if name != "grid" || !open_line.starts_with(':') {
+            if name != "grid" || !is_directive_line(open_line) {
                 return false;
             }
             // A different column count changes the ROW count — prune a now-
@@ -496,6 +656,7 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             set_group_attr(cst, path, key, value.as_deref())
         }
         StructOp::InsertGroup { path, at, kind } => {
+            let style = line_style_at(cst, path);
             let Some(children) = children_at_mut(cst, path) else {
                 return false;
             };
@@ -507,8 +668,8 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             // root block gets the friendly closer-free form.
             let directive = !path.is_empty() || !empty;
             let group = match kind {
-                GroupKind::Grid => new_grid(2),
-                GroupKind::Tabs => new_tabs_group(directive),
+                GroupKind::Grid => new_grid_styled(2, &style),
+                GroupKind::Tabs => new_tabs_group_styled(directive, &style),
             };
             let at = (*at).min(children.len());
             children.insert(at, group);
@@ -675,7 +836,7 @@ fn group_form(cst: &Cst, path: &[usize], name: &str) -> Option<(bool, usize)> {
     match first {
         Some(Node::Container {
             open_line, colons, ..
-        }) if open_line.starts_with(":::") => Some((true, (*colons).max(3))),
+        }) if is_directive_line(open_line) => Some((true, (*colons).max(3))),
         _ => Some((false, 0)),
     }
 }
@@ -705,9 +866,27 @@ fn grid_cols(node: &Node) -> Option<usize> {
     }
 }
 
-/// Read the column count from the grid at `path`.
-fn grid_cols_at(cst: &Cst, path: &[usize]) -> Option<usize> {
-    node_at(cst, path).and_then(grid_cols)
+/// Validated grid dimensions. Direct prose or another container at grid level
+/// is malformed and must never be interpreted as a cell by geometry edits.
+fn grid_layout_at(cst: &Cst, path: &[usize]) -> Option<(usize, usize)> {
+    let node = node_at(cst, path)?;
+    let cols = grid_cols(node)?;
+    let Node::Container {
+        open_line,
+        children,
+        ..
+    } = node
+    else {
+        return None;
+    };
+    if !is_directive_line(open_line)
+        || !children
+            .iter()
+            .all(|child| is_container_named(child, "cell"))
+    {
+        return None;
+    }
+    Some((cols, children.len()))
 }
 
 /// Edit a comma-list attr in place, if the attr exists (missing attrs stay
@@ -765,24 +944,41 @@ fn move_list_attr(cst: &mut Cst, path: &[usize], key: &str, from: usize, to: usi
     });
 }
 
-/// The `InsertColumn` implementation: splice bottom-up so earlier rows'
-/// indices stay valid, then bump `cols` and the `colw` list.
+/// The `InsertColumn` implementation: consume the old row-major vector into a
+/// preallocated result in one pass, then bump `cols` and the `colw` list.
 fn insert_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, child_count)) = grid_layout_at(cst, path) else {
         return false;
     };
     if at > cols {
         return false;
     }
+    let style = line_style_at(cst, path);
     {
         let Some(children) = children_at_mut(cst, path) else {
             return false;
         };
-        let rows = children.len().div_ceil(cols).max(1);
-        for r in (0..rows).rev() {
-            let idx = (r * cols + at).min(children.len());
-            children.insert(idx, new_cell());
+        let rows = child_count.div_ceil(cols).max(1);
+        let old = std::mem::take(children);
+        let mut source = old.into_iter();
+        let mut rebuilt = Vec::with_capacity(child_count + rows);
+        for row in 0..rows {
+            let row_start = row * cols;
+            let row_len = child_count.saturating_sub(row_start).min(cols);
+            let insertion = at.min(row_len);
+            for column in 0..=row_len {
+                if column == insertion {
+                    rebuilt.push(new_cell_styled(&style));
+                }
+                if column < row_len {
+                    let Some(cell) = source.next() else {
+                        return false;
+                    };
+                    rebuilt.push(cell);
+                }
+            }
         }
+        *children = rebuilt;
     }
     let next = cols + 1;
     if !set_group_attr(cst, path, "cols", Some(&next.to_string())) {
@@ -795,9 +991,10 @@ fn insert_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
 /// The `InsertRow` implementation: `cols` empty cells at the row's flow
 /// position, plus an `auto` slot in the `rowh` list.
 fn insert_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, _)) = grid_layout_at(cst, path) else {
         return false;
     };
+    let style = line_style_at(cst, path);
     {
         let Some(children) = children_at_mut(cst, path) else {
             return false;
@@ -807,16 +1004,16 @@ fn insert_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
             return false;
         }
         let idx = (at_row * cols).min(children.len());
-        children.splice(idx..idx, (0..cols).map(|_| new_cell()));
+        children.splice(idx..idx, (0..cols).map(|_| new_cell_styled(&style)));
     }
     insert_list_attr(cst, path, "rowh", at_row, "auto");
     true
 }
 
-/// The `DeleteColumn` implementation: bottom-up removal keeps earlier rows'
-/// indices valid; `cols` drops and the `colw` entry leaves with the column.
+/// The `DeleteColumn` implementation: filter the old row-major vector into a
+/// preallocated result in one pass; `cols` and `colw` then follow.
 fn delete_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, child_count)) = grid_layout_at(cst, path) else {
         return false;
     };
     if at >= cols || cols == 1 {
@@ -826,13 +1023,15 @@ fn delete_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
         let Some(children) = children_at_mut(cst, path) else {
             return false;
         };
-        let rows = children.len().div_ceil(cols);
-        for r in (0..rows).rev() {
-            let idx = r * cols + at;
-            if idx < children.len() {
-                children.remove(idx);
-            }
-        }
+        let old = std::mem::take(children);
+        let removed = (0..child_count).filter(|index| index % cols == at).count();
+        let mut rebuilt = Vec::with_capacity(child_count - removed);
+        rebuilt.extend(
+            old.into_iter()
+                .enumerate()
+                .filter_map(|(index, cell)| (index % cols != at).then_some(cell)),
+        );
+        *children = rebuilt;
     }
     let next = cols - 1;
     if !set_group_attr(cst, path, "cols", Some(&next.to_string())) {
@@ -846,7 +1045,7 @@ fn delete_column(cst: &mut Cst, path: &[usize], at: usize) -> bool {
 /// flow (later rows stay aligned); the `rowh` entry goes with it. A grid
 /// whose last row leaves is scaffolding and removes itself.
 fn delete_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, _)) = grid_layout_at(cst, path) else {
         return false;
     };
     let emptied;
@@ -870,15 +1069,16 @@ fn delete_row(cst: &mut Cst, path: &[usize], at_row: usize) -> bool {
     true
 }
 
-/// The `MoveColumn` implementation: per-row remove/insert inside each row's
-/// span (row lengths never change, so bases stay valid); `colw` follows.
+/// The `MoveColumn` implementation: rebuild one short row at a time so vector
+/// shifts cost O(columns), not O(the entire grid), and total work stays O(N).
 fn move_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, _)) = grid_layout_at(cst, path) else {
         return false;
     };
     if from >= cols || to >= cols || from == to {
         return false;
     }
+    let style = line_style_at(cst, path);
     {
         let Some(children) = children_at_mut(cst, path) else {
             return false;
@@ -886,13 +1086,17 @@ fn move_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
         if children.is_empty() {
             return false;
         }
-        pad_to_rect(children, cols);
-        let rows = children.len() / cols;
-        for r in 0..rows {
-            let base = r * cols;
-            let cell = children.remove(base + from);
-            children.insert(base + to, cell);
+        pad_to_rect(children, cols, &style);
+        let old = std::mem::take(children);
+        let mut source = old.into_iter();
+        let mut rebuilt = Vec::with_capacity(source.len());
+        while source.len() > 0 {
+            let mut row: Vec<Node> = source.by_ref().take(cols).collect();
+            let cell = row.remove(from);
+            row.insert(to, cell);
+            rebuilt.extend(row);
         }
+        *children = rebuilt;
     }
     move_list_attr(cst, path, "colw", from, to);
     true
@@ -902,9 +1106,10 @@ fn move_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
 /// target row's flow position (post-drain, `to * cols` IS the final slot for
 /// both directions); `rowh` follows.
 fn move_row(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, _)) = grid_layout_at(cst, path) else {
         return false;
     };
+    let style = line_style_at(cst, path);
     {
         let Some(children) = children_at_mut(cst, path) else {
             return false;
@@ -916,7 +1121,7 @@ fn move_row(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
         if from >= rows || to >= rows || from == to {
             return false;
         }
-        pad_to_rect(children, cols);
+        pad_to_rect(children, cols, &style);
         let moved: Vec<Node> = children.drain(from * cols..(from + 1) * cols).collect();
         let insert_at = to * cols;
         children.splice(insert_at..insert_at, moved);
@@ -928,6 +1133,9 @@ fn move_row(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
 /// The `ClearCell` implementation: empty the cell in place — geometry is
 /// sacred (flow removal would shift every later cell across columns).
 fn clear_cell(cst: &mut Cst, path: &[usize], index: usize) -> bool {
+    if grid_layout_at(cst, path).is_none() {
+        return false;
+    }
     let Some(children) = named_children_at_mut(cst, path, "grid") else {
         return false;
     };
@@ -950,14 +1158,14 @@ fn clear_cell(cst: &mut Cst, path: &[usize], index: usize) -> bool {
 /// Pad a ragged grid rectangular with empty cells — row-major flow cannot
 /// express raggedness anywhere but the very end, so row/column moves need a
 /// full lattice to stay column-true.
-fn pad_to_rect(children: &mut Vec<Node>, cols: usize) {
+fn pad_to_rect(children: &mut Vec<Node>, cols: usize, style: &LineStyle) {
     while !children.is_empty() && !children.len().is_multiple_of(cols) {
-        children.push(new_cell());
+        children.push(new_cell_styled(style));
     }
 }
 
 fn move_cell_in_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) -> bool {
-    let Some(cols) = grid_cols_at(cst, path) else {
+    let Some((cols, _)) = grid_layout_at(cst, path) else {
         return false;
     };
     let Some(children) = children_at_mut(cst, path) else {
@@ -981,13 +1189,8 @@ fn move_cell_in_column(cst: &mut Cst, path: &[usize], from: usize, to: usize) ->
 /// Write/remove one `{key=value}` token on a grid or directive-tabs header.
 /// Friendly tab groups have no header line to carry attrs — rejected.
 fn set_group_attr(cst: &mut Cst, path: &[usize], key: &str, value: Option<&str>) -> bool {
-    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !valid_attr(key, value) {
         return false;
-    }
-    if let Some(v) = value {
-        if v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == '{' || c == '}') {
-            return false;
-        }
     }
     let Some(node) = node_at_mut(cst, path) else {
         return false;
@@ -1002,23 +1205,132 @@ fn set_group_attr(cst: &mut Cst, path: &[usize], key: &str, value: Option<&str>)
     else {
         return false;
     };
-    if (name != "grid" && name != "tabs") || !open_line.starts_with(':') {
+    if (name != "grid" && name != "tabs") || !is_directive_line(open_line) {
         return false;
     }
     let (_, attrs) = split_title_attrs(title);
     let attrs = set_attr_token(&attrs, key, value);
     let next_title = format!("{{{attrs}}}");
     let c = ":".repeat((*colons).max(3));
-    let next_open_line = format!(
-        "{c}{name} {{{attrs}}}
-"
-    );
+    let indent = line_indent(open_line);
+    let eol = line_ending(open_line);
+    let next_open_line = format!("{indent}{c}{name} {{{attrs}}}{eol}");
     if *title == next_title && *open_line == next_open_line {
         return false;
     }
     *title = next_title;
     *open_line = next_open_line;
     true
+}
+
+/// Whether a key/value pair can be represented in a directive attribute
+/// token without changing lines or confusing the token grammar.
+fn valid_attr(key: &str, value: Option<&str>) -> bool {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return false;
+    }
+    value.is_none_or(|v| {
+        !v.is_empty()
+            && !v
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == '{' || c == '}')
+    })
+}
+
+/// Indentation prefix of a stored opening line.
+fn line_indent(line: &str) -> &str {
+    let content = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line);
+    &content[..content.len() - content.trim_start_matches(' ').len()]
+}
+
+/// Exact line ending used by a stored opening line.
+fn line_ending(line: &str) -> &str {
+    if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    }
+}
+
+/// Whether a stored line is an indented or unindented colon directive.
+fn is_directive_line(line: &str) -> bool {
+    line.trim_start_matches(' ').starts_with(":::")
+}
+
+#[derive(Clone)]
+struct LineStyle {
+    indent: String,
+    eol: String,
+}
+
+impl Default for LineStyle {
+    fn default() -> Self {
+        Self {
+            indent: String::new(),
+            eol: "\n".to_string(),
+        }
+    }
+}
+
+/// Infer generated-directive formatting from the nearest existing source.
+fn line_style_at(cst: &Cst, path: &[usize]) -> LineStyle {
+    if path.is_empty() {
+        return node_line_style(&cst.children).unwrap_or_default();
+    }
+    if let Some(Node::Container {
+        open_line,
+        children,
+        ..
+    }) = node_at(cst, path)
+    {
+        if !open_line.is_empty() {
+            return LineStyle {
+                indent: line_indent(open_line).to_string(),
+                eol: line_ending(open_line).to_string(),
+            };
+        }
+        return node_line_style(children).unwrap_or_default();
+    }
+    LineStyle::default()
+}
+
+fn node_line_style(nodes: &[Node]) -> Option<LineStyle> {
+    for node in nodes {
+        match node {
+            Node::Container {
+                open_line,
+                children,
+                ..
+            } => {
+                if !open_line.is_empty() {
+                    return Some(LineStyle {
+                        indent: line_indent(open_line).to_string(),
+                        eol: line_ending(open_line).to_string(),
+                    });
+                }
+                if let Some(style) = node_line_style(children) {
+                    return Some(style);
+                }
+            }
+            Node::Leaf { text, .. } => {
+                if text.contains("\r\n") {
+                    return Some(LineStyle {
+                        indent: String::new(),
+                        eol: "\r\n".to_string(),
+                    });
+                }
+                if text.contains('\n') {
+                    return Some(LineStyle::default());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn set_attr_token(attrs: &str, key: &str, value: Option<&str>) -> String {
@@ -1043,6 +1355,9 @@ fn set_attr_token(attrs: &str, key: &str, value: Option<&str>) -> String {
 
 /// Rewrite a tab's title and open line, preserving its form.
 fn set_tab_title(tab: &mut Node, full_title: &str) -> bool {
+    if full_title.chars().any(char::is_control) {
+        return false;
+    }
     if let Node::Container {
         title,
         colons,
@@ -1050,11 +1365,13 @@ fn set_tab_title(tab: &mut Node, full_title: &str) -> bool {
         ..
     } = tab
     {
-        let next_open_line = if open_line.starts_with(":::") {
+        let indent = line_indent(open_line);
+        let eol = line_ending(open_line);
+        let next_open_line = if is_directive_line(open_line) {
             let c = ":".repeat((*colons).max(3));
-            format!("{c}tab {full_title}\n")
+            format!("{indent}{c}tab {full_title}{eol}")
         } else {
-            format!("tab: {full_title}\n")
+            format!("{indent}tab: {full_title}{eol}")
         };
         if title == full_title && *open_line == next_open_line {
             return false;
@@ -1135,13 +1452,16 @@ fn conform_tab(tab: &mut Node, directive: bool, colons: usize) {
     else {
         return;
     };
+    let indent = line_indent(open_line).to_string();
+    let eol = line_ending(open_line).to_string();
     if directive {
         let c = ":".repeat(colons.max(3));
-        *open_line = format!("{c}tab {title}\n");
-        *close_line = format!("{c}\n");
+        *open_line = format!("{indent}{c}tab {title}{eol}");
+        *close_line = format!("{indent}{c}{eol}");
         *tc = colons.max(3);
     } else {
-        *open_line = format!("tab: {title}\n");
+        // Friendly tabs are recognized only at column zero.
+        *open_line = format!("tab: {title}{eol}");
         *close_line = String::new();
         *tc = 0;
     }
@@ -1160,11 +1480,18 @@ fn directivize_group(group: &mut Node) {
     else {
         return;
     };
-    if name != "tabs" || open_line.starts_with(":::") {
+    if name != "tabs" || is_directive_line(open_line) {
         return;
     }
-    *open_line = ":::tabs\n".to_string();
-    *close_line = ":::\n".to_string();
+    let eol = children
+        .iter()
+        .find_map(|child| match child {
+            Node::Container { open_line, .. } => Some(line_ending(open_line)),
+            Node::Leaf { .. } => None,
+        })
+        .unwrap_or("\n");
+    *open_line = format!(":::tabs{eol}");
+    *close_line = format!(":::{eol}");
     *colons = 3;
     for child in children.iter_mut() {
         if is_container_named(child, "tab") {
@@ -1386,12 +1713,18 @@ fn move_region(
 }
 
 /// Build a friendly, closer-free tab (`tab: Title`) with one empty leaf.
+#[cfg(test)]
 fn friendly_tab(title: &str) -> Node {
+    friendly_tab_styled(title, &LineStyle::default())
+}
+
+fn friendly_tab_styled(title: &str, style: &LineStyle) -> Node {
     Node::Container {
         name: "tab".to_string(),
         title: title.to_string(),
         colons: 0,
-        open_line: format!("tab: {title}\n"),
+        // Friendly syntax is structural only at column zero.
+        open_line: format!("tab: {title}{}", style.eol),
         children: vec![empty_leaf()],
         close_line: String::new(),
     }
@@ -1407,61 +1740,81 @@ fn empty_leaf() -> Node {
 }
 
 /// Build an explicit `:::tab` with `colons` colons and one empty leaf.
+#[cfg(test)]
 fn directive_tab(title: &str, colons: usize) -> Node {
+    directive_tab_styled(title, colons, &LineStyle::default())
+}
+
+fn directive_tab_styled(title: &str, colons: usize, style: &LineStyle) -> Node {
     let c = ":".repeat(colons.max(3));
     Node::Container {
         name: "tab".to_string(),
         title: title.to_string(),
         colons: colons.max(3),
-        open_line: format!("{c}tab {title}\n"),
+        open_line: format!("{}{c}tab {title}{}", style.indent, style.eol),
         children: vec![empty_leaf()],
-        close_line: format!("{c}\n"),
+        close_line: format!("{}{c}{}", style.indent, style.eol),
     }
 }
 
 /// Build a new empty `:::cell`.
+#[cfg(test)]
 fn new_cell() -> Node {
+    new_cell_styled(&LineStyle::default())
+}
+
+fn new_cell_styled(style: &LineStyle) -> Node {
     Node::Container {
         name: "cell".to_string(),
         title: String::new(),
         colons: 3,
-        open_line: ":::cell\n".to_string(),
+        open_line: format!("{}:::cell{}", style.indent, style.eol),
         children: vec![empty_leaf()],
-        close_line: ":::\n".to_string(),
+        close_line: format!("{}:::{}", style.indent, style.eol),
     }
 }
 
-/// Build a new `:::grid {cols=N}` holding two empty cells.
+/// Build a new empty `:::grid {cols=N}`.
+#[cfg(test)]
 fn new_grid(cols: usize) -> Node {
+    new_grid_styled(cols, &LineStyle::default())
+}
+
+fn new_grid_styled(cols: usize, style: &LineStyle) -> Node {
     let cols = cols.max(1);
     Node::Container {
         name: "grid".to_string(),
         title: format!("{{cols={cols}}}"),
         colons: 3,
-        open_line: format!(":::grid {{cols={cols}}}\n"),
-        children: vec![new_cell(), new_cell()],
-        close_line: ":::\n".to_string(),
+        open_line: format!("{}:::grid {{cols={cols}}}{}", style.indent, style.eol),
+        children: Vec::new(),
+        close_line: format!("{}:::{}", style.indent, style.eol),
     }
 }
 
 /// Build a new tabs group with one "New tab".
+#[cfg(test)]
 fn new_tabs_group(directive: bool) -> Node {
+    new_tabs_group_styled(directive, &LineStyle::default())
+}
+
+fn new_tabs_group_styled(directive: bool, style: &LineStyle) -> Node {
     Node::Container {
         name: "tabs".to_string(),
         title: String::new(),
         colons: if directive { 3 } else { 0 },
         open_line: if directive {
-            ":::tabs\n".to_string()
+            format!("{}:::tabs{}", style.indent, style.eol)
         } else {
             String::new()
         },
         children: vec![if directive {
-            directive_tab("New tab", 3)
+            directive_tab_styled("New tab", 3, style)
         } else {
-            friendly_tab("New tab")
+            friendly_tab_styled("New tab", style)
         }],
         close_line: if directive {
-            ":::\n".to_string()
+            format!("{}:::{}", style.indent, style.eol)
         } else {
             String::new()
         },
@@ -1564,10 +1917,6 @@ mod tests {
         assert_eq!(
             ser(&cst),
             ":::grid {cols=2}
-:::cell
-:::
-:::cell
-:::
 :::
 "
         );
@@ -1649,6 +1998,66 @@ mod tests {
     }
 
     #[test]
+    fn tab_header_edits_reject_control_characters_without_mutating() {
+        let src = "tab: A {icon=rocket}\nbody\n";
+        for op in [
+            StructOp::RenameTab {
+                path: vec![0],
+                index: 0,
+                title: "injected\n:::grid".into(),
+            },
+            StructOp::SetTabAttr {
+                path: vec![0],
+                index: 0,
+                key: "icon".into(),
+                value: Some("star\rmalicious".into()),
+            },
+            StructOp::SetTabAttr {
+                path: vec![0],
+                index: 0,
+                key: "bad\tkey".into(),
+                value: Some("star".into()),
+            },
+        ] {
+            let (changed, out) = apply(src, op);
+            assert!(!changed);
+            assert_eq!(out, src);
+        }
+    }
+
+    #[test]
+    fn header_edits_preserve_indent_and_crlf() {
+        let src = "  :::tabs\r\n  :::tab A\r\nbody\r\n  :::\r\n  :::\r\n";
+        let (changed, renamed) = apply(
+            src,
+            StructOp::RenameTab {
+                path: vec![0],
+                index: 0,
+                title: "B".into(),
+            },
+        );
+        assert!(changed);
+        assert_eq!(
+            renamed,
+            "  :::tabs\r\n  :::tab B\r\nbody\r\n  :::\r\n  :::\r\n"
+        );
+
+        let (changed, out) = apply(
+            &renamed,
+            StructOp::SetGroupAttr {
+                path: vec![0],
+                key: "style".into(),
+                value: Some("boxed".into()),
+            },
+        );
+        assert!(changed);
+        assert_eq!(
+            out,
+            "  :::tabs {style=boxed}\r\n  :::tab B\r\nbody\r\n  :::\r\n  :::\r\n"
+        );
+    }
+
+    #[test]
     fn save_region_replaces_and_terminates() {
         let (ok, out) = apply(
             "tab: A\nold\n",
@@ -1700,6 +2109,76 @@ mod tests {
         );
         assert!(!ok);
         assert_eq!(out, src, "rejected op must not mutate");
+    }
+
+    #[test]
+    fn apply_op_text_keeps_exact_input_on_rejection() {
+        let src = "tab: A\r\nbody\r\n";
+        let rejected = apply_op_text_impl(
+            src,
+            &StructOp::RenameTab {
+                path: vec![0],
+                index: 0,
+                title: "bad\nheader".into(),
+            },
+        );
+        assert_eq!(
+            rejected,
+            AppliedText {
+                changed: false,
+                text: src.into()
+            }
+        );
+
+        let applied = apply_op_text_impl(
+            src,
+            &StructOp::RenameTab {
+                path: vec![0],
+                index: 0,
+                title: "B".into(),
+            },
+        );
+        assert!(applied.changed);
+        assert_eq!(applied.text, "tab: B\r\nbody\r\n");
+    }
+
+    #[test]
+    fn atomic_batch_commits_all_or_rejects_all() {
+        let src = "tab: A\nbody\n";
+        let applied = apply_ops_text_impl(
+            src,
+            &[
+                StructOp::InsertTab {
+                    path: vec![0],
+                    at: 1,
+                },
+                StructOp::RenameTab {
+                    path: vec![0],
+                    index: 1,
+                    title: "Named once".into(),
+                },
+            ],
+        );
+        assert!(applied.changed);
+        assert_eq!(applied.text, "tab: A\nbody\ntab: Named once\n");
+
+        let rejected = apply_ops_text_impl(
+            src,
+            &[
+                StructOp::InsertTab {
+                    path: vec![0],
+                    at: 1,
+                },
+                StructOp::RenameTab {
+                    path: vec![9],
+                    index: 1,
+                    title: "missing target".into(),
+                },
+            ],
+        );
+        assert!(!rejected.changed);
+        assert_eq!(rejected.text, src, "successful prefix must roll back");
+        assert!(!apply_ops_text_impl(src, &[]).changed);
     }
 
     #[test]
@@ -1909,6 +2388,21 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(out, "some prose\n:::tabs\n:::tab New tab\n:::\n:::\n");
+    }
+
+    #[test]
+    fn inserted_grid_starts_without_cells() {
+        let (ok, out) = apply(
+            "",
+            StructOp::InsertGroup {
+                path: vec![],
+                at: 0,
+                kind: GroupKind::Grid,
+            },
+        );
+
+        assert!(ok);
+        assert_eq!(out, ":::grid {cols=2}\n:::\n");
     }
 
     #[test]
@@ -2172,6 +2666,23 @@ mod tests {
             },
         );
         assert!(!ok2, "past-the-end column index must be rejected");
+    }
+
+    #[test]
+    fn inserted_grid_structure_preserves_indent_and_crlf() {
+        let src = "  :::grid {cols=1}\r\n  :::cell\r\nx\r\n  :::\r\n  :::\r\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::InsertColumn {
+                path: vec![0],
+                at: 1,
+            },
+        );
+        assert!(changed);
+        assert_eq!(
+            out,
+            "  :::grid {cols=2}\r\n  :::cell\r\nx\r\n  :::\r\n  :::cell\r\n  :::\r\n  :::\r\n"
+        );
     }
 
     #[test]
@@ -2574,6 +3085,56 @@ mod tests {
     }
 
     #[test]
+    fn column_ops_reject_non_cell_grid_children_atomically() {
+        let src =
+            ":::grid {cols=2}\nprose that must survive\n:::cell\na\n:::\n:::cell\nb\n:::\n:::\n";
+        for op in [
+            StructOp::InsertColumn {
+                path: vec![0],
+                at: 1,
+            },
+            StructOp::DeleteColumn {
+                path: vec![0],
+                at: 0,
+            },
+            StructOp::MoveColumn {
+                path: vec![0],
+                from: 0,
+                to: 1,
+            },
+        ] {
+            let (changed, out) = apply(src, op);
+            assert!(!changed);
+            assert_eq!(out, src);
+        }
+    }
+
+    #[test]
+    fn rejected_op_never_leaves_partial_mutation() {
+        // The public reducer enforces false => unchanged independently of the
+        // helper rejection point.
+        let mut cst = Cst {
+            children: vec![Node::Container {
+                name: "grid".into(),
+                title: "{cols=2}".into(),
+                colons: 3,
+                open_line: "not a directive\r\n".into(),
+                children: vec![new_cell(), new_cell()],
+                close_line: "  :::\r\n".into(),
+            }],
+        };
+        let before = cst.clone();
+        assert!(!apply_op_impl(
+            &mut cst,
+            &StructOp::InsertColumn {
+                path: vec![0],
+                at: 1,
+            }
+        ));
+        assert_eq!(cst, before, "false must mean byte-for-byte unchanged CST");
+    }
+
+    #[test]
     fn delete_column_handles_ragged_and_rejects_last() {
         // Rows [a b] [c]: column 0 takes a AND c with it.
         let ragged = ":::grid {cols=2}\n:::cell\na\n:::\n:::cell\nb\n:::\n:::cell\nc\n:::\n:::\n";
@@ -2662,6 +3223,75 @@ mod tests {
             out,
             ":::grid {cols=2}\n:::cell\nb\n:::\n:::cell\na\n:::\n:::cell\n:::\n:::cell\nc\n:::\n:::\n"
         );
+    }
+
+    #[test]
+    fn column_ops_scale_across_a_large_rectangular_grid() {
+        // Large enough that the former one-global-Vec remove/insert per row
+        // became visibly quadratic; this remains a routine unit test with the
+        // row-local/preallocated linear implementations.
+        let rows = 4_096;
+        let cols = 12;
+        let mut cst = Cst {
+            children: vec![Node::Container {
+                name: "grid".into(),
+                title: format!("{{cols={cols}}}"),
+                colons: 3,
+                open_line: format!(":::grid {{cols={cols}}}\n"),
+                children: (0..rows * cols)
+                    .map(|index| {
+                        let mut cell = new_cell();
+                        if let Node::Container { children, .. } = &mut cell {
+                            children[0] = Node::Leaf {
+                                text: format!("cell {index}\n"),
+                                is_code: false,
+                            };
+                        }
+                        cell
+                    })
+                    .collect(),
+                close_line: ":::\n".into(),
+            }],
+        };
+        assert!(apply_op_impl(
+            &mut cst,
+            &StructOp::InsertColumn {
+                path: vec![0],
+                at: 6,
+            }
+        ));
+        let Node::Container {
+            title, children, ..
+        } = &cst.children[0]
+        else {
+            panic!("grid remains a container")
+        };
+        assert_eq!(title, "{cols=13}");
+        assert_eq!(children.len(), rows * 13);
+
+        assert!(apply_op_impl(
+            &mut cst,
+            &StructOp::MoveColumn {
+                path: vec![0],
+                from: 0,
+                to: 12,
+            }
+        ));
+        assert!(apply_op_impl(
+            &mut cst,
+            &StructOp::DeleteColumn {
+                path: vec![0],
+                at: 6,
+            }
+        ));
+        let Node::Container {
+            title, children, ..
+        } = &cst.children[0]
+        else {
+            panic!("grid remains a container")
+        };
+        assert_eq!(title, "{cols=12}");
+        assert_eq!(children.len(), rows * cols);
     }
 
     #[test]

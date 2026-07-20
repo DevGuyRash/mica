@@ -9,7 +9,7 @@
 //! This is where the `obsidian-tabs` append bug is made structurally
 //! impossible: the replacement range is always exact, even when content grows.
 
-use crate::scanner::scan_impl;
+use crate::scanner::{scan_impl, BlockSpan};
 use crate::util::utf16_len;
 use serde::Serialize;
 
@@ -27,7 +27,7 @@ pub struct BlockEdit {
 /// The full document that results from replacing block `id`'s content with
 /// `new_content`. Returns `None` if no block carries that `id`.
 pub fn replace_block_content_impl(doc: &str, id: &str, new_content: &str) -> Option<String> {
-    let b = scan_impl(doc).into_iter().find(|b| b.id() == Some(id))?;
+    let b = unique_block_by_id(doc, id)?;
     let mut out =
         String::with_capacity(doc.len() - (b.content_end - b.content_start) + new_content.len());
     out.push_str(&doc[..b.content_start]);
@@ -38,7 +38,7 @@ pub fn replace_block_content_impl(doc: &str, id: &str, new_content: &str) -> Opt
 
 /// The CodeMirror change (UTF-16 offsets) that replaces block `id`'s content.
 pub fn block_content_edit_impl(doc: &str, id: &str, new_content: &str) -> Option<BlockEdit> {
-    let b = scan_impl(doc).into_iter().find(|b| b.id() == Some(id))?;
+    let b = unique_block_by_id(doc, id)?;
     // `to` continues from `from` so the prefix is only walked once.
     let from = utf16_len(&doc[..b.content_start]);
     Some(BlockEdit {
@@ -46,6 +46,216 @@ pub fn block_content_edit_impl(doc: &str, id: &str, new_content: &str) -> Option
         to: from + utf16_len(&doc[b.content_start..b.content_end]),
         insert: new_content.to_string(),
     })
+}
+
+/// Build a guarded content edit for exactly one block identity.
+///
+/// Purpose: prevent a full-block editor from overwriting content that changed
+/// after the editor opened.
+///
+/// # Arguments
+/// * `doc` - the freshly read full document
+/// * `id` - the target block identity, which must occur exactly once
+/// * `expected` - exact block content observed when editing began
+/// * `new_content` - replacement block content
+///
+/// # Returns
+/// A UTF-16 [`BlockEdit`], or `None` for a missing/duplicate identity, stale
+/// content, or a no-op replacement.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// let doc = "```mica id=a\nold\n```\n";
+/// let edit = mica_core::guarded_block_content_edit_impl(doc, "a", "old\n", "new\n");
+/// assert_eq!(edit.map(|edit| edit.insert), Some("new\n".to_string()));
+/// ```
+pub fn guarded_block_content_edit_impl(
+    doc: &str,
+    id: &str,
+    expected: &str,
+    new_content: &str,
+) -> Option<BlockEdit> {
+    if expected == new_content {
+        return None;
+    }
+    let block = unique_block_by_id(doc, id)?;
+    if &doc[block.content_start..block.content_end] != expected {
+        return None;
+    }
+    content_edit_for_block(doc, &block, new_content)
+}
+
+/// Build a header-only edit that sets one non-identity block attribute.
+///
+/// Purpose: avoid replacing the entire note for a one-line appearance or name
+/// change while still resolving the target from a fresh scan.
+///
+/// # Arguments
+/// * `doc` - the freshly read full document
+/// * `id` - target identity, which must occur exactly once
+/// * `key` - non-`id` attribute key
+/// * `value` - replacement value, or `None` to remove the attribute
+///
+/// # Returns
+/// A UTF-16 header edit, or `None` when the identity is ambiguous, input is
+/// unsafe, or the reconstructed header is unchanged.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// let doc = "```mica id=a\nx\n```\n";
+/// let edit = mica_core::set_block_attr_edit_impl(doc, "a", "name", Some("Example"));
+/// assert!(edit.is_some());
+/// ```
+pub fn set_block_attr_edit_impl(
+    doc: &str,
+    id: &str,
+    key: &str,
+    value: Option<&str>,
+) -> Option<BlockEdit> {
+    if key == "id" || !valid_header_attr(key, value) {
+        return None;
+    }
+    let block = unique_block_by_id(doc, id)?;
+    header_edit_for_block(doc, &block, key, value)
+}
+
+/// Rewrite the identity of one exact block occurrence.
+///
+/// Purpose: repair duplicate IDs without accidentally rewriting the first
+/// same-ID block in the note.
+///
+/// # Arguments
+/// * `doc` - the freshly read full document
+/// * `block_start` - UTF-16 opening-fence offset from `scan_view_impl`
+/// * `expected_id` - identity currently expected at that occurrence
+/// * `new_id` - fresh non-empty identity, unique within the document
+///
+/// # Returns
+/// A UTF-16 header edit, or `None` if the occurrence moved, its identity is
+/// stale, the new identity is unsafe/duplicate, or the edit is a no-op.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// let doc = "```mica id=dup\na\n```\n```mica id=dup\nb\n```\n";
+/// let second = mica_core::scan_view_impl(doc)[1].start;
+/// let edit = mica_core::rewrite_block_id_at_impl(doc, second, "dup", "fresh");
+/// assert!(edit.is_some());
+/// ```
+pub fn rewrite_block_id_at_impl(
+    doc: &str,
+    block_start: usize,
+    expected_id: &str,
+    new_id: &str,
+) -> Option<BlockEdit> {
+    if expected_id == new_id || !valid_header_attr("id", Some(new_id)) || new_id.is_empty() {
+        return None;
+    }
+    let blocks = scan_impl(doc);
+    if blocks.iter().any(|block| block.id() == Some(new_id)) {
+        return None;
+    }
+    let mut cursor_byte = 0;
+    let mut cursor_utf16 = 0;
+    let block = blocks.into_iter().find(|block| {
+        cursor_utf16 += utf16_len(&doc[cursor_byte..block.start]);
+        cursor_byte = block.start;
+        cursor_utf16 == block_start && block.id() == Some(expected_id)
+    })?;
+    header_edit_for_block(doc, &block, "id", Some(new_id))
+}
+
+fn unique_block_by_id(doc: &str, id: &str) -> Option<BlockSpan> {
+    let mut matches = scan_impl(doc)
+        .into_iter()
+        .filter(|block| block.id() == Some(id));
+    let block = matches.next()?;
+    matches.next().is_none().then_some(block)
+}
+
+fn content_edit_for_block(doc: &str, block: &BlockSpan, new_content: &str) -> Option<BlockEdit> {
+    let from = utf16_len(&doc[..block.content_start]);
+    Some(BlockEdit {
+        from,
+        to: from + utf16_len(&doc[block.content_start..block.content_end]),
+        insert: new_content.to_string(),
+    })
+}
+
+fn header_edit_for_block(
+    doc: &str,
+    block: &BlockSpan,
+    key: &str,
+    value: Option<&str>,
+) -> Option<BlockEdit> {
+    let header = &doc[block.start..block.content_start];
+    let indent_len = header.len() - header.trim_start_matches(' ').len();
+    let indent = &header[..indent_len];
+    let fence = &header[indent_len..indent_len + block.fence_len];
+    let eol = if header.ends_with("\r\n") {
+        "\r\n"
+    } else if header.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+
+    let mut attrs = block.attrs.clone();
+    match value {
+        Some(value) => {
+            if let Some(slot) = attrs.iter_mut().find(|(found, _)| found == key) {
+                slot.1 = value.to_string();
+            } else {
+                attrs.push((key.to_string(), value.to_string()));
+            }
+        }
+        None => attrs.retain(|(found, _)| found != key),
+    }
+
+    let mut line = String::with_capacity(header.len() + value.map_or(0, str::len) + key.len() + 4);
+    line.push_str(indent);
+    line.push_str(fence);
+    line.push_str("mica");
+    for (attr_key, attr_value) in &attrs {
+        line.push(' ');
+        line.push_str(attr_key);
+        if attr_value.is_empty() {
+        } else if attr_value.contains(char::is_whitespace) {
+            line.push_str("=\"");
+            line.push_str(attr_value);
+            line.push('"');
+        } else {
+            line.push('=');
+            line.push_str(attr_value);
+        }
+    }
+    line.push_str(eol);
+    if line == header {
+        return None;
+    }
+    let from = utf16_len(&doc[..block.start]);
+    Some(BlockEdit {
+        from,
+        to: from + utf16_len(header),
+        insert: line,
+    })
+}
+
+fn valid_header_attr(key: &str, value: Option<&str>) -> bool {
+    if key.is_empty()
+        || key.contains(|c: char| c.is_control() || c.is_whitespace() || c == '=' || c == '`')
+    {
+        return false;
+    }
+    value.is_none_or(|value| !value.contains(|c: char| c.is_control() || c == '"' || c == '`'))
 }
 
 /// Ensure every ` ```mica ` block carries an `id=`; id-less blocks get a fresh
@@ -113,60 +323,21 @@ pub fn ensure_ids_impl(doc: &str) -> String {
 /// assert!(out.contains("name=\"My block\""));
 /// ```
 pub fn set_block_attr_impl(doc: &str, id: &str, key: &str, value: Option<&str>) -> Option<String> {
-    if key == "id"
-        || key.is_empty()
-        || key.contains(|c: char| c.is_whitespace() || c == '=' || c == '`')
-    {
-        return None; // id is identity; malformed keys can't round-trip
+    if key == "id" || !valid_header_attr(key, value) {
+        return None;
     }
-    if let Some(v) = value {
-        // The attr grammar has no escapes, and a backtick would end the fence's
-        // info string per CommonMark — refuse values that can't round-trip.
-        if v.contains('"') || v.contains('`') || v.contains('\n') || v.contains('\r') {
-            return None;
-        }
-    }
-    let b = scan_impl(doc).into_iter().find(|b| b.id() == Some(id))?;
-    let header = &doc[b.start..b.content_start];
-    let indent_len = header.len() - header.trim_start_matches(' ').len();
-    let indent = &header[..indent_len];
-    let fence = &header[indent_len..indent_len + b.fence_len];
-
-    let mut attrs = b.attrs;
-    match value {
-        Some(v) => {
-            if let Some(slot) = attrs.iter_mut().find(|(k, _)| k == key) {
-                slot.1 = v.to_string();
-            } else {
-                attrs.push((key.to_string(), v.to_string()));
-            }
-        }
-        None => attrs.retain(|(k, _)| k != key),
-    }
-
-    let mut line = String::with_capacity(header.len() + value.map_or(0, str::len) + key.len() + 4);
-    line.push_str(indent);
-    line.push_str(fence);
-    line.push_str("mica");
-    for (k, v) in &attrs {
-        line.push(' ');
-        line.push_str(k);
-        if v.is_empty() {
-        } else if v.contains(char::is_whitespace) {
-            line.push_str("=\"");
-            line.push_str(v);
-            line.push('"');
-        } else {
-            line.push('=');
-            line.push_str(v);
-        }
-    }
-    line.push('\n');
-
-    let mut out = String::with_capacity(doc.len() - header.len() + line.len());
-    out.push_str(&doc[..b.start]);
-    out.push_str(&line);
-    out.push_str(&doc[b.content_start..]);
+    let block = unique_block_by_id(doc, id)?;
+    let Some(edit) = header_edit_for_block(doc, &block, key, value) else {
+        return Some(doc.to_string());
+    };
+    // Convert the known header boundaries in bytes without a UTF-16 reverse
+    // map; this full-document compatibility API still shares all validation
+    // and reconstruction with the exact-range edit.
+    let mut out =
+        String::with_capacity(doc.len() - (block.content_start - block.start) + edit.insert.len());
+    out.push_str(&doc[..block.start]);
+    out.push_str(&edit.insert);
+    out.push_str(&doc[block.content_start..]);
     Some(out)
 }
 
@@ -208,6 +379,44 @@ mod tests {
     fn unknown_id_returns_none() {
         assert!(replace_block_content_impl("```mica id=a\nx\n```\n", "b", "y").is_none());
         assert!(block_content_edit_impl("```mica id=a\nx\n```\n", "b", "y").is_none());
+    }
+
+    #[test]
+    fn by_id_edits_reject_ambiguous_duplicates() {
+        let doc = "```mica id=dup\na\n```\n```mica id=dup\nb\n```\n";
+        assert!(block_content_edit_impl(doc, "dup", "new\n").is_none());
+        assert!(replace_block_content_impl(doc, "dup", "new\n").is_none());
+        assert!(guarded_block_content_edit_impl(doc, "dup", "a\n", "new\n").is_none());
+        assert!(set_block_attr_edit_impl(doc, "dup", "name", Some("x")).is_none());
+    }
+
+    #[test]
+    fn guarded_edit_rejects_stale_and_noop_content() {
+        let doc = "```mica id=a\ncurrent\n```\n";
+        assert!(guarded_block_content_edit_impl(doc, "a", "stale\n", "new\n").is_none());
+        assert!(guarded_block_content_edit_impl(doc, "a", "current\n", "current\n").is_none());
+        let edit = guarded_block_content_edit_impl(doc, "a", "current\n", "new\n").unwrap();
+        assert_eq!(edit.insert, "new\n");
+    }
+
+    #[test]
+    fn occurrence_rewrite_targets_only_requested_duplicate() {
+        let doc = "😀\n```mica id=dup name=first\na\n```\n```mica id=dup name=second\nb\n```\n";
+        let view = crate::scanner::scan_view_impl(doc);
+        let edit = rewrite_block_id_at_impl(doc, view[1].start, "dup", "fresh").unwrap();
+        assert_eq!(edit.from, view[1].start);
+        assert_eq!(edit.insert, "```mica id=fresh name=second\n");
+        assert!(rewrite_block_id_at_impl(doc, view[1].start, "wrong", "fresh").is_none());
+        assert!(rewrite_block_id_at_impl(doc, view[1].start + 1, "dup", "fresh").is_none());
+    }
+
+    #[test]
+    fn occurrence_rewrite_rejects_duplicate_or_unsafe_new_id() {
+        let doc = "```mica id=a\na\n```\n```mica id=b\nb\n```\n";
+        let start = crate::scanner::scan_view_impl(doc)[1].start;
+        assert!(rewrite_block_id_at_impl(doc, start, "b", "a").is_none());
+        assert!(rewrite_block_id_at_impl(doc, start, "b", "bad\nid").is_none());
+        assert!(rewrite_block_id_at_impl(doc, start, "b", "b").is_none());
     }
 
     #[test]
@@ -273,6 +482,21 @@ mod tests {
         let b = &scan_impl(&out)[0];
         assert_eq!(b.get("name"), Some("My block"));
         assert_eq!(b.get("density"), Some("compact"));
+    }
+
+    #[test]
+    fn header_edit_preserves_indent_crlf_and_has_exact_range() {
+        let doc = "😀\r\n  ````mica id=a density=compact\r\nx\r\n  ````\r\n";
+        let edit = set_block_attr_edit_impl(doc, "a", "name", Some("My block")).unwrap();
+        assert_eq!(edit.from, "😀\r\n".encode_utf16().count());
+        assert_eq!(
+            edit.insert,
+            "  ````mica id=a density=compact name=\"My block\"\r\n"
+        );
+        assert_eq!(
+            set_block_attr_impl(doc, "a", "name", Some("My block")).unwrap(),
+            "😀\r\n  ````mica id=a density=compact name=\"My block\"\r\nx\r\n  ````\r\n"
+        );
     }
 
     #[test]

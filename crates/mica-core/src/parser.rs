@@ -11,6 +11,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Bound structural recursion so hostile input cannot exhaust the native or
+/// WebAssembly stack. Deeper directive-looking lines remain opaque markdown;
+/// their exact bytes still round-trip.
+const MAX_STRUCTURAL_DEPTH: usize = 128;
+
 /// Parsed content of one block: an ordered list of top-level nodes.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Cst {
@@ -52,7 +57,7 @@ pub enum Node {
 pub fn parse_block_impl(content: &str) -> Cst {
     let src = Src::new(content);
     let mut pos = 0;
-    let (children, _stop) = parse_children(&src, &mut pos, None, false, false);
+    let (children, _stop) = parse_children(&src, &mut pos, None, false, false, 0);
     Cst { children }
 }
 
@@ -163,6 +168,7 @@ fn parse_children(
     close_colons: Option<usize>,
     in_tab_body: bool,
     in_tabs_group: bool,
+    depth: usize,
 ) -> (Vec<Node>, Stop) {
     let mut children = Vec::new();
     // First line of the currently open prose run, if any, and whether that
@@ -197,33 +203,36 @@ fn parse_children(
             // Inside an explicit `:::tabs`, delimiters ARE the group's tabs —
             // wrapping them in a second tabs group hides them from renderers.
             if in_tabs_group {
-                children.extend(collect_delim_tab_nodes(src, pos, close_colons));
+                children.extend(collect_delim_tab_nodes(src, pos, close_colons, depth));
             } else {
-                children.push(collect_delim_tabs(src, pos, close_colons));
+                children.push(collect_delim_tabs(src, pos, close_colons, depth));
             }
             continue;
         }
 
         // 3. A colon-fence directive opens a nested container (explicit nesting).
-        if let Some((colons, name, title)) = colon_open(text) {
-            flush_md(&mut children, src, &mut md_start, *pos);
-            let open_line = line.to_string();
-            *pos += 1;
-            let (kids, stop) = parse_children(src, pos, Some(colons), false, name == "tabs");
-            let close_line = if let Stop::Closed(l) = stop {
-                l
-            } else {
-                String::new()
-            };
-            children.push(Node::Container {
-                name,
-                title,
-                colons,
-                open_line,
-                children: kids,
-                close_line,
-            });
-            continue;
+        if depth < MAX_STRUCTURAL_DEPTH {
+            if let Some((colons, name, title)) = colon_open(text) {
+                flush_md(&mut children, src, &mut md_start, *pos);
+                let open_line = line.to_string();
+                *pos += 1;
+                let (kids, stop) =
+                    parse_children(src, pos, Some(colons), false, name == "tabs", depth + 1);
+                let close_line = if let Stop::Closed(l) = stop {
+                    l
+                } else {
+                    String::new()
+                };
+                children.push(Node::Container {
+                    name,
+                    title,
+                    colons,
+                    open_line,
+                    children: kids,
+                    close_line,
+                });
+                continue;
+            }
         }
 
         // 4. A code fence opens an opaque code leaf (colons/tabs inside are inert).
@@ -298,6 +307,7 @@ fn collect_delim_tab_nodes(
     src: &Src<'_>,
     pos: &mut usize,
     close_colons: Option<usize>,
+    depth: usize,
 ) -> Vec<Node> {
     let mut tabs = Vec::new();
     while *pos < src.line_count() {
@@ -307,7 +317,7 @@ fn collect_delim_tab_nodes(
         };
         let open_line = line.to_string();
         *pos += 1;
-        let (body, stop) = parse_children(src, pos, close_colons, true, false);
+        let (body, stop) = parse_children(src, pos, close_colons, true, false, depth + 1);
         tabs.push(Node::Container {
             name: "tab".to_string(),
             title: name.to_string(),
@@ -324,13 +334,18 @@ fn collect_delim_tab_nodes(
 }
 
 /// Wrap a run of `tab:` sections in the implicit (friendly-form) tabs group.
-fn collect_delim_tabs(src: &Src<'_>, pos: &mut usize, close_colons: Option<usize>) -> Node {
+fn collect_delim_tabs(
+    src: &Src<'_>,
+    pos: &mut usize,
+    close_colons: Option<usize>,
+    depth: usize,
+) -> Node {
     Node::Container {
         name: "tabs".to_string(),
         title: String::new(),
         colons: 0,
         open_line: String::new(),
-        children: collect_delim_tab_nodes(src, pos, close_colons),
+        children: collect_delim_tab_nodes(src, pos, close_colons, depth),
         close_line: String::new(),
     }
 }
@@ -742,11 +757,51 @@ mod tests {
 
     #[test]
     fn roundtrip_real_note_content_if_present() {
-        // A large real note round-trips byte-exact (no ::: directives — just
-        // prose/callout/code leaves; this stresses fidelity on ~700 KB).
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/real-note.md");
-        if let Ok(src) = std::fs::read_to_string(path) {
-            assert_eq!(serialize_impl(&parse_block_impl(&src)), src);
+        // Portable, sanitized real-note-shaped fixture: CI must execute the
+        // same property on every machine instead of silently skipping it.
+        let src = include_str!("../testdata/real-note.md");
+        assert_eq!(serialize_impl(&parse_block_impl(src)), src);
+    }
+
+    #[test]
+    fn adversarial_depth_roundtrips_without_stack_overflow() {
+        let depth = 10_000;
+        let mut src = String::with_capacity(depth * 14);
+        for _ in 0..depth {
+            src.push_str(":::section\n");
+        }
+        src.push_str("payload\n");
+        for _ in 0..depth {
+            src.push_str(":::\n");
+        }
+        assert_eq!(serialize_impl(&parse_block_impl(&src)), src);
+    }
+
+    #[test]
+    fn generated_mixed_documents_roundtrip_byte_exact() {
+        const FRAGMENTS: &[&str] = &[
+            "plain text\n",
+            "\r\n",
+            ":::tabs\n",
+            ":::tab T {icon=star}\r\n",
+            ":::grid {cols=2}\n",
+            ":::cell\n",
+            ":::\n",
+            "tab: Friendly\r\n",
+            "```js\n:::not-structure\n```\n",
+            "> [!note] Callout\n> body\r\n",
+            "unterminated final line",
+        ];
+        let mut state = 0x4d49_4341_u64;
+        for case in 0..256 {
+            let mut src = String::new();
+            for _ in 0..(8 + case % 24) {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                src.push_str(FRAGMENTS[state as usize % FRAGMENTS.len()]);
+            }
+            assert_eq!(serialize_impl(&parse_block_impl(&src)), src, "case {case}");
         }
     }
 
