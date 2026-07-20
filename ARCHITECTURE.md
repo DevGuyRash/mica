@@ -34,7 +34,7 @@ Every correctness guarantee comes from one discipline repeated at three layers:
 
 ## Rust → WASM core
 
-- A **context-tracking line scanner** (`None` / inside-a-foreign-fence / inside-a-mica-block) delimits blocks in one O(bytes) pass — replacing backtick-counting. Per CommonMark, everything inside any fence is literal until that fence's closer, so a ` ```mica ` example _quoted_ inside a longer documentation fence is never treated as a real block. The serializer guarantees the outer fence is strictly longer than every inner one on write. Inside a block, tabs use the friendly closer-free `tab:` delimiter (each `tab:` line auto-closes at the next one); colon-fence directives (`:::tabs` / `:::tab` / `:::grid` / `:::cell`) provide grids and explicit nesting. Both are parsed by one recursive descent that treats inner code fences as opaque and stores exact source strings, so every shape round-trips byte-for-byte.
+- A **context-tracking line scanner** (`None` / inside-a-foreign-fence / inside-a-mica-block) delimits blocks in one O(bytes) pass — replacing backtick-counting. Per CommonMark, everything inside any fence is literal until that fence's closer, so a ` ```mica ` example _quoted_ inside a longer documentation fence is never treated as a real block. Every guarded block-content write scans replacement closers and atomically grows the original opener and closer when necessary; a nested editor can therefore introduce a longer fence without terminating its Mica block. Inside a block, tabs use the friendly closer-free `tab:` delimiter (each `tab:` line auto-closes at the next one); colon-fence directives (`:::tabs` / `:::tab` / `:::grid` / `:::cell` / reversible `:::section`) provide grids, explicit nesting, and logical section grouping. Both are parsed by one recursive descent that treats inner code fences as opaque and stores exact source strings, so every untouched shape round-trips byte-for-byte.
 - The parse result is a **CST of containers and opaque leaves**; every node stores its exact source strings, so `serialize(parse(x)) == x` byte-for-byte for unedited trees. Leaf content is never re-flowed; Mica parses structure, not markdown inline syntax.
 - **Boundary.** Structured data crosses through `serde-wasm-bindgen`. Common edit paths use coarse text APIs (`apply_op_text`, `apply_ops_text`, and exact-range block/header edits), so the CST stays in Rust instead of being cloned into JavaScript and back. A full-document scan of the real 711 KB note measures ~0.7 ms. Offsets crossing to CodeMirror are converted to UTF-16 in a single forward pass. The `.wasm` is inlined into `main.js` as a `Uint8Array` (esbuild `binary` loader) and instantiated once.
 
@@ -52,9 +52,10 @@ cells, and whole groups, with subtree-cycle rejection and automatic
 friendly⇄directive form conformance so a move can never reparse into a
 different structure), moveRegion (leaf runs — prose sections, callouts, code
 blocks — relocated between group containers with same-parent re-indexing),
-insertLeaf, duplicateNode, setTabAttr, setCols. The parser gives callouts
-their own leaf (like code fences), so each is an independently draggable,
-editable section. The host
+combineRegions/uncombineSection (exact-preimage, Markdown-only grouping through
+a reversible `:::section` wrapper), insertLeaf, duplicateNode, setTabAttr,
+setCols. The parser gives callouts and fenced code their own leaves, so each is
+an independently draggable, editable section. The host
 re-scans the **live** document, applies the op to a fresh parse, and dispatches
 one `{from,to,insert}` change whose bounds were recomputed at that instant.
 `saveRegion` carries the region's expected text and is refused if the block
@@ -69,10 +70,17 @@ Rust to rewrite only that header. Cross-block moves require stable ids, derive
 both exact pre-images from one live document, and dispatch both replacements in
 one ordered CodeMirror transaction.
 
-The editors are CodeMirror 6 (`src/ui/mdEditor.ts`) — a compact quick editor
-in place and a full lightbox — with an explicit save lifecycle: Save /
-Ctrl+Enter commit, Esc double-taps to discard when dirty, and blur does
-NOTHING. In-progress drafts live on the plugin keyed by block id, so widget
+The editors are CodeMirror 6 (`src/ui/mdEditor.ts`) — a compact Markdown quick
+editor and one reusable full lightbox — with reconfigurable Markdown/code
+language compartments and an explicit save lifecycle: Save / Ctrl+Enter
+commit, Esc double-taps to discard when dirty, and blur does NOTHING. Structured
+callout and code adapters edit metadata plus a fence-free/quote-free body, then
+rebuild standard Markdown. Unknown code languages fall back to plain text;
+known languages load asynchronously with a request guard so a stale parser
+cannot replace a newer selection. A single Lezer projection discovers nested
+callouts and quoted code in O(bytes + syntax nodes); source ranges remain the
+authority, and nested controls attach only when rendered DOM cardinality is
+unambiguous. In-progress drafts live on the plugin keyed by block id, so widget
 rebuilds and reading⇄editing flips reopen the editor with nothing lost.
 Destructive ops capture the immediate pre-image and offer an Undo toast instead
 of a confirm dialog. Undo and raw-source saves carry an exact expected value;
@@ -99,6 +107,20 @@ The Rust `similar` crate provides char/word/line granularity, intra-line emphasi
 ## Clipboard projection
 
 Every rendered structural unit exposes the same CST-backed copy path in Reading view and Live Preview. A pure TypeScript projection walks the selected exact CST once: raw mode serializes its stored source segments; portable mode removes only recognized Mica container lines, drops whitespace-only boundary scaffolding, and preserves one blank-line semantic boundary between nonempty children. Optional outer wrapping synthesizes a backtick fence longer than every inner run and deliberately omits source fence attributes so pasted blocks cannot duplicate identity. The projection is O(bytes) time and O(bytes) output space and never scrapes rendered DOM text.
+
+## Section interaction
+
+Stored content kind is source-derived (`markdown`, `callout`, or fenced `code`);
+rendered/source is a separate view/edit axis and is never persisted as a
+four-way mode enum. Explicit conversions use standard Markdown syntax and name
+metadata loss in the Undo notice. Compatible plain-Markdown regions expose a
+typed light-DOM combine contract. The pointer engine captures same-block
+candidates once, checks cached rectangles in O(visible compatible sections) per
+move with no candidate-list allocation, and promotes a central target only
+after a stationary dwell. Themes own the complete ready outline, tint, glow,
+plus, and motion through `--mica-combine-*` properties. The Rust reducer repeats
+compatibility and both exact-preimage checks before it creates or extends one
+logical wrapper; callouts and code are conservatively excluded.
 
 ## The standalone CLI
 
@@ -129,5 +151,5 @@ Rust: `crates/mica-core/src/{scanner,parser,edit,versions,diff,reconcile,migrate
 
 1. `cargo test --workspace` — core, CLI, integration, adversarial-depth/scaling, and documentation tests.
 2. `pnpm smoke` — the WASM boundary end-to-end in Node (ids, hashing, guarded/exact edits, atomic batches, duplicate repair, migrate+edit+diff).
-3. `pnpm e2e` — seven contract + rendering specs inside a real downloaded Obsidian under Xvfb. Scheduled profiles repeat the suite at the minimum supported app version and under mobile emulation.
+3. `pnpm e2e` — eight contract + rendering specs inside a real downloaded Obsidian under Xvfb. Scheduled profiles repeat the suite at the minimum supported app version and under mobile emulation.
 4. `just e2e-cli` — contract checks via the official Obsidian CLI against the running app; skips with instructions when the CLI isn't activated.

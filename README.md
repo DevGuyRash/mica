@@ -3,7 +3,7 @@
 **Versioned, structured content blocks for Obsidian — with a real command line.** Fast nested tabs and grids, first-class per-block version history, Meld-class diffing, a full markdown editor with toolbar, and a standalone `mica` CLI that drives your vault with Obsidian closed — all in plain, portable Markdown. Mica is a modern replacement for the `obsidian-tabs` plugin, built around guarded source transformations and recoverable version history.
 
 - **Tabs & grids** that nest deeply (up to 128 structural levels), without stacking backticks.
-- **A real editor.** Click any text to edit in place with a CodeMirror markdown editor and toolbar; expand to a full-screen lightbox with live preview. Nothing commits merely because the editor loses focus, and unsaved conflicts remain visible to the user.
+- **Real Markdown and code editors.** Click prose to edit Markdown in place, or expand callouts and fenced code into structured lightboxes. Code blocks expose their optional language/info string and use matching syntax highlighting. Nothing commits merely because an editor loses focus, and unsaved conflicts remain visible to the user.
 - **Block-level versioning.** Give a block an id and Mica snapshots semantic content changes into a sidecar folder you can read, diff, label, and restore — from the app or the shell.
 - **Drag anything.** Tabs, cells, and whole groups move by pointer with live insertion indicators, spring-loaded tabs, and keyboard alternatives.
 - **Two engines, one brain.** The Obsidian plugin and the `mica` CLI share the same Rust core, so a script at 2 a.m. and a click at noon behave identically.
@@ -50,9 +50,9 @@ The second tab. Click the tab bar to switch (or arrow keys when focused).
 
 Already have markdown you want inside a block? Select it and run **`Mica: Wrap selection in a Mica block`**.
 
-**2. Edit it.** In **Live Preview**, click any text to open the **quick editor** — real markdown highlighting, a toolbar (bold, italic, lists, callout picker, code blocks, …), and Save/Cancel that never move out from under your pointer. Press the expand button (or **Ctrl/Cmd+click** the text) for the **full-screen lightbox** with a live preview pane. `Ctrl+Enter` saves; `Esc` asks before discarding real changes. Clicking away does nothing by default; explicit save/cancel-on-click-away modes are available in settings.
+**2. Edit it.** In **Live Preview**, click prose to open the **quick source editor** — real Markdown highlighting, a toolbar (bold, italic, lists, callout picker, code blocks, …), and Save/Cancel that never move out from under your pointer. Clicking a callout or fenced code section opens its structured lightbox; code gets an optional language/info field and language-aware highlighting. The section-type menu switches standard Markdown among prose, callout, and fenced-code representations, while **Rendered Markdown** and **Source** remain views of that content rather than extra file formats. Press the expand button (or **Ctrl/Cmd+click** the text) for the **full-screen source lightbox** with a live preview pane. `Ctrl+Enter` saves; `Esc` asks before discarding real changes. Clicking away does nothing by default; explicit save/cancel-on-click-away modes are available in settings.
 
-**3. Restructure it.** Add a tab with **`+`**, rename with a double-click, right-click a tab for icons/duplicate/delete, and **drag** tabs, cells, or whole groups wherever they should live — insertion lines show exactly where things land, and hovering a tab mid-drag springs it open so you can drop inside. Deletions offer **Undo** instead of nagging with confirms. Hover between any two sections for a quiet **+** that inserts prose, a callout, a code block, or a whole new group right there.
+**3. Restructure it.** Add a tab with **`+`**, rename with a double-click, right-click a tab for icons/duplicate/delete, and **drag** tabs, cells, sections, or whole groups wherever they should live — insertion lines show exactly where things land, and hovering a tab mid-drag springs it open so you can drop inside. Hold compatible Markdown over another section for a moment and the line becomes a full target outline with a large **+**; dropping combines them into one reversible section. The ordinary section menu provides previous/next combine actions for keyboard and touch use. Deletions, conversions, combines, and uncombines offer conflict-guarded **Undo** instead of nagging with confirms. Hover between any two sections for a quiet **+** that inserts prose, a callout, a code block, or a whole new group right there.
 
 **4. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history. The footer's **`v3 ●`** chip means three versions and unsaved changes; click it for the **timeline** — labels, relative times, one-click restore, branch-edit, and readable diffs. Right-click the chip for auto-save controls.
 
@@ -69,7 +69,9 @@ The extras:
 - **Block header attrs** (managed for you, editable by hand): ` ```mica id=… name="…" accent=#7c5cff density=compact tabstyle=pill radius=8 ` — `id` anchors history; the rest are per-block appearance, set from the block's ⋮ menu.
 - **Per-tab icons**: `tab: Deploy {icon=rocket}` shows a Lucide icon in the chip (set via right-click → _Set icon…_).
 - **Callouts** — any Obsidian callout works, rendered natively.
+- **Code blocks** — ordinary backtick or tilde fences, with an optional language/info string; rendered by Obsidian and editable as language + body, including when quoted inside a callout.
 - **Grids** — `:::grid {cols=3}` … `:::` containing `:::cell` … `:::` cells.
+- **Combined sections** — `:::section` … `:::` is the reversible wrapper Mica creates when compatible Markdown sections are combined. It changes layout grouping, not the Markdown inside, and **Uncombine** removes only the wrapper.
 - **Nesting** — the flat `tab:` form can't nest, so nested groups use the explicit `:::tabs` / `:::tab Title` form. You'll rarely type it: the insert menus and drag-and-drop build (and convert) nesting for you, correctly, every time.
 
 Everything is ordinary Markdown, and Mica sizes fences for you — you never count backticks.
@@ -84,7 +86,7 @@ Everything is ordinary Markdown, and Mica sizes fences for you — you never cou
 
 Hover a block (or pin it via settings) for its header: **name** (click to rename), the **navigator** (a tree of every tab/grid/cell with word counts — click to jump), a one-click **Copy** control, and the **⋮ menu** (edit whole block in the lightbox, per-block appearance, version history, save version now). The chevron collapses the block to one line.
 
-Clipboard buttons also live on tab groups, individual tabs, grids, cells, text/code sections, callouts, nested callouts, and folded sections in both Reading view and Live Preview. By default they copy portable Markdown content with Mica layout wrappers removed. Two independent settings can preserve the selected layout syntax and/or wrap the result in a fresh identity-free `mica` code fence.
+Clipboard buttons also live on tab groups, individual tabs, grids, cells, text/code sections, callouts, nested callouts, nested code, combined sections, and folded sections in both Reading view and Live Preview. By default they copy portable Markdown content with Mica layout wrappers removed. Two independent settings can preserve the selected layout syntax and/or wrap the result in a fresh identity-free `mica` code fence.
 
 ---
 

@@ -24,7 +24,9 @@ A Mica block is a fenced code block tagged `mica` with a header attribute list:
 - `tab: Title` — the everyday way to write a tab. No closer.
 - `:::grid {cols=3 gap=8}` … `:::` — a grid/menu of `:::cell` … `:::`.
 - `:::tabs` … `:::` with `:::tab Title` … `:::` — the explicit form, used to NEST a tab group inside a tab (the flat `tab:` delimiter can't express nesting). Deeper nesting uses more colons (`::::tabs` wraps `:::tab`), through the 128-level structural safety limit.
+- `:::section` … `:::` — a reversible logical wrapper created only when compatible Markdown sections are combined. It preserves the enclosed paragraph/source boundaries; uncombine removes the wrapper without rewriting the children.
 - Callouts use Obsidian's native `> [!type]` syntax, unchanged, inside any body.
+- Code sections use standard backtick or tilde fences with an optional language/info string, unchanged.
 
 Rules (testable):
 
@@ -66,22 +68,37 @@ tab: Kernel
   (copy / grip / delete); a newly inserted grid starts empty with one ghost "+"
   tile in its first slot; choosing a content type creates the first cell; the
   cols chip edits count.
-- Direct manipulation: pointer drag for tabs, cells, and whole groups with live
-  insertion indicators, spring-loaded tabs, auto-scroll, Esc cancel. Insert-between
-  zones put prose/callouts/code/groups anywhere. Deletes offer Undo, never confirms.
+- Direct manipulation: pointer drag for tabs, cells, sections, and whole groups
+  with live insertion indicators, spring-loaded tabs, auto-scroll, Esc cancel.
+  A stationary central dwell over a compatible Markdown section transforms the
+  insertion line into a themeable full-target border/tint/glow with a large `+`;
+  drop combines target-first. Section menus expose previous/next compatible
+  actions as the keyboard/touch path. Insert-between zones put
+  prose/callouts/code/groups anywhere. Deletes and structural transforms offer
+  conflict-guarded Undo, never confirms.
 - Every block has a hover header: name, navigator tree (jump anywhere), ⋮ menu,
   copy, collapse. A pencil/book glyph says whether THIS view can edit. Copy also
   appears in the existing hover/touch tools for groups, tabs, cells, sections,
-  callouts, nested callouts, and folded units in Reading and Live Preview.
+  callouts, nested callouts, nested code, combined sections, and folded units in
+  Reading and Live Preview.
 
 ## Editing UX
 
-- One CodeMirror 6 markdown editor everywhere: the in-place quick editor (pinned
-  action bar on top, mini toolbar) and the full-screen lightbox (full toolbar,
-  live preview pane, word count).
+- One reconfigurable CodeMirror 6 editor everywhere: the in-place Markdown
+  source editor (pinned action bar on top, mini toolbar) and the shared
+  full-screen lightbox (live preview pane, word/character count). Structured
+  callout and code-block variants reuse that lightbox; code exposes an optional
+  language/info field, language-aware colors, and a fence-free body.
 - The toolbar's callout picker lists every Obsidian type AND the Admonition
   plugin's custom types, with fold modes and an optional title; the code-block
   picker sizes fences to out-nest their content.
+- Content kind and editor view are separate: Markdown/callout/code is derived
+  from standard source syntax, while rendered/source is a transient view axis.
+  The section menu performs explicit, undoable conversions and names metadata
+  that is removed. Rendered Markdown itself has no editor state.
+- Fenced code quoted inside a callout receives the same copy/drag/delete/expand
+  tools when its source range maps one-to-one to Obsidian's native render;
+  ambiguous processor output intentionally falls back to the parent editor.
 - Save is explicit (button / Ctrl+Enter). Esc double-taps to discard when dirty.
   Blur never commits. Drafts survive rebuilds and mode flips.
 
@@ -106,6 +123,9 @@ tab: Kernel
 - Settings: snapshot debounce, diff defaults, version chip, block-header mode
   (hover/always/never), density, radius, tab style, animations, copy syntax /
   outer-container modes, editor sizing.
+- Section-combine feedback is theme-owned through `--mica-combine-*` custom
+  properties (ring, fill, glow, plus, timing), with a static reduced-motion
+  presentation.
 
 ## Accessibility
 
