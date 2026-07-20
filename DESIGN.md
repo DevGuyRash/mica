@@ -1,6 +1,8 @@
 # Mica — Design (UX & Syntax)
 
-> Living document. How Mica looks, feels, and reads. Pairs with `PRD.md` and `ARCHITECTURE.md`.
+> Forward-looking design document. Current behavior is described directly;
+> unshipped proposals are marked **Planned**. Pairs with `PRD.md` and
+> `ARCHITECTURE.md`.
 
 ## Principles
 
@@ -21,7 +23,7 @@ A Mica block is a fenced code block tagged `mica` with a header attribute list:
 
 - `tab: Title` — the everyday way to write a tab. No closer.
 - `:::grid {cols=3 gap=8}` … `:::` — a grid/menu of `:::cell` … `:::`.
-- `:::tabs` … `:::` with `:::tab Title` … `:::` — the explicit form, used to NEST a tab group inside a tab (the flat `tab:` delimiter can't express nesting). Deeper nesting uses more colons (`::::tabs` wraps `:::tab`).
+- `:::tabs` … `:::` with `:::tab Title` … `:::` — the explicit form, used to NEST a tab group inside a tab (the flat `tab:` delimiter can't express nesting). Deeper nesting uses more colons (`::::tabs` wraps `:::tab`), through the 128-level structural safety limit.
 - Callouts use Obsidian's native `> [!type]` syntax, unchanged, inside any body.
 
 Rules (testable):
@@ -61,12 +63,16 @@ tab: Kernel
   active state legible on any theme (accent underline + fill), optional per-tab
   Lucide icons, an all-tabs menu when the strip overflows.
 - Grids: responsive columns from `{cols}`; visible cell borders; hover tools
-  (grip / delete); a ghost "+" tile adds the next cell; the cols chip edits count.
+  (copy / grip / delete); a newly inserted grid starts empty with one ghost "+"
+  tile in its first slot; choosing a content type creates the first cell; the
+  cols chip edits count.
 - Direct manipulation: pointer drag for tabs, cells, and whole groups with live
   insertion indicators, spring-loaded tabs, auto-scroll, Esc cancel. Insert-between
   zones put prose/callouts/code/groups anywhere. Deletes offer Undo, never confirms.
 - Every block has a hover header: name, navigator tree (jump anywhere), ⋮ menu,
-  collapse. A pencil/book glyph says whether THIS view can edit.
+  copy, collapse. A pencil/book glyph says whether THIS view can edit. Copy also
+  appears in the existing hover/touch tools for groups, tabs, cells, sections,
+  callouts, nested callouts, and folded units in Reading and Live Preview.
 
 ## Editing UX
 
@@ -82,13 +88,13 @@ tab: Kernel
 ## Versioning UX
 
 - A per-block version affordance (chip/dropdown) shows the current label and count; cycling is keyboard-friendly.
-- "Edit previous version" opens the chosen version in place; saving branches by default (a clear toggle offers amend).
-- A live gutter indicator marks lines changed since the last snapshot (git-gutter style).
+- "Edit previous version" opens the chosen version in place and saving creates a branch. **Planned:** an explicit amend toggle.
+- **Planned:** a live gutter indicator for lines changed since the last snapshot.
 
 ## Diff UX
 
-- A diff surface compares up to three versions against a highlighted **base** the user can swap.
-- Modes: inline (single column, ± with intra-line emphasis), side-by-side (2-up), N-up (≤ 3 columns), patch (copyable unified diff).
+- A diff surface compares up to four versions against a highlighted **base** the user can swap.
+- Modes: inline (single column, ± with intra-line emphasis), side-by-side (2-up), N-up (≤ 4 columns), patch (copyable unified diff).
 - Granularity toggle: line / word / char. Non-color status cues (icons/underlines) for accessibility.
 
 ## Customization surface
@@ -98,8 +104,9 @@ tab: Kernel
 - Per-block overrides (accent / density / tab style / radius / name) live as
   fence-header attrs, edited from the block's ⋮ menu — they travel with the note.
 - Settings: snapshot debounce, diff defaults, version chip, block-header mode
-  (hover/always/never), density, radius, tab style, animations, editor sizing.
+  (hover/always/never), density, radius, tab style, animations, copy syntax /
+  outer-container modes, editor sizing.
 
 ## Accessibility
 
-- Full keyboard operation for tabs, versions, and diffs; ARIA roles throughout; never color-only status; respects reduced-motion.
+- Primary tab, navigator, version, and diff controls have keyboard paths and labelled controls; status is not color-only and reduced-motion is respected. **Planned:** keyboard access to every editor-toolbar affordance.

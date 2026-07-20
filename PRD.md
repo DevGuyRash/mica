@@ -1,6 +1,9 @@
 # Mica — Product Requirements (PRD)
 
-> Living document. The vision and full feature set — what we build toward. Pairs with `ARCHITECTURE.md` (how) and `DESIGN.md` (UX & syntax).
+> Forward-looking product document — what Mica builds toward, not a claim that
+> every item ships in the current release. Current behavior is documented in
+> `README.md` and `ARCHITECTURE.md`; planned or not-yet-verified items are marked
+> explicitly below.
 
 ## 1. Problem
 
@@ -31,19 +34,24 @@ Non-coders can live entirely in Reading/Live Preview; power users and agents can
 ### 4.1 Blocks, tabs, grids
 
 - A `mica` block is a fenced code block carrying a stable UUID.
-- Layout primitives — tab groups, grids/menus, cells, callouts — nest arbitrarily via colon-fence directives, without increasing backtick depth.
+- Layout primitives — tab groups, grids/menus, cells, callouts — nest through 128 structural levels via colon-fence directives, without increasing backtick depth. Deeper input remains byte-exact but is treated as opaque content.
 - Mica auto-computes fence lengths so nesting never corrupts and users never count backticks.
+- WHEN a user inserts a grid THEN Mica SHALL create an empty two-column grid and SHALL present an explicit first-cell affordance without opening an editor.
+- WHEN a user copies a block, group, tab, grid, cell, section, callout, nested callout, or folded unit THEN Mica SHALL preserve standard Markdown content and SHALL remove Mica layout wrappers by default.
+- WHEN “Include Mica layout syntax” is enabled THEN Mica SHALL preserve the selected unit's exact recognized `tab:` and `:::` wrappers.
+- WHEN “Wrap copies in an outer Mica block” is enabled THEN Mica SHALL use an identity-free fence longer than any inner backtick run and SHALL NOT copy the source block id.
+- WHEN Mica removes structural wrappers THEN Mica SHALL preserve nonblank authored whitespace and source line endings and SHALL retain one semantic blank-line boundary between adjacent nonempty structural children.
 
 ### 4.2 Versioning (first-class)
 
-- Every change to a block snapshots the prior content as an immutable, content-addressed object in a co-located sidecar.
-- Cycle between versions; revert; edit a previous version in place (branch by default, amend on request); view lineage.
-- Auto version-bump for template-derived blocks.
+- Semantic content changes snapshot the prior content as an immutable, content-addressed object in a co-located sidecar; structure-only layout changes intentionally do not create versions.
+- Cycle between versions; revert; edit a previous version as a branch; view lineage. **Planned:** explicit amend-in-place.
+- **Planned:** auto version-bump for template-derived blocks.
 
 ### 4.3 Diffing (Meld-class)
 
 - Char-, word-, and line-level diffs with intra-line emphasis.
-- Compare up to three versions at once against a swappable base.
+- Compare up to four versions at once against a swappable base.
 - Modes: inline, side-by-side, N-up, swap-base, patch (unified diff).
 
 ### 4.4 Identity & self-healing
@@ -53,7 +61,7 @@ Non-coders can live entirely in Reading/Live Preview; power users and agents can
 
 ### 4.5 Scriptable API
 
-- The full feature set is reachable through `window.mica`, the command palette, and a file-bridge (inbox/outbox JSON) so AI agents and scripts can drive it headlessly on desktop, mobile, and over Sync. An optional desktop loopback exposes a true `mica` shell CLI.
+- Core block editing, versioning, migration, preparation, and repair are reachable through `window.mica` and a file bridge (inbox/outbox JSON). The standalone `mica` CLI provides the native shell surface. Physical-mobile and two-device Sync behavior remain release-time manual verification gates.
 
 ### 4.6 Migration
 
@@ -69,9 +77,9 @@ Non-coders can live entirely in Reading/Live Preview; power users and agents can
 - Not a real-time collaborative editor.
 - Not a markdown-inline parser — Obsidian renders markdown; Mica parses _structure_.
 
-## 6. Success criteria
+## 6. Acceptance status
 
-- The corruption bug is impossible by construction (a regression test proves it).
-- A 13k-line note edits and scrolls at 60 fps; typing triggers zero WASM calls.
-- The 46 real tabs files migrate losslessly with archives imported as history.
-- Every palette action is reachable headlessly by UUID through the API.
+- **Implemented and regression-tested:** live edits use guarded, freshly scanned ranges instead of cached document offsets.
+- **Partially verified:** cursor-only transactions skip WASM. A sustained 60 fps claim for the 13k-line note still needs a recorded performance run on release hardware.
+- **Not verified from this repository:** the external 46-file legacy corpus migrates losslessly. The checked-in migration fixtures and synthetic regressions are the current automated evidence.
+- **Implemented for the documented core API:** UUID-addressed block/version verbs, migration, preparation, and repair. UI preferences and presentation-only actions are not claimed as headless API surface.
