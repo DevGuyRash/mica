@@ -13,10 +13,27 @@ import type { StructOp } from "../cst/ops";
  * A drag computes insertion slots from live geometry, shows one accent
  * indicator line, spring-loads tab chips (hover to switch panels mid-drag),
  * auto-scrolls near the viewport edges, cancels on Esc, and commits exactly
- * one `moveNode` op on drop.
+ * one move or combine operation on drop.
  */
 
 export type DragKind = "tab" | "cell" | "group" | "region";
+
+/** Exact reducer coordinates for one section that may participate in a
+ * combine gesture. The compatibility key is deliberately narrow: the core is
+ * the final authority, while the UI uses this key only to avoid promising an
+ * operation that the reducer will reject. */
+export interface CombineSpec {
+	path: number[];
+	start: number;
+	end: number;
+	expected: string;
+	key: "markdown";
+}
+
+/** Typed light-DOM hook installed by the renderer on first-class regions.
+ * Keeping the source pre-image on the element (rather than in data attributes)
+ * avoids lossy encoding and lets a drag capture all candidates once. */
+export type CombineTargetElement = HTMLElement & { micaCombine?: CombineSpec };
 
 /** What is being dragged: a node (tab/cell/group) or a leaf run (region). */
 export interface DragSpec {
@@ -24,6 +41,8 @@ export interface DragSpec {
 	fromPath: number[];
 	/** Present for region drags: the leaf run `[start, end)` within `fromPath`. */
 	region?: { start: number; end: number };
+	/** Present only for first-class regions that can combine with another region. */
+	combine?: CombineSpec;
 	/** The dragged thing's serialization — enables CROSS-BLOCK moves (the
 	 *  target block re-parses it via insertLeaf). Regions/groups only. */
 	text?: string | (() => string);
@@ -81,6 +100,18 @@ interface SlotContainer {
 	kids: { el: HTMLElement; idx: number }[];
 }
 
+/** A same-block compatible target captured once when a gesture starts. Its
+ * numeric bounds are refreshed only when layout can move (scroll/tab switch),
+ * so pointer frames never query or rebuild the candidate DOM collection. */
+interface CombineCandidate {
+	el: CombineTargetElement;
+	spec: CombineSpec;
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
+}
+
 /** Block roots expose their op hook for cross-block drops. */
 export interface CrossBlockMove {
 	sourceId: string;
@@ -111,6 +142,14 @@ interface ActiveDrag {
 	containers: SlotContainer[];
 	slots: Slot[];
 	current: Slot | null;
+	combineTargets: CombineCandidate[];
+	combineArmed: CombineCandidate | null;
+	combineReady: CombineCandidate | null;
+	combineTimer: number | null;
+	combineX: number;
+	combineY: number;
+	pointerX: number;
+	pointerY: number;
 	offsetX: number;
 	offsetY: number;
 	markedEl: HTMLElement | null;
@@ -121,6 +160,10 @@ interface ActiveDrag {
 }
 
 let active: ActiveDrag | null = null;
+
+const SPRING_LOAD_DELAY_MS = 300;
+const COMBINE_DWELL_MS = 650;
+const COMBINE_STATIONARY_PX = 6;
 
 const parsePath = (s: string | undefined): number[] => (s ? s.split(".").map(Number) : []);
 
@@ -204,6 +247,8 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 	window.addEventListener("keydown", onKey, true);
 
 	const containers = collectContainers(root, spec);
+	const combineTargets = collectCombineTargets(root, item, spec);
+	refreshCombineTargets(combineTargets);
 	active = {
 		spec,
 		sourceRoot: root,
@@ -215,6 +260,14 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		containers,
 		slots: computeSlots(containers, spec, root),
 		current: null,
+		combineTargets,
+		combineArmed: null,
+		combineReady: null,
+		combineTimer: null,
+		combineX: e.clientX,
+		combineY: e.clientY,
+		pointerX: e.clientX,
+		pointerY: e.clientY,
 		markedEl: null,
 		offsetX: e.clientX - rect.left,
 		offsetY: e.clientY - rect.top,
@@ -225,7 +278,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 			window.removeEventListener("keydown", onKey, true);
 			ghost.remove();
 			indicator.remove();
-			active?.markedEl?.removeClass("mica-drop-inside");
+			item.removeClass("mica-combine-arming", "mica-combine-ready");
 			document.querySelector(".mica-spring-pending")?.removeClass("mica-spring-pending");
 			item.removeClass("mica-dragging");
 			document.body.removeClass("mica-dnd-active");
@@ -294,6 +347,50 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 		}
 	}
 	return containers;
+}
+
+/** Capture compatible regions from the source block only. Cross-block targets
+ * remain ordinary move destinations until the multi-block combine contract is
+ * deliberately defined. */
+function collectCombineTargets(root: HTMLElement, source: HTMLElement, spec: DragSpec): CombineCandidate[] {
+	const sourceSpec = spec.combine;
+	if (!sourceSpec) return [];
+	const targets: CombineCandidate[] = [];
+	for (const el of Array.from(root.querySelectorAll<CombineTargetElement>(".mica-region"))) {
+		if (el === source || el.closest(".mica") !== root) continue;
+		const target = el.micaCombine;
+		if (!target || target.key !== sourceSpec.key || sameCombineRegion(sourceSpec, target)) continue;
+		targets.push({
+			el,
+			spec: { ...target, path: [...target.path] },
+			left: 0,
+			top: 0,
+			right: 0,
+			bottom: 0,
+		});
+	}
+	return targets;
+}
+
+function sameCombineRegion(a: CombineSpec, b: CombineSpec): boolean {
+	return (
+		a.start === b.start &&
+		a.end === b.end &&
+		a.path.length === b.path.length &&
+		a.path.every((part, index) => part === b.path[index])
+	);
+}
+
+function refreshCombineTarget(candidate: CombineCandidate): void {
+	const rect = candidate.el.getBoundingClientRect();
+	candidate.left = rect.left;
+	candidate.top = rect.top;
+	candidate.right = rect.right;
+	candidate.bottom = rect.bottom;
+}
+
+function refreshCombineTargets(candidates: readonly CombineCandidate[]): void {
+	for (const candidate of candidates) refreshCombineTarget(candidate);
 }
 
 /**
@@ -505,6 +602,8 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLE
 function dragMove(e: PointerEvent): void {
 	const d = active;
 	if (!d) return;
+	d.pointerX = e.clientX;
+	d.pointerY = e.clientY;
 	d.ghost.style.transform = `translate(${e.clientX - d.offsetX}px, ${e.clientY - d.offsetY}px)`;
 
 	// You drop where you point: only slots of containers the pointer is inside
@@ -553,32 +652,141 @@ function dragMove(e: PointerEvent): void {
 			}
 		}
 	d.current = best;
-	if (best) {
-		d.indicator.style.display = "block";
-		d.indicator.style.transform = `translate(${best.x}px, ${best.y}px)`;
-		d.indicator.style.width = `${best.w}px`;
-		d.indicator.style.height = `${best.h}px`;
-		d.indicator.toggleClass("is-into", best.w > 8 && best.h > 8);
-	} else {
-		d.indicator.style.display = "none";
-	}
+
+	// Tab switching and auto-scroll can move every target. Both cancel an
+	// in-flight dwell; a stationary pointer must observe one stable target for
+	// the complete interval before combine becomes ready.
+	springLoad(e);
+	const scrolling = autoScroll(e);
+	updateCombineIntent(d, e.clientX, e.clientY, scrolling || d.springEl !== null);
+	paintDropIndicator(d);
+
 	// Content drags (regions, groups): outline the receiving container so an
 	// indicator INSIDE a cell can't be confused with a gap BETWEEN cells.
-	// An INTO-box already outlines the container itself — never both.
+	// An INTO-box or combine target already outlines the destination — never both.
 	const isInto = Boolean(best && best.w > 8 && best.h > 8);
 	const wantMark =
-		(d.spec.kind === "region" || d.spec.kind === "group") && best && !isInto ? best.container.el : null;
+		!d.combineReady && (d.spec.kind === "region" || d.spec.kind === "group") && best && !isInto
+			? best.container.el
+			: null;
 	if (d.markedEl !== wantMark) {
 		d.markedEl?.removeClass("mica-drop-inside");
 		wantMark?.addClass("mica-drop-inside");
 		d.markedEl = wantMark;
 	}
-
-	springLoad(e);
-	autoScroll(e);
 }
 
-/** Hovering an inactive tab chip for 450ms activates it mid-drag. */
+/** The central part of a region is combine territory; its edge band remains a
+ * conventional before/after move target. Choose the smallest containing box
+ * so a future nested visual cannot steal its descendant's dwell. */
+function combineCandidateAt(d: ActiveDrag, x: number, y: number): CombineCandidate | null {
+	let found: CombineCandidate | null = null;
+	let foundArea = Number.POSITIVE_INFINITY;
+	for (const candidate of d.combineTargets) {
+		if (!candidate.el.isConnected) continue;
+		const width = candidate.right - candidate.left;
+		const height = candidate.bottom - candidate.top;
+		if (width <= 0 || height <= 0) continue;
+		const insetX = Math.min(24, Math.max(6, width * 0.18));
+		const insetY = Math.min(20, Math.max(6, height * 0.18));
+		if (
+			x < candidate.left + insetX ||
+			x > candidate.right - insetX ||
+			y < candidate.top + insetY ||
+			y > candidate.bottom - insetY
+		)
+			continue;
+		const area = width * height;
+		if (area < foundArea) {
+			found = candidate;
+			foundArea = area;
+		}
+	}
+	return found;
+}
+
+function updateCombineIntent(d: ActiveDrag, x: number, y: number, blocked: boolean): void {
+	if (!d.spec.combine || blocked) {
+		clearCombineIntent(d);
+		return;
+	}
+	const candidate = combineCandidateAt(d, x, y);
+	if (!candidate) {
+		clearCombineIntent(d);
+		return;
+	}
+	const same = d.combineArmed === candidate;
+	const stationary = Math.hypot(x - d.combineX, y - d.combineY) <= COMBINE_STATIONARY_PX;
+	if (same && stationary) return;
+
+	clearCombineIntent(d);
+	d.combineArmed = candidate;
+	d.combineX = x;
+	d.combineY = y;
+	candidate.el.addClass("mica-combine-arming");
+	d.combineTimer = window.setTimeout(() => promoteCombine(d, candidate), COMBINE_DWELL_MS);
+}
+
+function promoteCombine(d: ActiveDrag, candidate: CombineCandidate): void {
+	d.combineTimer = null;
+	if (active !== d || d.combineArmed !== candidate) return;
+	if (d.scrollRaf !== null || d.springEl !== null) {
+		clearCombineIntent(d);
+		paintDropIndicator(d);
+		return;
+	}
+	refreshCombineTarget(candidate);
+	const stillCentral = combineCandidateAt(d, d.pointerX, d.pointerY) === candidate;
+	const stillStationary = Math.hypot(d.pointerX - d.combineX, d.pointerY - d.combineY) <= COMBINE_STATIONARY_PX;
+	if (!d.sourceRoot.isConnected || !candidate.el.isConnected || !stillCentral || !stillStationary) {
+		clearCombineIntent(d);
+		paintDropIndicator(d);
+		return;
+	}
+	candidate.el.removeClass("mica-combine-arming");
+	candidate.el.addClass("mica-combine-ready");
+	d.combineReady = candidate;
+	paintDropIndicator(d);
+	d.markedEl?.removeClass("mica-drop-inside");
+	d.markedEl = null;
+}
+
+function clearCombineIntent(d: ActiveDrag): void {
+	if (d.combineTimer !== null) window.clearTimeout(d.combineTimer);
+	d.combineTimer = null;
+	d.combineArmed?.el.removeClass("mica-combine-arming");
+	d.combineReady?.el.removeClass("mica-combine-ready");
+	d.combineArmed = null;
+	d.combineReady = null;
+	d.indicator.removeClass("is-combine-ready");
+}
+
+function paintDropIndicator(d: ActiveDrag): void {
+	const ready = d.combineReady;
+	if (ready) {
+		d.indicator.style.display = "block";
+		d.indicator.style.transform = `translate(${ready.left}px, ${ready.top}px)`;
+		d.indicator.style.width = `${Math.max(0, ready.right - ready.left)}px`;
+		d.indicator.style.height = `${Math.max(0, ready.bottom - ready.top)}px`;
+		d.indicator.removeClass("is-into");
+		d.indicator.addClass("is-combine-ready");
+		return;
+	}
+
+	d.indicator.removeClass("is-combine-ready");
+	const slot = d.current;
+	if (!slot) {
+		d.indicator.style.display = "none";
+		return;
+	}
+	d.indicator.style.display = "block";
+	d.indicator.style.transform = `translate(${slot.x}px, ${slot.y}px)`;
+	d.indicator.style.width = `${slot.w}px`;
+	d.indicator.style.height = `${slot.h}px`;
+	d.indicator.toggleClass("is-into", slot.w > 8 && slot.h > 8);
+}
+
+/** Hovering an inactive tab chip for the named delay activates it mid-drag. */
 function springLoad(e: PointerEvent): void {
 	const d = active;
 	if (!d) return;
@@ -588,7 +796,9 @@ function springLoad(e: PointerEvent): void {
 	const chipWrap = (under as HTMLElement | null)?.closest<HTMLElement>(".mica-tab-chip") ?? null;
 	const chip = chipWrap?.querySelector<HTMLElement>(".mica-tab-btn:not(.is-active)") ?? null;
 	if (chip === d.springEl) return;
+	clearCombineIntent(d);
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
+	d.springTimer = null;
 	document.querySelector(".mica-spring-pending")?.removeClass("mica-spring-pending");
 	d.springEl = chip;
 	if (!chip) return;
@@ -596,18 +806,21 @@ function springLoad(e: PointerEvent): void {
 	d.springTimer = window.setTimeout(() => {
 		chipWrap?.removeClass("mica-spring-pending");
 		if (!active || active.springEl !== chip) return;
+		active.springTimer = null;
+		clearCombineIntent(active);
 		chip.click();
 		// The panel switch re-lays-out the block — recompute geometry.
 		active.slots = computeSlots(active.containers, active.spec, active.sourceRoot);
-	}, 300);
+		refreshCombineTargets(active.combineTargets);
+	}, SPRING_LOAD_DELAY_MS);
 }
 
 /** Scroll the note while dragging near the viewport's top/bottom edge. */
-function autoScroll(e: PointerEvent): void {
+function autoScroll(e: PointerEvent): boolean {
 	const d = active;
-	if (!d) return;
+	if (!d) return false;
 	const scroller = d.scroller;
-	if (!scroller) return;
+	if (!scroller) return false;
 	const margin = 48;
 	const speed = (edgeDist: number): number => Math.ceil(((margin - edgeDist) / margin) * 14);
 	let dy = 0;
@@ -615,31 +828,58 @@ function autoScroll(e: PointerEvent): void {
 	if (e.clientY < r.top + margin) dy = -speed(e.clientY - r.top);
 	else if (e.clientY > r.bottom - margin) dy = speed(r.bottom - e.clientY);
 	if (d.scrollRaf !== null) window.cancelAnimationFrame(d.scrollRaf);
+	d.scrollRaf = null;
 	if (dy !== 0) {
+		clearCombineIntent(d);
 		const step = (): void => {
-			if (!active) return;
+			if (active !== d) return;
 			const before = scroller.scrollTop;
 			scroller.scrollTop += dy;
 			// Pinned at an edge: nothing moved, so the slots are already right.
-			if (scroller.scrollTop !== before)
-				active.slots = computeSlots(active.containers, active.spec, active.sourceRoot);
-			active.scrollRaf = window.requestAnimationFrame(step);
+			if (scroller.scrollTop === before) {
+				d.scrollRaf = null;
+				return;
+			}
+			d.slots = computeSlots(d.containers, d.spec, d.sourceRoot);
+			refreshCombineTargets(d.combineTargets);
+			d.scrollRaf = window.requestAnimationFrame(step);
 		};
 		d.scrollRaf = window.requestAnimationFrame(step);
+		return true;
 	}
+	return false;
 }
 
 function finishDrag(commit: boolean): void {
 	const d = active;
 	if (!d) return;
+	const combineTarget =
+		commit && d.combineReady?.el.isConnected && d.sourceRoot.isConnected ? d.combineReady.spec : null;
 	active = null;
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
 	if (d.scrollRaf !== null) window.cancelAnimationFrame(d.scrollRaf);
 	d.markedEl?.removeClass("mica-drop-inside");
 	d.markedEl = null;
+	clearCombineIntent(d);
 	d.cleanup();
-	if (!commit || !d.current) return;
+	if (!commit) return;
 	const apply = (d as ActiveDrag & { apply?: (op: StructOp) => boolean | void }).apply;
+	const combineSource = d.spec.combine;
+	if (combineSource && combineTarget) {
+		apply?.({
+			op: "combineRegions",
+			sourcePath: combineSource.path,
+			sourceStart: combineSource.start,
+			sourceEnd: combineSource.end,
+			sourceExpected: combineSource.expected,
+			targetPath: combineTarget.path,
+			targetStart: combineTarget.start,
+			targetEnd: combineTarget.end,
+			targetExpected: combineTarget.expected,
+		});
+		return;
+	}
+	if (!d.current) return;
 	const vs = d.spec.virtualSplice;
 	const text = materialize(d.spec.text);
 	if (vs && text) {

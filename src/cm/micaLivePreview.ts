@@ -4,7 +4,14 @@ import type { EditorState, Extension, Text } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
-import { guardedBlockContentEdit, parseBlock, scanBlocksView, setBlockAttrEdit, type BlockView } from "../wasm/bridge";
+import {
+	guardedBlockContentEdit,
+	guardedBlockContentEditAt,
+	parseBlock,
+	scanBlocksView,
+	setBlockAttrEdit,
+	type BlockView,
+} from "../wasm/bridge";
 import { renderCst, type BlockUi } from "../ui/blockShell";
 import { applyOpsText, applyOpText, revealFor, type StructOp } from "../cst/ops";
 import { getBlockUi } from "../render/blockUiState";
@@ -148,12 +155,10 @@ class MicaWidget extends WidgetType {
 		const targetResult = applyOpText(targetBefore, move.targetOp);
 		const sourceResult = applyOpText(sourceBefore, move.sourceOp);
 		if (!targetResult.changed || !sourceResult.changed) return false;
-		const targetAfter = terminated(targetResult.text);
-		const sourceAfter = terminated(sourceResult.text);
-		const changes = [
-			{ from: target.content_start, to: target.content_end, insert: targetAfter },
-			{ from: source.content_start, to: source.content_end, insert: sourceAfter },
-		].sort((a, b) => a.from - b.from);
+		const targetEdit = guardedBlockContentEditAt(doc, target.start, targetBefore, targetResult.text);
+		const sourceEdit = guardedBlockContentEditAt(doc, source.start, sourceBefore, sourceResult.text);
+		if (!targetEdit || !sourceEdit) return false;
+		const changes = [targetEdit, sourceEdit].sort((a, b) => a.from - b.from);
 		view.dispatch({ changes });
 		return true;
 	}
@@ -187,14 +192,12 @@ class MicaWidget extends WidgetType {
 		if (matches.length !== 1) return false;
 		const live = matches[0];
 		const before = doc.slice(live.content_start, live.content_end);
-		let after = mutate(before);
+		const after = mutate(before);
 		if (after === null) return false;
-		// A closed block's content always ends at the closing fence's line start,
-		// so it must end in a newline — otherwise newline-free text would glue the
-		// last line onto the ``` and break the fence.
-		after = terminated(after);
 		if (after === before) return false; // no change — never churn the doc
-		view.dispatch({ changes: { from: live.content_start, to: live.content_end, insert: after } });
+		const edit = guardedBlockContentEditAt(doc, live.start, before, after);
+		if (!edit) return false;
+		view.dispatch({ changes: edit });
 		return true;
 	}
 
@@ -208,10 +211,6 @@ class MicaWidget extends WidgetType {
 	ignoreEvent(): boolean {
 		return true;
 	}
-}
-
-function terminated(content: string): string {
-	return content.length && !content.endsWith("\n") ? `${content}\n` : content;
 }
 
 function sameAttrs(a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean {

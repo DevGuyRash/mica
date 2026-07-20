@@ -390,6 +390,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			"",
 			"> [!note] Parent",
 			"> body",
+			"> ```md",
+			"> nested code",
+			"> ```",
 			"> > [!tip] Child",
 			"> > nested",
 			"",
@@ -491,7 +494,18 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			};
 		});
 
-		for (const kind of ["block", "tabs", "tab", "grid", "cell", "text", "callout", "code", "nested-callout"])
+		for (const kind of [
+			"block",
+			"tabs",
+			"tab",
+			"grid",
+			"cell",
+			"text",
+			"callout",
+			"code",
+			"nested-callout",
+			"nested-code",
+		])
 			expect(result.kinds).toContain(kind);
 		const gridSyntax = ":::grid {cols=1}\n:::cell\ncell text\n:::\n:::\n";
 		expect(result.outputs).toEqual([

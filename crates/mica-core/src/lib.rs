@@ -22,9 +22,9 @@ mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
 pub use edit::{
-    block_content_edit_impl, ensure_ids_impl, guarded_block_content_edit_impl,
-    replace_block_content_impl, rewrite_block_id_at_impl, set_block_attr_edit_impl,
-    set_block_attr_impl, BlockEdit,
+    block_content_edit_impl, ensure_ids_impl, guarded_block_content_edit_at_impl,
+    guarded_block_content_edit_impl, replace_block_content_impl, rewrite_block_id_at_impl,
+    set_block_attr_edit_impl, set_block_attr_impl, BlockEdit,
 };
 pub use migrate::{migrate_tabs_impl, MigratedBlock, MigratedVersion, MigrationResult};
 pub use ops::{
@@ -133,6 +133,23 @@ pub fn guarded_block_content_edit(
     new_content: &str,
 ) -> Result<JsValue, JsValue> {
     match guarded_block_content_edit_impl(doc, id, expected, new_content) {
+        Some(edit) => {
+            serde_wasm_bindgen::to_value(&edit).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// Build a UTF-16 content edit for one exact block occurrence only when its
+/// content still equals `expected`.
+#[wasm_bindgen]
+pub fn guarded_block_content_edit_at(
+    doc: &str,
+    block_start: usize,
+    expected: &str,
+    new_content: &str,
+) -> Result<JsValue, JsValue> {
+    match guarded_block_content_edit_at_impl(doc, block_start, expected, new_content) {
         Some(edit) => {
             serde_wasm_bindgen::to_value(&edit).map_err(|e| JsValue::from_str(&e.to_string()))
         }

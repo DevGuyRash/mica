@@ -1,5 +1,6 @@
 import { Notice, setIcon } from "obsidian";
 import type { StructOp } from "../cst/ops";
+import type { MicaNode } from "../wasm/bridge";
 import type { RenderCtx } from "./blockShell";
 import { EditorLightbox } from "./lightbox";
 import { MdEditor, saveShortcutLabel } from "./mdEditor";
@@ -10,6 +11,9 @@ export interface RegionTarget {
 	start: number;
 	end: number;
 	original: string;
+	/** A `:::section` renders as one logical region while edits still target its
+	 * inner leaf run. Structural actions use this exact outer node preimage. */
+	logical?: { path: number[]; source: string; node: MicaNode };
 }
 
 /** The draft key for a region (drafts survive widget rebuilds + mode flips). */

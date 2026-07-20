@@ -8,8 +8,13 @@ allowBuilds:
     esbuild: true
     geckodriver: false
 
-# Mocha and WDIO still request vulnerable transitive versions. These patched
-# releases preserve the APIs they consume and support this repo's Node 22 floor.
+# Keep Obsidian's CodeMirror SDK on one nominal type graph. Mocha and WDIO also
+# request vulnerable transitive versions; the patched overrides preserve their
+# consumed APIs and support this repo's Node 22 floor.
 overrides:
+    "@codemirror/state": 6.5.0
+    "@codemirror/view": 6.38.6
+    brace-expansion@1: 1.1.16
+    brace-expansion@2: 2.1.2
     diff: 8.0.4
     serialize-javascript: 7.0.7

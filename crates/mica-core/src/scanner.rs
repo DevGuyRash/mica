@@ -160,7 +160,7 @@ pub(crate) fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
 /// indent → `(fence_char, fence_len, info string)`. Backtick fences may not
 /// carry a backtick in the info string (CommonMark) — such lines are not
 /// fences at all. One classification serves both target and foreign fences.
-fn fence_open(text: &str) -> Option<(u8, usize, &str)> {
+pub(crate) fn fence_open(text: &str) -> Option<(u8, usize, &str)> {
     let indent = leading_spaces(text);
     if indent > 3 {
         return None;

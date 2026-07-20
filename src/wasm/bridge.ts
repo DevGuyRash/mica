@@ -21,6 +21,7 @@ import init, {
 	set_block_attr,
 	set_block_attr_edit,
 	guarded_block_content_edit,
+	guarded_block_content_edit_at,
 } from "./pkg/mica_core.js";
 import wasmBinary from "./pkg/mica_core_bg.wasm";
 
@@ -167,6 +168,17 @@ export function guardedBlockContentEdit(
 ): BlockEdit | null {
 	const content = normalizeBlockContent(newContent);
 	return guarded_block_content_edit(doc, id, expected, content) as BlockEdit | null;
+}
+
+/** Guarded replacement for one exact UTF-16 block occurrence (including id-less blocks). */
+export function guardedBlockContentEditAt(
+	doc: string,
+	blockStartUtf16: number,
+	expected: string,
+	newContent: string,
+): BlockEdit | null {
+	const content = normalizeBlockContent(newContent);
+	return guarded_block_content_edit_at(doc, blockStartUtf16, expected, content) as BlockEdit | null;
 }
 
 /** Rewrite exactly one scanned block occurrence's id, never a textual lookalike. */

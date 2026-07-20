@@ -1,5 +1,5 @@
 import { MarkdownRenderChild, MarkdownRenderer, Modal, setIcon, type App } from "obsidian";
-import { editorViewPrefs, MdEditor, toggleViewPref, saveShortcutLabel } from "./mdEditor";
+import { editorViewPrefs, type EditorLanguage, MdEditor, toggleViewPref, saveShortcutLabel } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
 
 export interface LightboxOpts {
@@ -7,6 +7,10 @@ export interface LightboxOpts {
 	title: string;
 	initial: string;
 	sourcePath: string;
+	/** Body syntax for the shared editor. Defaults to Markdown. */
+	editorLanguage?: EditorLanguage;
+	/** Preserve the enclosing source's line ending when the body starts empty. */
+	editorLineSeparator?: "\n" | "\r\n";
 	/** Called with the edited markdown on an explicit save. */
 	/** Return false to keep the editor open (for example, a stale pre-image). */
 	onSave: (value: string) => boolean | void | Promise<boolean | void>;
@@ -16,7 +20,11 @@ export interface LightboxOpts {
 	onDraft?: (value: string) => void;
 	/** Optional derivative hook: inject field rows ABOVE the editor. `refresh`
 	 *  re-renders the live preview (call it when a field changes). */
-	header?: (host: HTMLElement, refresh: () => void) => void | (() => void);
+	header?: (
+		host: HTMLElement,
+		refresh: () => void,
+		setEditorLanguage: (language: EditorLanguage) => void,
+	) => void | (() => void);
 	/** Derivative editors can include header fields in their dirty contract. */
 	isDirty?: (body: string) => boolean;
 	/** Optional derivative hook: what the preview (and only the preview)
@@ -25,8 +33,8 @@ export interface LightboxOpts {
 }
 
 /**
- * The dedicated editor lightbox: a near-full-screen markdown editor with the
- * full toolbar, a live preview pane, word count, and an explicit save
+ * The dedicated editor lightbox: a near-full-screen shared editor with the
+ * relevant toolbar, a live preview pane, word count, and an explicit save
  * lifecycle. Esc with unsaved changes arms a "press again to discard" state
  * instead of silently dropping work; nothing ever commits on blur.
  */
@@ -52,14 +60,7 @@ export class EditorLightbox extends Modal {
 		this.titleEl.setText(this.opts.title);
 
 		const root = this.contentEl.createDiv({ cls: "mica-lightbox-root" });
-		if (this.opts.header) {
-			const head = root.createDiv({ cls: "mica-lightbox-fields" });
-			this.destroyHeader =
-				this.opts.header(head, () => {
-					this.disarmDiscard();
-					if (this.previewOn) this.renderPreview();
-				}) ?? null;
-		}
+		const head = this.opts.header ? root.createDiv({ cls: "mica-lightbox-fields" }) : null;
 		const toolbarRow = root.createDiv({ cls: "mica-lightbox-toolbar" });
 		const split = root.createDiv({ cls: "mica-lightbox-split" });
 		const editorHost = split.createDiv({ cls: "mica-lightbox-editor" });
@@ -69,7 +70,16 @@ export class EditorLightbox extends Modal {
 		this.editor = new MdEditor(editorHost, {
 			app: this.opts.app,
 			initial: this.opts.initial,
-			placeholder: shortcut ? `Write markdown — ${shortcut} saves, Esc cancels` : "Write markdown — Esc cancels",
+			language: this.opts.editorLanguage,
+			lineSeparator: this.opts.editorLineSeparator,
+			placeholder:
+				this.opts.editorLanguage?.kind === "code"
+					? shortcut
+						? `Write code — ${shortcut} saves, Esc cancels`
+						: "Write code — Esc cancels"
+					: shortcut
+						? `Write markdown — ${shortcut} saves, Esc cancels`
+						: "Write markdown — Esc cancels",
 			onSave: () => void this.save(),
 			onCancel: () => this.requestClose(),
 			onChange: (v) => {
@@ -80,8 +90,21 @@ export class EditorLightbox extends Modal {
 			},
 			onSelection: () => this.refreshStats(this.editor?.getValue() ?? ""),
 		});
+		if (head && this.opts.header) {
+			this.destroyHeader =
+				this.opts.header(
+					head,
+					() => {
+						this.disarmDiscard();
+						if (this.previewOn) this.renderPreview();
+					},
+					(language) => this.editor?.setLanguage(language),
+				) ?? null;
+		}
 
-		this.destroyToolbar = buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
+		if (this.opts.editorLanguage?.kind !== "code") {
+			this.destroyToolbar = buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
+		}
 
 		// Right side of the toolbar: view toggles + preview.
 		const spacer = toolbarRow.createDiv({ cls: "mica-toolbar-spacer" });

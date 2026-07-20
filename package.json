@@ -29,9 +29,12 @@
 		"test:diff-budget": "tsx tests/diff-budget.mts",
 		"test:version-window": "tsx tests/version-window.mts",
 		"test:copy-payload": "tsx tests/copy-payload.mts",
+		"test:code-fence": "tsx tests/code-fence.mts",
+		"test:nested-sections": "tsx tests/nested-sections.mts",
+		"test:section-format": "tsx tests/section-format.mts",
 		"check:release": "node tests/release-metadata.mjs",
 		"check:release:assets": "node tests/release-metadata.mjs --artifacts",
-		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:version-window && pnpm run test:copy-payload && pnpm run test:rust && pnpm run check:release"
+		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:version-window && pnpm run test:copy-payload && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:rust && pnpm run check:release"
 	},
 	"keywords": [
 		"obsidian",
@@ -46,7 +49,7 @@
 		"fflate": "0.8.3"
 	},
 	"devDependencies": {
-		"@codemirror/commands": "^6.10.4",
+		"@codemirror/commands": "6.9.0",
 		"@codemirror/lang-css": "^6.3.1",
 		"@codemirror/lang-html": "^6.4.11",
 		"@codemirror/lang-javascript": "^6.2.5",
@@ -54,8 +57,8 @@
 		"@codemirror/lang-markdown": "^6.5.0",
 		"@codemirror/language": "latest",
 		"@codemirror/legacy-modes": "^6.5.3",
-		"@codemirror/state": "latest",
-		"@codemirror/view": "latest",
+		"@codemirror/state": "6.5.0",
+		"@codemirror/view": "6.38.6",
 		"@lezer/highlight": "^1.2.3",
 		"@lezer/markdown": "^1.7.1",
 		"@types/mocha": "^10.0.10",

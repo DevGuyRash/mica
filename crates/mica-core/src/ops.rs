@@ -265,6 +265,32 @@ pub enum StructOp {
         /// Insertion index in the destination's children.
         to_index: usize,
     },
+    /// Combine two compatible Markdown regions into one reversible logical
+    /// `:::section`, guarded by both exact serialized pre-images.
+    #[serde(rename_all = "camelCase")]
+    CombineRegions {
+        /// Container holding the dragged source region.
+        source_path: Vec<usize>,
+        /// First child index of the source leaf run.
+        source_start: usize,
+        /// One past the source leaf run.
+        source_end: usize,
+        /// Exact source serialization observed when the gesture began.
+        source_expected: String,
+        /// Container holding the receiving target region.
+        target_path: Vec<usize>,
+        /// First child index of the target leaf run.
+        target_start: usize,
+        /// One past the target leaf run.
+        target_end: usize,
+        /// Exact target serialization observed when the gesture began.
+        target_expected: String,
+    },
+    /// Remove one logical `:::section` wrapper while preserving its children.
+    UncombineSection {
+        /// Absolute path of the `section` container.
+        path: Vec<usize>,
+    },
 }
 
 /// Apply `op` to `cst` in place.
@@ -727,7 +753,252 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             to_parent,
             to_index,
         } => move_region(cst, path, *start, *end, to_parent, *to_index),
+        StructOp::CombineRegions {
+            source_path,
+            source_start,
+            source_end,
+            source_expected,
+            target_path,
+            target_start,
+            target_end,
+            target_expected,
+        } => combine_regions(
+            cst,
+            RegionPreimage {
+                path: source_path,
+                start: *source_start,
+                end: *source_end,
+                expected: source_expected,
+            },
+            RegionPreimage {
+                path: target_path,
+                start: *target_start,
+                end: *target_end,
+                expected: target_expected,
+            },
+        ),
+        StructOp::UncombineSection { path } => uncombine_section(cst, path),
     }
+}
+
+#[derive(Clone, Copy)]
+struct RegionPreimage<'a> {
+    path: &'a [usize],
+    start: usize,
+    end: usize,
+    expected: &'a str,
+}
+
+fn combine_regions(
+    cst: &mut Cst,
+    source_ref: RegionPreimage<'_>,
+    target_ref: RegionPreimage<'_>,
+) -> bool {
+    if source_ref.start >= source_ref.end
+        || target_ref.start >= target_ref.end
+        || (source_ref.path == target_ref.path
+            && source_ref.start < target_ref.end
+            && target_ref.start < source_ref.end)
+    {
+        return false;
+    }
+    let style = line_style_at(cst, target_ref.path);
+    let Some(source) = combine_snapshot(cst, source_ref) else {
+        return false;
+    };
+    let Some(target) = combine_snapshot(cst, target_ref) else {
+        return false;
+    };
+    let target_node = combined_target_node(target, source.children, &style);
+
+    if source_ref.path != target_ref.path {
+        // Neither region may own the other's parent container. Apart from being
+        // ambiguous, replacing the outer region would discard the inner result.
+        if path_enters_region(source_ref.path, target_ref)
+            || path_enters_region(target_ref.path, source_ref)
+        {
+            return false;
+        }
+        // Replacing a multi-leaf target with one wrapper can shift a later
+        // sibling container that owns the source. Rebase that path before the
+        // first mutation so root↔nested combines remain valid.
+        let mut source_path = source_ref.path.to_vec();
+        if !adjust_path_after_splice(
+            &mut source_path,
+            target_ref.path,
+            target_ref.start,
+            target_ref.end,
+            1,
+        ) {
+            return false;
+        }
+        let Some(target_children) = children_at_mut(cst, target_ref.path) else {
+            return false;
+        };
+        target_children.splice(
+            target_ref.start..target_ref.end,
+            std::iter::once(target_node),
+        );
+        let Some(source_children) = children_at_mut(cst, &source_path) else {
+            return false;
+        };
+        source_children.drain(source_ref.start..source_ref.end);
+        return true;
+    }
+
+    let Some(children) = children_at_mut(cst, target_ref.path) else {
+        return false;
+    };
+    let insert_at = if source_ref.start < target_ref.start {
+        target_ref.start - (source_ref.end - source_ref.start)
+    } else {
+        target_ref.start
+    };
+    let (later_start, later_end, earlier_start, earlier_end) =
+        if source_ref.start > target_ref.start {
+            (
+                source_ref.start,
+                source_ref.end,
+                target_ref.start,
+                target_ref.end,
+            )
+        } else {
+            (
+                target_ref.start,
+                target_ref.end,
+                source_ref.start,
+                source_ref.end,
+            )
+        };
+    children.drain(later_start..later_end);
+    children.drain(earlier_start..earlier_end);
+    children.insert(insert_at, target_node);
+    true
+}
+
+fn path_enters_region(path: &[usize], region: RegionPreimage<'_>) -> bool {
+    path.len() > region.path.len()
+        && path[..region.path.len()] == *region.path
+        && (region.start..region.end).contains(&path[region.path.len()])
+}
+
+fn adjust_path_after_splice(
+    path: &mut [usize],
+    parent: &[usize],
+    start: usize,
+    end: usize,
+    inserted: usize,
+) -> bool {
+    if path.len() <= parent.len() || path[..parent.len()] != *parent {
+        return true;
+    }
+    let index = &mut path[parent.len()];
+    if (*index >= start) && (*index < end) {
+        return false;
+    }
+    if *index >= end {
+        *index = *index - (end - start) + inserted;
+    }
+    true
+}
+
+struct CombineSnapshot {
+    children: Vec<Node>,
+    wrapper: Option<Node>,
+}
+
+fn combine_snapshot(cst: &Cst, region: RegionPreimage<'_>) -> Option<CombineSnapshot> {
+    let children = children_at(cst, region.path)?;
+    if region.end > children.len() {
+        return None;
+    }
+    let nodes = &children[region.start..region.end];
+    if !region_matches(nodes, region.expected) {
+        return None;
+    }
+    if is_plain_region(nodes) {
+        return Some(CombineSnapshot {
+            children: nodes.to_vec(),
+            wrapper: None,
+        });
+    }
+    let [section @ Node::Container { name, children, .. }] = nodes else {
+        return None;
+    };
+    if name != "section" || !is_plain_section_content(children) {
+        return None;
+    }
+    Some(CombineSnapshot {
+        children: children.clone(),
+        wrapper: Some(section.clone()),
+    })
+}
+
+fn combined_target_node(
+    mut target: CombineSnapshot,
+    source_children: Vec<Node>,
+    style: &LineStyle,
+) -> Node {
+    target.children.extend(source_children);
+    if let Some(mut wrapper) = target.wrapper {
+        if let Node::Container { children, .. } = &mut wrapper {
+            *children = target.children;
+        }
+        wrapper
+    } else {
+        new_section_styled(target.children, style)
+    }
+}
+
+fn uncombine_section(cst: &mut Cst, path: &[usize]) -> bool {
+    let Some((&index, parent)) = path.split_last() else {
+        return false;
+    };
+    let Some(children) = children_at_mut(cst, parent) else {
+        return false;
+    };
+    if children
+        .get(index)
+        .is_none_or(|node| !is_container_named(node, "section"))
+    {
+        return false;
+    }
+    let Node::Container {
+        children: section_children,
+        ..
+    } = children.remove(index)
+    else {
+        return false;
+    };
+    children.splice(index..index, section_children);
+    true
+}
+
+fn is_plain_region(nodes: &[Node]) -> bool {
+    plain_content_count(nodes) == Some(1)
+}
+
+fn is_plain_section_content(nodes: &[Node]) -> bool {
+    plain_content_count(nodes).is_some_and(|count| count > 0)
+}
+
+fn plain_content_count(nodes: &[Node]) -> Option<usize> {
+    let mut content = 0;
+    for node in nodes {
+        let Node::Leaf { text, is_code } = node else {
+            return None;
+        };
+        if *is_code {
+            return None;
+        }
+        if !text.trim().is_empty() {
+            if text.lines().next().is_some_and(crate::parser::callout_open) {
+                return None;
+            }
+            content += 1;
+        }
+    }
+    Some(content)
 }
 
 // ---------------------------------------------------------------------------
@@ -758,6 +1029,20 @@ fn node_at_mut<'a>(cst: &'a mut Cst, path: &[usize]) -> Option<&'a mut Node> {
         }
     }
     children.get_mut(last)
+}
+
+/// The child list of the container at `path` (`[]` = the block root).
+fn children_at<'a>(cst: &'a Cst, path: &[usize]) -> Option<&'a [Node]> {
+    let mut children = cst.children.as_slice();
+    for &i in path {
+        match children.get(i)? {
+            Node::Container {
+                children: nested, ..
+            } => children = nested,
+            Node::Leaf { .. } => return None,
+        }
+    }
+    Some(children)
 }
 
 /// The child list of the container at `path` (`[]` = the block root).
@@ -1774,6 +2059,17 @@ fn new_cell_styled(style: &LineStyle) -> Node {
     }
 }
 
+fn new_section_styled(children: Vec<Node>, style: &LineStyle) -> Node {
+    Node::Container {
+        name: "section".to_string(),
+        title: String::new(),
+        colons: 3,
+        open_line: format!("{}:::section{}", style.indent, style.eol),
+        children,
+        close_line: format!("{}:::{}", style.indent, style.eol),
+    }
+}
+
 /// Build a new empty `:::grid {cols=N}`.
 #[cfg(test)]
 fn new_grid(cols: usize) -> Node {
@@ -1871,6 +2167,172 @@ fn title_attr(title: &str, key: &str) -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
+
+    #[test]
+    fn combine_plain_regions_wraps_without_changing_paragraphs() {
+        let src = "Alpha\n\nBeta\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 2,
+                source_end: 3,
+                source_expected: "Beta\n".into(),
+                target_path: vec![],
+                target_start: 0,
+                target_end: 2,
+                target_expected: "Alpha\n\n".into(),
+            },
+        );
+        assert!(changed);
+        assert_eq!(out, ":::section\nAlpha\n\nBeta\n:::\n");
+    }
+
+    #[test]
+    fn combine_plain_regions_across_nested_parents_keeps_containers() {
+        let src = ":::tabs\n:::tab A\nSource\n:::\n:::tab B\nTarget\n:::\n:::\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![0, 0],
+                source_start: 0,
+                source_end: 1,
+                source_expected: "Source\n".into(),
+                target_path: vec![0, 1],
+                target_start: 0,
+                target_end: 1,
+                target_expected: "Target\n".into(),
+            },
+        );
+        assert!(changed);
+        assert_eq!(
+            out,
+            ":::tabs\n:::tab A\n:::\n:::tab B\n:::section\nTarget\n\nSource\n:::\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn combine_root_target_adjusts_a_later_nested_source_path() {
+        let src = "Target\n\n:::tabs\n:::tab A\nSource\n:::\n:::\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![2, 0],
+                source_start: 0,
+                source_end: 1,
+                source_expected: "Source\n".into(),
+                target_path: vec![],
+                target_start: 0,
+                target_end: 2,
+                target_expected: "Target\n\n".into(),
+            },
+        );
+        assert!(changed);
+        assert_eq!(
+            out,
+            ":::section\nTarget\n\nSource\n:::\n:::tabs\n:::tab A\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn combine_plain_region_into_existing_section_keeps_one_wrapper() {
+        let src = "Gamma\n\n:::section\nAlpha\n\nBeta\n:::\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 0,
+                source_end: 2,
+                source_expected: "Gamma\n\n".into(),
+                target_path: vec![],
+                target_start: 2,
+                target_end: 3,
+                target_expected: ":::section\nAlpha\n\nBeta\n:::\n".into(),
+            },
+        );
+        assert!(changed);
+        assert_eq!(out, ":::section\nAlpha\n\nBeta\n\nGamma\n:::\n");
+    }
+
+    #[test]
+    fn combine_regions_rejects_stale_or_incompatible_inputs() {
+        let prose = "Alpha\n\nBeta\n";
+        for op in [
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 2,
+                source_end: 3,
+                source_expected: "Beta\n".into(),
+                target_path: vec![],
+                target_start: 0,
+                target_end: 2,
+                target_expected: "stale\n".into(),
+            },
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 0,
+                source_end: 2,
+                source_expected: "Alpha\n\n".into(),
+                target_path: vec![],
+                target_start: 0,
+                target_end: 2,
+                target_expected: "Alpha\n\n".into(),
+            },
+        ] {
+            assert_eq!(apply(prose, op), (false, prose.to_string()));
+        }
+
+        let code = "Alpha\n\n```js\nconst beta = 1;\n```\n";
+        assert_eq!(
+            apply(
+                code,
+                StructOp::CombineRegions {
+                    source_path: vec![],
+                    source_start: 2,
+                    source_end: 3,
+                    source_expected: "```js\nconst beta = 1;\n```\n".into(),
+                    target_path: vec![],
+                    target_start: 0,
+                    target_end: 2,
+                    target_expected: "Alpha\n\n".into(),
+                },
+            ),
+            (false, code.to_string())
+        );
+
+        let callout = "Alpha\n\n> [!note]\n> Beta\n";
+        assert_eq!(
+            apply(
+                callout,
+                StructOp::CombineRegions {
+                    source_path: vec![],
+                    source_start: 2,
+                    source_end: 3,
+                    source_expected: "> [!note]\n> Beta\n".into(),
+                    target_path: vec![],
+                    target_start: 0,
+                    target_end: 2,
+                    target_expected: "Alpha\n\n".into(),
+                },
+            ),
+            (false, callout.to_string())
+        );
+    }
+
+    #[test]
+    fn uncombine_section_restores_children() {
+        let src = ":::section\nAlpha\n\nBeta\n:::\n";
+        let (changed, out) = apply(src, StructOp::UncombineSection { path: vec![0] });
+        assert!(changed);
+        assert_eq!(out, "Alpha\n\nBeta\n");
+        assert_eq!(
+            apply(
+                ":::grid {cols=2}\n:::\n",
+                StructOp::UncombineSection { path: vec![0] }
+            ),
+            (false, ":::grid {cols=2}\n:::\n".to_string())
+        );
+    }
     use crate::parser::{parse_block_impl, serialize_impl};
 
     fn ser(cst: &Cst) -> String {

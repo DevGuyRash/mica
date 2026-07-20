@@ -36,7 +36,19 @@ export type StructOp =
 	| { op: "deleteNode"; path: number[] }
 	| { op: "duplicateNode"; path: number[] }
 	| { op: "moveNode"; from: number[]; toParent: number[]; toIndex: number }
-	| { op: "moveRegion"; path: number[]; start: number; end: number; toParent: number[]; toIndex: number };
+	| { op: "moveRegion"; path: number[]; start: number; end: number; toParent: number[]; toIndex: number }
+	| {
+			op: "combineRegions";
+			sourcePath: number[];
+			sourceStart: number;
+			sourceEnd: number;
+			sourceExpected: string;
+			targetPath: number[];
+			targetStart: number;
+			targetEnd: number;
+			targetExpected: string;
+	  }
+	| { op: "uncombineSection"; path: number[] };
 
 /** Where the renderer should place focus after an op re-renders the block. */
 export interface Reveal {

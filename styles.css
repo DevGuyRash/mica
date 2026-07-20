@@ -17,6 +17,30 @@ body {
 	 * theme change retints the whole card from a single variable. */
 	--mica-tab-bg: color-mix(in srgb, var(--mica-accent) 8%, var(--background-secondary));
 	--mica-border: color-mix(in srgb, var(--mica-accent) 14%, var(--background-modifier-border));
+	/* Section-combine feedback. Themes may restyle the complete effect without
+	 * replacing structural selectors or relying on Mica's implementation DOM. */
+	--mica-combine-color: var(--mica-accent);
+	--mica-combine-fill: color-mix(in srgb, var(--mica-combine-color) 14%, transparent);
+	--mica-combine-arming-color: color-mix(in srgb, var(--mica-combine-color) 55%, transparent);
+	--mica-combine-plus-color: var(--mica-combine-color);
+	--mica-combine-plus-background: var(--background-primary);
+	--mica-combine-ring-width: 2px;
+	--mica-combine-ring-style: dashed;
+	--mica-combine-ring-offset: calc(-1 * var(--mica-combine-ring-width));
+	--mica-combine-radius: var(--mica-ctrl-radius);
+	--mica-combine-plus-size: 2.5rem;
+	--mica-combine-plus-font-size: 1.8rem;
+	--mica-combine-plus-font-family: var(--font-interface);
+	--mica-combine-plus-font-weight: var(--font-bold);
+	--mica-combine-plus-border-style: solid;
+	--mica-combine-glow: 0 0 18px color-mix(in srgb, var(--mica-combine-color) 48%, transparent);
+	--mica-combine-transition-duration: 120ms;
+	--mica-combine-transition-easing: ease;
+	--mica-combine-pulse-duration: 800ms;
+	--mica-combine-pulse-easing: ease-in-out;
+	--mica-combine-pulse-iterations: infinite;
+	--mica-combine-pulse-direction: alternate;
+	--mica-combine-pulse-opacity: 0.82;
 
 	/* Diff/state colors — fall back to safe hex if a theme omits --color-*. */
 	--mica-diff-add: var(--color-green, #3fb950);
@@ -1124,15 +1148,17 @@ body[data-mica-grip="left"] .mica-region-tools {
 	right: auto;
 	left: 4px;
 }
-.mica-region:hover:not(:has(.mica-nested-callout:hover)) > .mica-region-tools,
+.mica-region:hover:not(:has(.mica-nested-callout:hover, .mica-nested-code:hover)) > .mica-region-tools,
 .mica-region-tools:focus-within {
 	opacity: 1;
 	pointer-events: auto;
 }
-.mica-nested-callout {
+.mica-nested-callout,
+.mica-nested-code {
 	position: relative;
 }
 .mica-nested-callout:hover:not(:has(.mica-nested-callout:hover)) > .mica-nested-tools,
+.mica-nested-code:hover > .mica-nested-code-tools,
 .mica-nested-tools:focus-within {
 	opacity: 1;
 	pointer-events: auto;
@@ -1562,6 +1588,58 @@ body[data-mica-grip="left"] .mica-region-tools {
 	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
 	border: 2px dashed var(--mica-accent);
 	box-shadow: none;
+}
+.mica-combine-arming {
+	outline: var(--mica-combine-ring-width) var(--mica-combine-ring-style) var(--mica-combine-arming-color);
+	outline-offset: var(--mica-combine-ring-offset);
+	transition: outline-color var(--mica-combine-transition-duration) var(--mica-combine-transition-easing);
+}
+.mica-drop-indicator.is-combine-ready {
+	box-sizing: border-box;
+	background: var(--mica-combine-fill);
+	border: var(--mica-combine-ring-width) var(--mica-combine-ring-style) var(--mica-combine-color);
+	border-radius: var(--mica-combine-radius);
+	box-shadow: var(--mica-combine-glow);
+	overflow: visible;
+	animation: mica-combine-ready-pulse var(--mica-combine-pulse-duration) var(--mica-combine-pulse-easing)
+		var(--mica-combine-pulse-iterations) var(--mica-combine-pulse-direction);
+}
+.mica-drop-indicator.is-combine-ready::after {
+	content: "+";
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	display: grid;
+	place-items: center;
+	width: var(--mica-combine-plus-size);
+	height: var(--mica-combine-plus-size);
+	transform: translate(-50%, -50%);
+	border: var(--mica-combine-ring-width) var(--mica-combine-plus-border-style) var(--mica-combine-color);
+	border-radius: 50%;
+	background: var(--mica-combine-plus-background);
+	color: var(--mica-combine-plus-color);
+	font-family: var(--mica-combine-plus-font-family);
+	font-size: var(--mica-combine-plus-font-size);
+	font-weight: var(--mica-combine-plus-font-weight);
+	line-height: 1;
+	box-shadow: var(--mica-combine-glow);
+}
+@keyframes mica-combine-ready-pulse {
+	from {
+		opacity: var(--mica-combine-pulse-opacity);
+	}
+	to {
+		opacity: 1;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.mica-combine-arming {
+		transition: none;
+	}
+	.mica-drop-indicator.is-combine-ready {
+		animation: none;
+		opacity: 1;
+	}
 }
 body.mica-dnd-active {
 	user-select: none;

@@ -100,6 +100,11 @@ export function editorViewPrefs(): EditorViewPrefs {
 export interface MdEditorOpts {
 	initial: string;
 	placeholder?: string;
+	/** Preferred source line ending when `initial` is empty. */
+	lineSeparator?: "\n" | "\r\n";
+	/** Syntax shown by this editor. Markdown is the default; structured code
+	 * editors pass the fence info string so the body alone gets its language. */
+	language?: EditorLanguage;
 	/** Ctrl/Cmd+Enter — the ONLY keyboard commit. */
 	onSave: () => void;
 	/** Escape (the host decides whether to confirm when dirty). */
@@ -114,6 +119,20 @@ export interface MdEditorOpts {
 	 * the REAL keystroke before the shadow editor's keymap ever sees it —
 	 * a pushed Scope outranks them while the editor is focused. */
 	app?: App;
+}
+
+/** The syntax projection for one shared editor instance. A code info string may
+ * include attributes; only its first token selects highlighting. */
+export type EditorLanguage = { kind: "markdown" } | { kind: "code"; info: string };
+
+const MARKDOWN_LANGUAGE: EditorLanguage = { kind: "markdown" };
+
+function markdownExtension(): Extension {
+	return markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage });
+}
+
+function infoLanguage(info: string): string {
+	return info.trimStart().match(/^[^\s]+/)?.[0] ?? "";
 }
 
 /**
@@ -170,6 +189,9 @@ const micaEditorTheme = EditorView.theme({
 		lineHeight: "1.55",
 		fontFamily: "var(--font-text, sans-serif)",
 	},
+	"&[data-mica-editor-kind='code'] .cm-scroller": {
+		fontFamily: "var(--font-monospace, monospace)",
+	},
 	".cm-content": {
 		padding: "8px 10px",
 		caretColor: "var(--mica-accent, var(--text-accent))",
@@ -210,8 +232,9 @@ const micaEditorTheme = EditorView.theme({
 });
 
 /**
- * The one markdown editor Mica uses everywhere (quick edit, lightbox, branch
- * edit): CodeMirror 6 with markdown syntax, history, and explicit-save keys.
+ * The one editor Mica uses everywhere (quick edit, lightbox, branch edit):
+ * CodeMirror 6 with reconfigurable Markdown/code syntax, history, and
+ * explicit-save keys.
  *
  * Mounted inside a SHADOW ROOT: no theme, snippet, or other plugin can reach
  * the editor's internals (the hostile-theme hanging-indent bug class is
@@ -224,7 +247,10 @@ export class MdEditor {
 	/** The light-DOM host (carries `.mica-mdeditor` for layout + tests). */
 	readonly host: HTMLElement;
 	private readonly viewOpts = new Compartment();
+	private readonly syntax = new Compartment();
 	private popScope: (() => void) | null = null;
+	private syntaxRequest = 0;
+	private destroyed = false;
 
 	constructor(parent: HTMLElement, opts: MdEditorOpts) {
 		this.host = parent.createDiv({ cls: "mica-mdeditor" });
@@ -235,7 +261,7 @@ export class MdEditor {
 		// CodeMirror normalizes line endings internally unless a separator is
 		// configured. Match the incoming text so editing a stored CRLF version
 		// cannot silently rewrite it as LF on save.
-		const lineSeparator = opts.initial.match(/\r\n|\n/)?.[0] ?? "\n";
+		const lineSeparator = opts.lineSeparator ?? opts.initial.match(/\r\n|\n/)?.[0] ?? "\n";
 
 		// Global hotkeys (Obsidian's own, or a community plugin's Ctrl+Enter)
 		// run at window capture and consume REAL keystrokes before the shadow
@@ -278,6 +304,7 @@ export class MdEditor {
 			this.popScope = pop;
 		}
 
+		const initialLanguage = opts.language ?? MARKDOWN_LANGUAGE;
 		const cmKey = saveKeyCm();
 		const saveKeys = keymap.of([
 			...(cmKey
@@ -309,7 +336,7 @@ export class MdEditor {
 					saveKeys,
 					history(),
 					keymap.of([...historyKeymap, ...defaultKeymap, indentWithTab]),
-					markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage }),
+					this.syntax.of(initialLanguage.kind === "markdown" ? markdownExtension() : []),
 					syntaxHighlighting(mdHighlight),
 					micaEditorTheme,
 					this.viewOpts.of(viewPrefsExtensions()),
@@ -322,6 +349,8 @@ export class MdEditor {
 				],
 			}),
 		});
+		this.view.dom.dataset.micaEditorKind = initialLanguage.kind;
+		if (initialLanguage.kind === "code") this.setLanguage(initialLanguage);
 		// Clicking the empty space BELOW the last line should behave like
 		// clicking the end of the document. Listen on the LIGHT-DOM host:
 		// clicks below the shadow's content never reach a shadow-internal
@@ -357,12 +386,44 @@ export class MdEditor {
 		this.view.focus();
 	}
 
+	/** Reconfigure syntax without replacing the editor or its undo history.
+	 * LanguageDescription loading is async, so a monotonic request id prevents a
+	 * slow earlier choice from overwriting the user's latest info string. */
+	setLanguage(language: EditorLanguage): void {
+		if (this.destroyed) return;
+		const request = ++this.syntaxRequest;
+		this.view.dom.dataset.micaEditorKind = language.kind;
+		if (language.kind === "markdown") {
+			this.view.dispatch({ effects: this.syntax.reconfigure(markdownExtension()) });
+			return;
+		}
+
+		// Clear the previous parser immediately. Empty and unknown identifiers are
+		// deliberately plain text; rendered preview remains Obsidian-native.
+		this.view.dispatch({ effects: this.syntax.reconfigure([]) });
+		const name = infoLanguage(language.info);
+		const description = name ? resolveCodeLanguage(name) : null;
+		if (!description) return;
+		void description
+			.load()
+			.then((support) => {
+				if (this.destroyed || request !== this.syntaxRequest) return;
+				this.view.dispatch({ effects: this.syntax.reconfigure(support) });
+			})
+			.catch(() => {
+				// Optional highlighting must never make an otherwise valid code fence
+				// uneditable. The plain-text projection installed above is the fallback.
+			});
+	}
+
 	/** Re-apply the shared view prefs (line numbers / whitespace) live. */
 	applyViewPrefs(): void {
 		this.view.dispatch({ effects: this.viewOpts.reconfigure(viewPrefsExtensions()) });
 	}
 
 	destroy(): void {
+		this.destroyed = true;
+		this.syntaxRequest++;
 		this.popScope?.();
 		openInstances.delete(this);
 		this.view.destroy();

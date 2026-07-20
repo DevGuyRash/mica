@@ -417,25 +417,12 @@ fn colon_close_len(text: &str) -> Option<usize> {
 }
 
 fn code_open(text: &str) -> Option<(u8, usize)> {
-    let indent = leading_spaces(text);
-    if indent > 3 {
-        return None;
-    }
-    let rest = &text[indent..];
-    let fc = rest.as_bytes().first().copied()?;
-    if fc != b'`' && fc != b'~' {
-        return None;
-    }
-    let fl = rest.bytes().take_while(|&b| b == fc).count();
-    if fl < 3 {
-        return None;
-    }
-    Some((fc, fl))
+    crate::scanner::fence_open(text).map(|(fence_char, fence_len, _)| (fence_char, fence_len))
 }
 
 /// An Obsidian/Admonition callout header: `> [!type] optional title`.
 /// A nested `> > [!type]` does NOT match — it belongs to its parent callout.
-fn callout_open(text: &str) -> bool {
+pub(crate) fn callout_open(text: &str) -> bool {
     let t = text.trim_start();
     let Some(rest) = t.strip_prefix('>') else {
         return false;
@@ -474,6 +461,15 @@ mod tests {
     #[test]
     fn roundtrip_markdown_only() {
         roundtrips("just some **markdown**\n\nwith a blank line\n");
+    }
+
+    #[test]
+    fn backtick_info_containing_backtick_is_not_a_code_opener() {
+        let cst = parse_block_impl("```bad`info\ntext\n```\n");
+        assert!(matches!(
+            cst.children.first(),
+            Some(Node::Leaf { is_code: false, .. })
+        ));
     }
 
     #[test]

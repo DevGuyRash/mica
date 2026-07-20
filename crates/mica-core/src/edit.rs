@@ -28,11 +28,13 @@ pub struct BlockEdit {
 /// `new_content`. Returns `None` if no block carries that `id`.
 pub fn replace_block_content_impl(doc: &str, id: &str, new_content: &str) -> Option<String> {
     let b = unique_block_by_id(doc, id)?;
-    let mut out =
-        String::with_capacity(doc.len() - (b.content_end - b.content_start) + new_content.len());
-    out.push_str(&doc[..b.content_start]);
-    out.push_str(new_content);
-    out.push_str(&doc[b.content_end..]);
+    let replacement = content_replacement_for_block(doc, &b, new_content)?;
+    let mut out = String::with_capacity(
+        doc.len() - (replacement.to - replacement.from) + replacement.insert.len(),
+    );
+    out.push_str(&doc[..replacement.from]);
+    out.push_str(&replacement.insert);
+    out.push_str(&doc[replacement.to..]);
     Some(out)
 }
 
@@ -83,6 +85,46 @@ pub fn guarded_block_content_edit_impl(
     }
     let block = unique_block_by_id(doc, id)?;
     if &doc[block.content_start..block.content_end] != expected {
+        return None;
+    }
+    content_edit_for_block(doc, &block, new_content)
+}
+
+/// Build a guarded content edit for one exact scanned block occurrence.
+///
+/// Purpose: give id-less Live Preview widgets the same stale-content and
+/// fence-safety guarantees as id-addressed block editors.
+///
+/// # Arguments
+/// * `doc` - the freshly read full document
+/// * `block_start` - UTF-16 opening-fence offset from `scan_view_impl`
+/// * `expected` - exact block content observed when editing began
+/// * `new_content` - replacement block content
+///
+/// # Returns
+/// A UTF-16 [`BlockEdit`], or `None` when the occurrence moved, the content is
+/// stale, the replacement is a no-op, or the block is not closed.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// let doc = "```mica\nold\n```\n";
+/// let edit = mica_core::guarded_block_content_edit_at_impl(doc, 0, "old\n", "new\n");
+/// assert!(edit.is_some());
+/// ```
+pub fn guarded_block_content_edit_at_impl(
+    doc: &str,
+    block_start: usize,
+    expected: &str,
+    new_content: &str,
+) -> Option<BlockEdit> {
+    if expected == new_content {
+        return None;
+    }
+    let block = block_at_utf16_start(doc, block_start)?;
+    if !block.closed || &doc[block.content_start..block.content_end] != expected {
         return None;
     }
     content_edit_for_block(doc, &block, new_content)
@@ -159,17 +201,16 @@ pub fn rewrite_block_id_at_impl(
     if expected_id == new_id || !valid_header_attr("id", Some(new_id)) || new_id.is_empty() {
         return None;
     }
-    let blocks = scan_impl(doc);
-    if blocks.iter().any(|block| block.id() == Some(new_id)) {
+    if scan_impl(doc)
+        .iter()
+        .any(|block| block.id() == Some(new_id))
+    {
         return None;
     }
-    let mut cursor_byte = 0;
-    let mut cursor_utf16 = 0;
-    let block = blocks.into_iter().find(|block| {
-        cursor_utf16 += utf16_len(&doc[cursor_byte..block.start]);
-        cursor_byte = block.start;
-        cursor_utf16 == block_start && block.id() == Some(expected_id)
-    })?;
+    let block = block_at_utf16_start(doc, block_start)?;
+    if block.id() != Some(expected_id) {
+        return None;
+    }
     header_edit_for_block(doc, &block, "id", Some(new_id))
 }
 
@@ -181,13 +222,111 @@ fn unique_block_by_id(doc: &str, id: &str) -> Option<BlockSpan> {
     matches.next().is_none().then_some(block)
 }
 
+fn block_at_utf16_start(doc: &str, block_start: usize) -> Option<BlockSpan> {
+    let mut cursor_byte = 0;
+    let mut cursor_utf16 = 0;
+    // O(n) where n = document bytes; each prefix segment is visited once.
+    for block in scan_impl(doc) {
+        cursor_utf16 += utf16_len(&doc[cursor_byte..block.start]);
+        cursor_byte = block.start;
+        if cursor_utf16 == block_start {
+            return Some(block);
+        }
+        if cursor_utf16 > block_start {
+            return None;
+        }
+    }
+    None
+}
+
 fn content_edit_for_block(doc: &str, block: &BlockSpan, new_content: &str) -> Option<BlockEdit> {
-    let from = utf16_len(&doc[..block.content_start]);
+    let replacement = content_replacement_for_block(doc, block, new_content)?;
+    let from = utf16_len(&doc[..replacement.from]);
     Some(BlockEdit {
         from,
-        to: from + utf16_len(&doc[block.content_start..block.content_end]),
+        to: from + utf16_len(&doc[replacement.from..replacement.to]),
+        insert: replacement.insert,
+    })
+}
+
+struct ContentReplacement {
+    from: usize,
+    to: usize,
+    insert: String,
+}
+
+fn content_replacement_for_block(
+    doc: &str,
+    block: &BlockSpan,
+    new_content: &str,
+) -> Option<ContentReplacement> {
+    let conflicting_run = longest_closing_fence_run(new_content, block.fence_char);
+    if conflicting_run >= block.fence_len {
+        let fence_len = conflicting_run + 1;
+        let header = &doc[block.start..block.content_start];
+        let closer = &doc[block.content_end..block.end];
+        let grown_header = grow_fence_line(header, block.fence_char, fence_len)?;
+        let grown_closer = if closer.is_empty() {
+            String::new()
+        } else {
+            grow_fence_line(closer, block.fence_char, fence_len)?
+        };
+        let mut insert =
+            String::with_capacity(grown_header.len() + new_content.len() + grown_closer.len());
+        insert.push_str(&grown_header);
+        insert.push_str(new_content);
+        insert.push_str(&grown_closer);
+        return Some(ContentReplacement {
+            from: block.start,
+            to: block.end,
+            insert,
+        });
+    }
+    Some(ContentReplacement {
+        from: block.content_start,
+        to: block.content_end,
         insert: new_content.to_string(),
     })
+}
+
+fn longest_closing_fence_run(content: &str, fence_char: u8) -> usize {
+    let mut longest = 0;
+    // O(n) where n = replacement bytes (expected: one Mica block body).
+    for line in content.split('\n') {
+        let text = line.strip_suffix('\r').unwrap_or(line);
+        let indent = text.bytes().take_while(|byte| *byte == b' ').count();
+        if indent > 3 {
+            continue;
+        }
+        let rest = &text[indent..];
+        let run = rest.bytes().take_while(|byte| *byte == fence_char).count();
+        if run >= 3 && rest[run..].trim().is_empty() {
+            longest = longest.max(run);
+        }
+    }
+    longest
+}
+
+fn grow_fence_line(line: &str, fence_char: u8, fence_len: usize) -> Option<String> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let run = line[indent..]
+        .bytes()
+        .take_while(|byte| *byte == fence_char)
+        .count();
+    if run < 3 {
+        return None;
+    }
+    let replacement_len = run.max(fence_len);
+    let mut grown = String::with_capacity(line.len() + replacement_len - run);
+    grown.push_str(&line[..indent]);
+    for _ in 0..replacement_len {
+        grown.push(fence_char as char);
+    }
+    grown.push_str(&line[indent + run..]);
+    Some(grown)
 }
 
 fn header_edit_for_block(
@@ -345,6 +484,37 @@ pub fn set_block_attr_impl(doc: &str, id: &str, key: &str, value: Option<&str>) 
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
+
+    #[test]
+    fn guarded_edit_grows_outer_fence_atomically() {
+        let doc = "before\r\n   ```mica id=a name=Example\r\nold\r\n   ```   \r\nafter\r\n";
+        let replacement = "```rust\r\nfn main() {}\r\n```\r\n";
+        let edit = guarded_block_content_edit_impl(doc, "a", "old\r\n", replacement)
+            .expect("matching unique block should produce an edit");
+        assert_eq!(edit.from, "before\r\n".encode_utf16().count());
+        assert_eq!(
+            edit.insert,
+            "   ````mica id=a name=Example\r\n```rust\r\nfn main() {}\r\n```\r\n   ````   \r\n"
+        );
+        assert_eq!(
+            edit.to,
+            "before\r\n   ```mica id=a name=Example\r\nold\r\n   ```   \r\n"
+                .encode_utf16()
+                .count()
+        );
+    }
+
+    #[test]
+    fn occurrence_guard_rejects_moved_or_stale_block() {
+        let doc = "😀\n```mica\nold\n```\n";
+        let start = crate::scanner::scan_view_impl(doc)[0].start;
+        let edit = guarded_block_content_edit_at_impl(doc, start, "old\n", "new\n")
+            .expect("exact occurrence and preimage should be accepted");
+        assert_eq!(edit.insert, "new\n");
+        assert!(guarded_block_content_edit_at_impl(doc, start + 1, "old\n", "new\n").is_none());
+        assert!(guarded_block_content_edit_at_impl(doc, start, "stale\n", "new\n").is_none());
+        assert!(guarded_block_content_edit_at_impl(doc, start, "old\n", "old\n").is_none());
+    }
 
     #[test]
     fn grow_content_replaces_cleanly() {

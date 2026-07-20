@@ -4,58 +4,12 @@ import { EditorLightbox } from "./lightbox";
 import { buildCalloutTypeGrid } from "./toolbarView";
 import type { RenderCtx } from "./blockShell";
 import type { RegionTarget } from "./quickEdit";
+import { buildCallout, parseCallout, type ParsedCallout } from "./calloutFence";
 
-/** A callout region decomposed for structured editing. */
-export interface ParsedCallout {
-	type: string;
-	fold: CalloutFold;
-	title: string;
-	/** Body with ONE level of `> ` stripped — a nested callout inside shows
-	 *  as a plain callout here and round-trips back to `> >` on save. */
-	body: string;
-	/** Raw text after the quoted run (glued trailing blank lines) — byte-exact. */
-	suffix: string;
-}
-
-const HEAD_RE = /^(\s{0,3})> ?\[!([A-Za-z0-9-]+)\]([+-]?)[ \t]?([^\n]*)/;
-
-/** Parse a region's text as a single leading callout, or null. */
-export function parseCallout(original: string): ParsedCallout | null {
-	const m = original.match(HEAD_RE);
-	if (!m) return null;
-	// Walk the quoted continuation lines by offset so `suffix` stays exact.
-	let pos = original.indexOf("\n", m[0].length);
-	if (pos === -1) pos = original.length;
-	else pos += 1;
-	const body: string[] = [];
-	while (pos < original.length) {
-		const eol = original.indexOf("\n", pos);
-		const end = eol === -1 ? original.length : eol;
-		const line = original.slice(pos, end);
-		if (!/^\s{0,3}>/.test(line)) break;
-		body.push(line.replace(/^\s{0,3}> ?/, ""));
-		pos = eol === -1 ? original.length : eol + 1;
-	}
-	return {
-		type: m[2],
-		fold: (m[3] as CalloutFold) ?? "",
-		title: m[4].trim(),
-		body: body.join("\n"),
-		suffix: original.slice(pos),
-	};
-}
-
-/** Reassemble a callout region (each body line re-quoted with one `> `). */
-export function buildCallout(c: ParsedCallout): string {
-	const head = `> [!${c.type}]${c.fold}${c.title ? ` ${c.title}` : ""}\n`;
-	const body = c.body.length
-		? `${c.body
-				.split("\n")
-				.map((l) => (l.length ? `> ${l}` : ">"))
-				.join("\n")}\n`
-		: "";
-	return `${head}${body}${c.suffix}`;
-}
+// Keep the established import surface while the pure parser/builder remains
+// usable from Node tests without loading Obsidian UI modules.
+export { buildCallout, parseCallout } from "./calloutFence";
+export type { ParsedCallout } from "./calloutFence";
 
 /**
  * The structured callout editor — an `EditorLightbox` derivative. Type, title,
@@ -94,7 +48,7 @@ export function openCalloutEditorFor(
 ): void {
 	// Mutable field state shared by the header hook and the save/preview paths.
 	const state = { type: parsed.type, fold: parsed.fold, title: parsed.title };
-	const assemble = (body: string): string => buildCallout({ ...state, body, suffix: parsed.suffix });
+	const assemble = (body: string): string => buildCallout(parsed, { ...state, body });
 
 	new EditorLightbox({
 		app: ctx.app,
