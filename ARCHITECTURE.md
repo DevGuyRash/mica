@@ -72,8 +72,21 @@ one ordered CodeMirror transaction.
 
 The editors are CodeMirror 6 (`src/ui/mdEditor.ts`) — a compact Markdown quick
 editor and one reusable full lightbox — with reconfigurable Markdown/code
-language compartments and an explicit save lifecycle: Save / Ctrl+Enter
-commit, Esc double-taps to discard when dirty, and blur does NOTHING. Structured
+language compartments, global live view-preference compartments, and an
+explicit save lifecycle: Save / Ctrl+Enter commit, Esc closes search before it
+double-taps to discard when dirty, and blur does NOTHING. All editor surfaces
+share a shadow-root gutter whose foreground, divider, active line, spacing, and
+font size inherit documented `--mica-gutter-*` theme tokens. Incremental Lezer
+highlighting styles markers and semantic Markdown without removing source or
+changing heading line geometry; empty/unknown code stays plain, while `md` and
+`markdown` deliberately opt into the Markdown projection. Full lightboxes own
+one Blob worker for exact find ranges and ECMAScript replacement semantics.
+Generations discard stale replies, a 500 ms watchdog terminates pathological
+regex, typed arrays retain O(matches) offsets, and CodeMirror creates
+decorations only for visible matches. One shared `Intl.Segmenter`-backed service
+computes Unicode words/graphemes/meaningful lines in O(text) on a debounced,
+selection-aware path; exact UTF-16, UTF-8, and line-ending details are computed
+only when their popover opens, so typing does not allocate a UTF-8 copy. Structured
 callout and code adapters edit metadata plus a fence-free/quote-free body, then
 rebuild standard Markdown. Unknown code languages fall back to plain text;
 known languages load asynchronously with a request guard so a stale parser
@@ -91,7 +104,7 @@ UUIDv7 identities before insertion.
 
 ## Storage & versioning
 
-- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: verified content-addressed objects (`objects/b3-….mica.md`, or `.mica.gz` above 4 KiB when the host WebView supports compression; older WebViews retain larger objects as `.mica.md`), an append-only `ledger.jsonl` (authoritative; folded in `(ts, eid)` order so Sync/git line-unions converge — `add-version` events may carry a `parent` hash for branch lineage), and a `manifest.json` summary (note anchor, path hint, current explicit block names). Note renames serialize with snapshots, move only into an absent destination, and surface collisions without merging; the manifest also refreshes on metadata-only maintenance without timestamp-only rewrites. UUIDs alone anchor lineage. Note paths and block names are current non-versioned metadata, so the content ledger intentionally cannot reconstruct historical renames. Hosts recompute the plaintext hash on every object read/write, reject malformed identities and oversized/decompression-bomb objects, and share the same 128 MiB limit. Repair moves fully orphaned sidecars into the root `.mica-graveyard/`; a derived `state.json` cache remains planned (see `state.md`).
+- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: verified content-addressed objects (`objects/b3-….mica.md`, or `.mica.gz` above 4 KiB when the host WebView supports compression; older WebViews retain larger objects as `.mica.md`), an append-only `ledger.jsonl` (authoritative; folded in `(ts, eid)` order so Sync/git line-unions converge — `add-version` events may carry a `parent` hash for branch lineage), and a `manifest.json` summary (note anchor, path hint, current explicit block names). A `replace-version` event targets one original `add-version` EID and changes only that event's effective object hash. The newest replacement in `(ts, eid)` order wins; add/head/label/parent references resolve through the effective hash before visible-version deduplication. Conflicting targets, inconsistent duplicate-hash replacements, or effective-hash collisions fail the fold closed. Original events and objects remain immutable and readable. Note renames serialize with snapshots, move only into an absent destination, and surface collisions without merging; the manifest also refreshes on metadata-only maintenance without timestamp-only rewrites. UUIDs alone anchor lineage. Note paths and block names are current non-versioned metadata, so the content ledger intentionally cannot reconstruct historical renames. Hosts recompute the plaintext hash on every object read/write, reject malformed identities and oversized/decompression-bomb objects, and share the same 128 MiB limit. Repair moves fully orphaned sidecars into the root `.mica-graveyard/`; a derived `state.json` cache remains planned (see `state.md`).
 - Legacy migrations additionally retain `<Note>.mica/migration.json`, a shared
   plugin/CLI transaction record with schema
   `{format,status,note,original,migrated,events}`. `original` and `migrated`
@@ -99,6 +112,13 @@ UUIDv7 identities before insertion.
   resumable after an ambiguous append, and `complete` preserves a durable
   recovery reference instead of turning successful migration evidence into an
   unreachable object.
+- Logical-section history normalization retains a separate
+  `<Note>.mica/section-normalization.json` transaction record with exact
+  pre/post whole-note hashes and stable `replace-version` events. The command
+  writes and verifies immutable objects first, publishes a pending journal,
+  compare-and-swaps the note, appends only missing events, verifies the folded
+  result, and then marks the journal complete. It never repurposes the legacy
+  migration record or refreshes the manifest.
 - Visible (not hidden) because hidden dot-folders emit no Vault events — which would break self-healing — and visible files ride Obsidian Sync / obsidian-git and stay human-readable.
 - Snapshot-on-save is change-gated by a domain-separated, length-framed full BLAKE3 content signature (no structural snapshot storms or leaf-boundary collisions). Per-note plugin work is serialized; exact-content preconditions and guarded rollback protect the note when a sidecar append fails. The CLI stages replacements beside their target, syncs them, atomically publishes them, and verifies the result. Append-only + content-addressed means Sync/git normally see additions rather than object rewrites.
 
@@ -106,9 +126,48 @@ UUIDv7 identities before insertion.
 
 The Rust `similar` crate provides char/word/line granularity, intra-line emphasis, grouped hunks, and unified patches. N-way compare = N pairwise diffs against a user-selectable base. The engine returns hunks/spans/patches; the TS side renders inline / side-by-side / N-up / swap-base / patch. The synchronous plugin path enforces combined-size, line-count, long-line, and granularity-specific budgets before preprocessing or diffing; larger comparisons are directed to the interruptible CLI. The timeline materializes at most 100 rows at once, and explicit base search replaces an unbounded menu.
 
+Focused history inspection reuses the ordinary block renderer with an
+inspection presentation contract that suppresses edit/copy/fold/drag chrome and
+external navigation while leaving tab activation available. Each loaded version
+gets a linear `ScopeIndex`: exact source ranges, kind/path/ancestry, normalized
+label, one polynomial rolling range hash backed by two `Uint32Array` prefix
+tables, and neighbor fingerprints. The index build is O(source units + CST
+nodes) without a sort, retained indexes share the existing 12-object LRU, and
+exact bytes—not hashes—authorize fingerprint matches. Interactive indexing is
+capped at 2 Mi UTF-16 code units; larger snapshots stay available to whole-block
+diff/CLI paths. A unique
+compatible label/ancestry/neighbor candidate may match automatically; numeric
+path equality never does. Ambiguous candidate materialization is capped at 64;
+larger sets use the rendered base-snapshot picker instead of constructing an
+unbounded menu. Missing counterparts require a modal-session manual pairing or
+explicit added/removed disposition. Pairings are scoped to one base/selected
+version pair. No inner ids, historical rewrites, ledger events, or public API
+changes are involved.
+
 ## Clipboard projection
 
-Every rendered structural unit exposes the same CST-backed copy path in Reading view and Live Preview. A pure TypeScript projection walks the selected exact CST once: raw mode serializes its stored source segments; portable mode removes only recognized Mica container lines, drops whitespace-only boundary scaffolding, and preserves one blank-line semantic boundary between nonempty children. Optional outer wrapping synthesizes a backtick fence longer than every inner run and deliberately omits source fence attributes so pasted blocks cannot duplicate identity. The projection is O(bytes) time and O(bytes) output space and never scrapes rendered DOM text.
+Every rendered structural unit exposes the same CST-backed copy path in Reading view and Live Preview. A pure TypeScript projection walks the selected exact CST once and retains source-aware authored/generated segments: syntax mode serializes stored Mica container lines; portable mode emits authored leaves with exact indentation, tabs, blank runs, trailing bytes, and line endings. Optional outer wrapping synthesizes a backtick fence longer than every inner run and deliberately omits source fence attributes so pasted blocks cannot duplicate identity. Content-scope numbering prefixes only authored physical lines while leaving generated directives/fences untouched; output-scope numbering runs after serialization and covers every line. Number width is computed once, blank authored lines count, and numbering remains continuous across semantic fragments. The projection is O(bytes) time and O(bytes) output space and never scrapes rendered DOM text.
+
+## UI actions and settings
+
+`ActionSpec` is the one typed definition used by entity ellipsis menus,
+context menus, and keyboard-reachable paths. Rendered entities construct only
+their local action list, mount no document-wide listener, and dispose native
+menus/timers with their render child. Optional hover-open has a short delay and
+leave grace, checks fine-pointer capability at use time, and never replaces
+click/keyboard behavior. Tabs keep activation/add/overflow direct; drag remains
+direct where spatial manipulation matters.
+
+`SETTING_LIFECYCLES` exhaustively maps every persisted setting to immediate
+runtime application, open-widget rerender, live toolbar repaint, click-time
+read, next-open, or next-startup behavior. The map is type-checked against
+`MicaSettings`, so a new preference cannot compile without a declared lifecycle.
+Mounted toolbars subscribe to immutable configuration replacement and repaint
+their controls without replacing CodeMirror documents or undo history.
+Legacy duplicate custom-button ids are normalized deterministically once on
+load; existing buttons without a surface remain Markdown-only, while current
+configuration rejects empty names/templates and falls back safely for invalid
+icons.
 
 ## Section interaction
 
@@ -133,9 +192,18 @@ and the same reducer for structural edits. Note, object, and manifest replacemen
 are guarded, atomic, and post-write verified; vault walks do not follow symlinks
 outside the vault. Commands: ls/cat/set, tab/cell/
 grid/mv, versions/show/diff/restore/label, snapshot, watch (a polling
-auto-snapshot daemon for when Obsidian is closed), migrate, prepare, repair,
-doctor. `--json` everywhere for scripting. Exit codes: 1 I/O, 2 bad args,
+auto-snapshot daemon for when Obsidian is closed), migrate,
+normalize-sections, prepare, repair, doctor. `normalize-sections` accepts a
+note or directory; `--history` applies the same one-section wrapper to stored
+versions through append-only replacement events, and `--dry-run` performs the
+full validation without writes. `--json` everywhere for scripting. Exit codes: 1 I/O, 2 bad args,
 3 not found, 4 corrupt state.
+
+`replace-version` is a coordinated ledger-format upgrade. Readers fail closed
+on an unknown typed event, but pre-upgrade binaries cannot interpret a future
+event they do not know about. Every plugin and CLI instance that can touch a
+normalized vault must therefore be upgraded before the first history
+normalization.
 
 ## Scriptable API
 
@@ -153,5 +221,5 @@ Rust: `crates/mica-core/src/{scanner,parser,edit,versions,diff,reconcile,migrate
 
 1. `cargo test --workspace` — core, CLI, integration, adversarial-depth/scaling, and documentation tests.
 2. `pnpm smoke` — the WASM boundary end-to-end in Node (ids, hashing, guarded/exact edits, atomic batches, duplicate repair, migrate+edit+diff).
-3. `pnpm e2e` — eight contract + rendering specs inside a real downloaded Obsidian under Xvfb. Scheduled profiles repeat the suite at the minimum supported app version and under mobile emulation.
+3. `pnpm e2e` — nine contract + rendering specs inside a real downloaded Obsidian under Xvfb, including worker timeout/recovery, theme-token gutters, action input modes, scoped toolbar repainting, and ambiguity-safe focused history. Scheduled profiles repeat the suite at the minimum supported app version and under mobile emulation.
 4. `just e2e-cli` — contract checks via the official Obsidian CLI against the running app; skips with instructions when the CLI isn't activated.
