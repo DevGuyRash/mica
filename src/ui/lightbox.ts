@@ -1,6 +1,9 @@
-import { MarkdownRenderChild, MarkdownRenderer, Modal, setIcon, type App } from "obsidian";
+import { MarkdownRenderChild, MarkdownRenderer, Menu, Modal, Scope, setIcon, type App } from "obsidian";
 import { editorViewPrefs, type EditorLanguage, MdEditor, toggleViewPref, saveShortcutLabel } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
+import { LightboxSearch } from "./lightboxSearch";
+import { sourceTextDetails, visibleTextStats, type VisibleTextStats } from "./textStats";
+import { mountActionMenu, type ActionSpec } from "./actionMenu";
 
 export interface LightboxOpts {
 	app: App;
@@ -50,9 +53,23 @@ export class EditorLightbox extends Modal {
 	private previewTimer: number | null = null;
 	private destroyToolbar: (() => void) | null = null;
 	private destroyHeader: (() => void) | null = null;
+	private search: LightboxSearch | null = null;
+	private removePrefsListener: (() => void) | null = null;
+	private destroyActionMenu: (() => void) | null = null;
+	private actionMenuIsOpen: (() => boolean) | null = null;
+	private closeActionMenu: (() => void) | null = null;
+	private popSearchScope: (() => void) | null = null;
+	private statsTimer: number | null = null;
+	private statsValue = "";
+	private statsComputedValue: string | null = null;
+	private totalStats: VisibleTextStats = { words: 0, characters: 0, lines: 0 };
+	private discardTimer: number | null = null;
+	private currentLanguage: EditorLanguage;
+	private statsMenu: Menu | null = null;
 
 	constructor(private readonly opts: LightboxOpts) {
 		super(opts.app);
+		this.currentLanguage = opts.editorLanguage ?? { kind: "markdown" };
 	}
 
 	onOpen(): void {
@@ -62,6 +79,7 @@ export class EditorLightbox extends Modal {
 		const root = this.contentEl.createDiv({ cls: "mica-lightbox-root" });
 		const head = this.opts.header ? root.createDiv({ cls: "mica-lightbox-fields" }) : null;
 		const toolbarRow = root.createDiv({ cls: "mica-lightbox-toolbar" });
+		const searchHost = root.createDiv();
 		const split = root.createDiv({ cls: "mica-lightbox-split" });
 		const editorHost = split.createDiv({ cls: "mica-lightbox-editor" });
 		this.previewEl = split.createDiv({ cls: "mica-lightbox-preview" });
@@ -85,11 +103,33 @@ export class EditorLightbox extends Modal {
 			onChange: (v) => {
 				this.disarmDiscard();
 				this.opts.onDraft?.(v);
-				this.refreshStats(v);
+				this.search?.onDocumentChanged();
+				this.scheduleStats(v);
 				this.schedulePreview();
 			},
-			onSelection: () => this.refreshStats(this.editor?.getValue() ?? ""),
+			onSelection: () => this.scheduleStats(this.editor?.getValue() ?? "", 60),
 		});
+		// The modal's built-in Escape binding and Mica's dirty-close binding share
+		// one Scope. A child scope while search is visible makes “close search” the
+		// only Escape action, instead of letting one keystroke reach both handlers.
+		const findScope = new Scope(this.scope);
+		let findScopePushed = false;
+		const setFindScope = (open: boolean): void => {
+			if (open && !findScopePushed) {
+				this.opts.app.keymap.pushScope(findScope);
+				findScopePushed = true;
+			} else if (!open && findScopePushed) {
+				this.opts.app.keymap.popScope(findScope);
+				findScopePushed = false;
+			}
+		};
+		findScope.register([], "Escape", (event) => {
+			event.stopImmediatePropagation();
+			this.search?.close();
+			return false;
+		});
+		this.popSearchScope = () => setFindScope(false);
+		this.search = new LightboxSearch(searchHost, this.editor, setFindScope);
 		if (head && this.opts.header) {
 			this.destroyHeader =
 				this.opts.header(
@@ -98,55 +138,99 @@ export class EditorLightbox extends Modal {
 						this.disarmDiscard();
 						if (this.previewOn) this.renderPreview();
 					},
-					(language) => this.editor?.setLanguage(language),
+					(language) => {
+						this.currentLanguage = language;
+						this.editor?.setLanguage(language);
+					},
 				) ?? null;
 		}
 
-		if (this.opts.editorLanguage?.kind !== "code") {
-			this.destroyToolbar = buildToolbar(toolbarRow, this.opts.app, () => this.editor!.view, false);
-		}
+		this.destroyToolbar = buildToolbar(
+			toolbarRow,
+			this.opts.app,
+			() => this.editor!.view,
+			false,
+			this.opts.editorLanguage?.kind === "code" ? "code" : "markdown",
+		);
 
 		// Right side of the toolbar: view toggles + preview.
 		const spacer = toolbarRow.createDiv({ cls: "mica-toolbar-spacer" });
 		void spacer;
-		const viewToggle = (icon: string, label: string, get: () => boolean, flip: () => void): void => {
-			const b = toolbarRow.createEl("button", {
-				cls: `clickable-icon mica-tool ${get() ? "is-on" : ""}`,
-				attr: { type: "button", "aria-label": label },
-			});
-			setIcon(b, icon);
-			b.addEventListener("click", () => {
-				flip();
-				b.toggleClass("is-on", get());
-			});
+		const lineBtn = toolbarRow.createEl("button", {
+			cls: `clickable-icon mica-tool mica-tool-lines ${editorViewPrefs().lineNumbers ? "is-on" : ""}`,
+			attr: {
+				type: "button",
+				"aria-label": "Line numbers",
+				"aria-pressed": String(editorViewPrefs().lineNumbers),
+			},
+		});
+		setIcon(lineBtn, "list-ordered");
+		const paintLineButton = (): void => {
+			const on = editorViewPrefs().lineNumbers;
+			lineBtn.toggleClass("is-on", on);
+			lineBtn.setAttribute("aria-pressed", String(on));
 		};
-		viewToggle(
-			"list-ordered",
-			"Line numbers",
-			() => editorViewPrefs().lineNumbers,
-			() => toggleViewPref("lineNumbers"),
-		);
-		viewToggle(
-			"pilcrow",
-			"Show whitespace characters",
-			() => editorViewPrefs().whitespace,
-			() => toggleViewPref("whitespace"),
-		);
-		const previewBtn = toolbarRow.createEl("button", {
-			cls: "clickable-icon mica-tool mica-tool-preview",
-			attr: { type: "button", "aria-label": "Toggle live preview pane" },
+		lineBtn.addEventListener("click", () => {
+			toggleViewPref("lineNumbers");
+			paintLineButton();
 		});
-		setIcon(previewBtn, "eye");
-		previewBtn.addEventListener("click", () => {
-			this.previewOn = !this.previewOn;
-			previewBtn.toggleClass("is-on", this.previewOn);
-			split.toggleClass("is-split", this.previewOn);
-			if (this.previewOn) this.renderPreview();
-		});
+		document.addEventListener("mica-editor-prefs-change", paintLineButton);
+		this.removePrefsListener = () => document.removeEventListener("mica-editor-prefs-change", paintLineButton);
+
+		const actionMenu = mountActionMenu(
+			toolbarRow,
+			() =>
+				[
+					{ id: "find", label: "Find and replace", icon: "search", run: () => this.search?.open() },
+					{
+						id: "whitespace",
+						label: "Show whitespace",
+						icon: "pilcrow",
+						checked: editorViewPrefs().whitespace,
+						run: () => toggleViewPref("whitespace"),
+					},
+					{
+						id: "syntax",
+						label: "Style Markdown source",
+						icon: "wand-sparkles",
+						checked: editorViewPrefs().liveSyntax,
+						disabled:
+							this.currentLanguage.kind === "code" &&
+							!["md", "markdown"].includes(
+								this.currentLanguage.info
+									.trimStart()
+									.match(/^[^\s]+/)?.[0]
+									?.toLocaleLowerCase() ?? "",
+							),
+						run: () => toggleViewPref("liveSyntax"),
+					},
+					{
+						id: "preview",
+						label: "Live preview",
+						icon: "eye",
+						checked: this.previewOn,
+						run: () => {
+							this.previewOn = !this.previewOn;
+							split.toggleClass("is-split", this.previewOn);
+							if (this.previewOn) this.renderPreview();
+						},
+					},
+				] satisfies ActionSpec[],
+			"mica-tool mica-editor-menu",
+			"Editor actions",
+			this.opts.app,
+		);
+		this.destroyActionMenu = actionMenu.destroy;
+		this.actionMenuIsOpen = actionMenu.isOpen;
+		this.closeActionMenu = actionMenu.close;
 
 		// Footer: stats + actions.
 		const footer = root.createDiv({ cls: "mica-lightbox-footer" });
-		this.statsEl = footer.createDiv({ cls: "mica-lightbox-stats" });
+		this.statsEl = footer.createEl("button", {
+			cls: "mica-lightbox-stats",
+			attr: { type: "button", "aria-label": "Text statistics and source details" },
+		});
+		this.statsEl.addEventListener("click", (event) => this.showSourceStats(event));
 		this.refreshStats(this.opts.initial);
 		footer.createDiv({ cls: "mica-footer-spacer" });
 		const hintLabel = saveShortcutLabel();
@@ -161,8 +245,20 @@ export class EditorLightbox extends Modal {
 		saveBtn.addEventListener("click", () => void this.save());
 
 		// Esc goes through OUR dirty check, not straight to Modal.close().
-		this.scope.register([], "Escape", () => {
+		this.scope.register([], "Escape", (event) => {
+			// Obsidian's Modal also owns an Escape listener. Stop this key event at
+			// the scoped handler so closing the find ribbon cannot fall through to
+			// the modal's unconditional close path in the same dispatch.
+			event.stopImmediatePropagation();
+			if (this.search?.isOpen) {
+				this.search.close();
+				return false;
+			}
 			this.requestClose();
+			return false;
+		});
+		this.scope.register(["Mod"], "f", () => {
+			this.search?.open();
 			return false;
 		});
 	}
@@ -183,6 +279,10 @@ export class EditorLightbox extends Modal {
 
 	/** Esc / Cancel: close clean editors instantly; arm a confirm when dirty. */
 	private requestClose(): void {
+		if (this.actionMenuIsOpen?.()) {
+			this.closeActionMenu?.();
+			return;
+		}
 		// Escape aimed at a popover INSIDE the lightbox (the callout type
 		// grid, a toolbar picker) dismisses that popover — it must never arm
 		// "Discard changes?" on the whole editor.
@@ -199,34 +299,61 @@ export class EditorLightbox extends Modal {
 		this.discardArmed = true;
 		this.cancelBtn?.addClass("mica-danger");
 		this.cancelBtn?.setText("Discard changes?");
-		window.setTimeout(() => this.disarmDiscard(), 2500);
+		if (this.discardTimer !== null) window.clearTimeout(this.discardTimer);
+		this.discardTimer = window.setTimeout(() => this.disarmDiscard(), 2500);
 	}
 
 	private disarmDiscard(): void {
+		if (this.discardTimer !== null) window.clearTimeout(this.discardTimer);
+		this.discardTimer = null;
 		if (!this.discardArmed) return;
 		this.discardArmed = false;
 		this.cancelBtn?.removeClass("mica-danger");
 		this.cancelBtn?.setText("Cancel");
 	}
 
-	/** Real words (letter/number runs; "don't" is one, "##" is none). */
-	private static words(text: string): number {
-		return (text.match(/[\p{L}\p{N}]+(?:['\u2019-][\p{L}\p{N}]+)*/gu) ?? []).length;
+	private scheduleStats(value: string, delay = 120): void {
+		this.statsValue = value;
+		if (this.statsTimer !== null) window.clearTimeout(this.statsTimer);
+		this.statsTimer = window.setTimeout(() => {
+			this.statsTimer = null;
+			this.refreshStats(this.statsValue);
+		}, delay);
 	}
 
 	private refreshStats(value: string): void {
 		if (!this.statsEl) return;
-		const words = EditorLightbox.words(value);
-		const lines = value.length ? value.split("\n").length : 0;
+		if (value !== this.statsComputedValue) {
+			this.statsValue = value;
+			this.statsComputedValue = value;
+			this.totalStats = visibleTextStats(value);
+		}
+		const total = this.totalStats;
 		const sel = this.editor?.view.state.selection.main;
 		if (sel && !sel.empty) {
 			const chosen = this.editor?.view.state.sliceDoc(sel.from, sel.to) ?? "";
+			const selected = visibleTextStats(chosen);
 			this.statsEl.setText(
-				`${EditorLightbox.words(chosen)} / ${words} words · ${chosen.length} / ${value.length} chars · ${lines} lines`,
+				`${selected.words} / ${total.words} words · ${selected.characters} / ${total.characters} chars · ${selected.lines} / ${total.lines} lines`,
 			);
 			return;
 		}
-		this.statsEl.setText(`${words} words · ${value.length} chars · ${lines} lines`);
+		this.statsEl.setText(`${total.words} words · ${total.characters} chars · ${total.lines} lines`);
+	}
+
+	private showSourceStats(event: MouseEvent): void {
+		const stats = sourceTextDetails(this.editor?.getValue() ?? this.opts.initial);
+		this.statsMenu?.hide();
+		const menu = new Menu();
+		this.statsMenu = menu;
+		menu.onHide(() => {
+			if (this.statsMenu === menu) this.statsMenu = null;
+		});
+		menu.addItem((item) => item.setTitle(`${stats.sourceUnits} UTF-16 units`).setDisabled(true));
+		menu.addItem((item) => item.setTitle(`${stats.utf8Bytes} UTF-8 bytes`).setDisabled(true));
+		menu.addItem((item) => item.setTitle(`${stats.rawLines} raw lines`).setDisabled(true));
+		menu.addItem((item) => item.setTitle(`${stats.lineEndings} line endings`).setDisabled(true));
+		menu.showAtMouseEvent(event);
 	}
 
 	private schedulePreview(): void {
@@ -253,11 +380,25 @@ export class EditorLightbox extends Modal {
 
 	onClose(): void {
 		if (this.previewTimer !== null) window.clearTimeout(this.previewTimer);
+		if (this.statsTimer !== null) window.clearTimeout(this.statsTimer);
+		this.disarmDiscard();
+		this.statsMenu?.hide();
+		this.statsMenu = null;
 		this.previewChild?.unload();
 		this.destroyHeader?.();
 		this.destroyHeader = null;
 		this.destroyToolbar?.();
 		this.destroyToolbar = null;
+		this.destroyActionMenu?.();
+		this.destroyActionMenu = null;
+		this.actionMenuIsOpen = null;
+		this.closeActionMenu = null;
+		this.removePrefsListener?.();
+		this.removePrefsListener = null;
+		this.search?.destroy();
+		this.search = null;
+		this.popSearchScope?.();
+		this.popSearchScope = null;
 		this.editor?.destroy();
 		this.editor = null;
 		if (!this.saved) this.opts.onDiscard?.();

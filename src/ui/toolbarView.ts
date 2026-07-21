@@ -1,7 +1,14 @@
 import { setIcon, type App } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import { calloutCatalog, type CalloutFold, type CalloutType } from "./calloutCatalog";
-import { groupDefault, rememberDefault, resolveTool, toolbarConfig, type ToolItem } from "./toolSpec";
+import {
+	groupDefault,
+	onToolbarConfigChange,
+	rememberDefault,
+	resolveTool,
+	toolbarConfig,
+	type ToolItem,
+} from "./toolSpec";
 import * as verbs from "./toolbar";
 
 /** Common fence languages offered first in the codeblock picker. */
@@ -45,12 +52,42 @@ export function disposeToolbarUi(): void {
  * default. Buttons act on the CM6 view from `getView`, so the toolbar never
  * holds a stale editor reference.
  */
-export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorView, compact: boolean): () => void {
+export function buildToolbar(
+	host: HTMLElement,
+	app: App,
+	getView: () => EditorView,
+	compact: boolean,
+	surface: "markdown" | "code" = "markdown",
+): () => void {
+	const mount = host.createDiv({ cls: "mica-toolbar-mount" });
+	let destroyPainted = (): void => undefined;
+	const paint = (): void => {
+		destroyPainted();
+		mount.empty();
+		destroyPainted = buildToolbarOnce(mount, app, getView, compact, surface);
+	};
+	const unsubscribe = onToolbarConfigChange(paint);
+	paint();
+	return () => {
+		unsubscribe();
+		destroyPainted();
+		mount.remove();
+	};
+}
+
+function buildToolbarOnce(
+	host: HTMLElement,
+	app: App,
+	getView: () => EditorView,
+	compact: boolean,
+	surface: "markdown" | "code",
+): () => void {
 	const bar = host.createDiv({ cls: `mica-toolbar ${compact ? "is-compact" : ""}` });
-	const layout = toolbarConfig().layout;
+	const layout = [...toolbarConfig().layout];
 
 	// Every top-level element in layout order — the responsive unit.
 	const pieces: HTMLElement[] = [];
+	const cleanups: (() => void)[] = [];
 	const track = <T extends HTMLElement>(el: T): T => {
 		pieces.push(el);
 		return el;
@@ -60,10 +97,10 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 			track(bar.createSpan({ cls: "mica-tool-sep" }));
 			continue;
 		}
-		const item = resolveTool(id);
+		const item = resolveTool(id, surface);
 		if (!item) continue; // a removed custom tool leaves no corpse
 		const before = bar.lastElementChild;
-		renderItem(bar, app, getView, item);
+		renderItem(bar, app, getView, item, (cleanup) => cleanups.push(cleanup));
 		// renderItem appends exactly one root element per item.
 		const added = bar.lastElementChild;
 		if (added && added !== before) track(added as HTMLElement);
@@ -75,7 +112,7 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 		cls: "clickable-icon mica-tool mica-toolbar-more",
 		attr: { type: "button", "aria-label": "More tools…" },
 	});
-	setIcon(more, "ellipsis");
+	setIcon(more, "chevrons-right");
 	more.style.display = "none";
 	const hidden: HTMLElement[] = [];
 	more.addEventListener("mousedown", (e) => e.preventDefault());
@@ -98,10 +135,12 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 					bar.insertBefore(el, more);
 				}
 			},
+			more,
 		);
 	});
 
 	let relayoutQueued = false;
+	let relayoutFrame: number | null = null;
 	let lastAvail = -1;
 	// Piece widths are constant — measure ONCE (first laid-out pass) so the
 	// relayout never mutates the DOM to measure. Mutating during measurement
@@ -111,7 +150,8 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 	const relayout = (): void => {
 		if (relayoutQueued) return;
 		relayoutQueued = true;
-		window.requestAnimationFrame(() => {
+		relayoutFrame = window.requestAnimationFrame(() => {
+			relayoutFrame = null;
 			relayoutQueued = false;
 			if (!bar.isConnected) return;
 			const avail = bar.clientWidth;
@@ -147,6 +187,8 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 	relayout();
 	return () => {
 		if (activePopoverBar === bar) closeActivePopover?.();
+		if (relayoutFrame !== null) window.cancelAnimationFrame(relayoutFrame);
+		for (const cleanup of cleanups) cleanup();
 		ro.disconnect();
 	};
 }
@@ -154,31 +196,41 @@ export function buildToolbar(host: HTMLElement, app: App, getView: () => EditorV
 function toolButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {
 	const b = parent.createEl("button", {
 		cls: "clickable-icon mica-tool",
-		attr: { type: "button", "aria-label": label, tabindex: "-1" },
+		attr: { type: "button", "aria-label": label },
 	});
 	setIcon(b, icon);
+	if (!b.querySelector("svg")) setIcon(b, "sparkles");
 	// mousedown+preventDefault keeps focus in the editor while clicking tools.
 	b.addEventListener("mousedown", (e) => e.preventDefault());
 	return b;
 }
 
-function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item: ToolItem): void {
+function renderItem(
+	bar: HTMLElement,
+	app: App,
+	getView: () => EditorView,
+	item: ToolItem,
+	registerCleanup: (cleanup: () => void) => void,
+): void {
 	// Popover specials -----------------------------------------------------
 	if (item.special === "callout") {
-		toolButton(bar, item.icon, item.label).addEventListener("click", () => {
-			openPopover(bar, (panel, close) => buildCalloutPicker(panel, app, getView, close));
+		const button = toolButton(bar, item.icon, item.label);
+		button.addEventListener("click", () => {
+			openPopover(bar, (panel, close) => buildCalloutPicker(panel, app, getView, close), undefined, button);
 		});
 		return;
 	}
 	if (item.special === "codeblock") {
-		toolButton(bar, item.icon, item.label).addEventListener("click", () => {
-			openPopover(bar, (panel, close) => buildLangPicker(panel, getView, close));
+		const button = toolButton(bar, item.icon, item.label);
+		button.addEventListener("click", () => {
+			openPopover(bar, (panel, close) => buildLangPicker(panel, getView, close), undefined, button);
 		});
 		return;
 	}
 	if (item.special === "table") {
-		toolButton(bar, item.icon, item.label).addEventListener("click", () => {
-			openPopover(bar, (panel, close) => buildTablePicker(panel, getView, close));
+		const button = toolButton(bar, item.icon, item.label);
+		button.addEventListener("click", () => {
+			openPopover(bar, (panel, close) => buildTablePicker(panel, getView, close), undefined, button);
 		});
 		return;
 	}
@@ -203,35 +255,41 @@ function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item:
 	});
 	const caret = group.createEl("button", {
 		cls: "clickable-icon mica-tool-caret",
-		attr: { type: "button", "aria-label": `${item.label} options`, tabindex: "-1" },
+		attr: { type: "button", "aria-label": `${item.label} options` },
 	});
 	setIcon(caret, "chevron-down");
 	caret.addEventListener("mousedown", (e) => e.preventDefault());
 
 	let hoverTimer: number | null = null;
 	const openVariants = (): void => {
-		openPopover(bar, (panel, close) => {
-			panel.addClass("mica-variant-menu");
-			for (const v of item.variants ?? []) {
-				const row = panel.createEl("button", {
-					cls: "clickable-icon mica-pop-item mica-variant",
-					attr: { type: "button" },
-				});
-				setIcon(row.createSpan({ cls: "mica-variant-ico" }), v.icon);
-				row.createSpan({ text: v.label });
-				if (groupDefault(item)?.id === v.id) setIcon(row.createSpan({ cls: "mica-variant-check" }), "check");
-				row.addEventListener("mousedown", (e) => e.preventDefault());
-				row.addEventListener("click", () => {
-					v.run(getView());
-					rememberDefault(item.id, v.id);
-					// The primary button now reflects the new default.
-					primary.empty();
-					setIcon(primary, v.icon);
-					primary.setAttribute("aria-label", `${v.label} (click) — hover for more`);
-					close();
-				});
-			}
-		});
+		openPopover(
+			bar,
+			(panel, close) => {
+				panel.addClass("mica-variant-menu");
+				for (const v of item.variants ?? []) {
+					const row = panel.createEl("button", {
+						cls: "clickable-icon mica-pop-item mica-variant",
+						attr: { type: "button" },
+					});
+					setIcon(row.createSpan({ cls: "mica-variant-ico" }), v.icon);
+					row.createSpan({ text: v.label });
+					if (groupDefault(item)?.id === v.id)
+						setIcon(row.createSpan({ cls: "mica-variant-check" }), "check");
+					row.addEventListener("mousedown", (e) => e.preventDefault());
+					row.addEventListener("click", () => {
+						v.run(getView());
+						rememberDefault(item.id, v.id);
+						// The primary button now reflects the new default.
+						primary.empty();
+						setIcon(primary, v.icon);
+						primary.setAttribute("aria-label", `${v.label} (click) — hover for more`);
+						close();
+					});
+				}
+			},
+			undefined,
+			caret,
+		);
 		positionPopoverUnder(bar, group);
 	};
 	caret.addEventListener("click", openVariants);
@@ -239,6 +297,10 @@ function renderItem(bar: HTMLElement, app: App, getView: () => EditorView, item:
 		hoverTimer = window.setTimeout(openVariants, 300);
 	});
 	group.addEventListener("pointerleave", () => {
+		if (hoverTimer !== null) window.clearTimeout(hoverTimer);
+		hoverTimer = null;
+	});
+	registerCleanup(() => {
 		if (hoverTimer !== null) window.clearTimeout(hoverTimer);
 		hoverTimer = null;
 	});
@@ -253,6 +315,7 @@ function openPopover(
 	bar: HTMLElement,
 	build: (panel: HTMLElement, close: () => void) => void,
 	onClose?: () => void,
+	opener?: HTMLButtonElement,
 ): void {
 	// A hover timer can fire after its toolbar was destroyed; never build a
 	// panel (and register a document listener) on a disconnected bar.
@@ -262,6 +325,8 @@ function openPopover(
 	closeActivePopover?.();
 	const panel = document.body.createDiv({ cls: "mica-popover mica-tb-popover" });
 	activePopoverBar = bar;
+	opener?.setAttribute("aria-haspopup", "dialog");
+	opener?.setAttribute("aria-expanded", "true");
 	const r = bar.getBoundingClientRect();
 	panel.style.position = "fixed";
 	panel.style.left = `${Math.min(Math.max(8, r.left), window.innerWidth - 356)}px`;
@@ -269,6 +334,7 @@ function openPopover(
 	panel.style.maxHeight = `${Math.max(120, window.innerHeight - r.bottom - 20)}px`;
 	panel.style.overflowY = "auto";
 	let closed = false;
+	let restoreFocus = false;
 	const close = (): void => {
 		if (closed) return;
 		closed = true;
@@ -278,6 +344,8 @@ function openPopover(
 		document.removeEventListener("keydown", onEsc, true);
 		if (closeActivePopover === close) closeActivePopover = null;
 		if (activePopoverBar === bar) activePopoverBar = null;
+		opener?.setAttribute("aria-expanded", "false");
+		if (restoreFocus && opener?.isConnected) opener.focus();
 	};
 	closeActivePopover = close;
 	const onOutside = (e: PointerEvent): void => {
@@ -289,6 +357,7 @@ function openPopover(
 		if (e.key === "Escape") {
 			e.preventDefault();
 			e.stopPropagation();
+			restoreFocus = true;
 			close();
 		}
 	};

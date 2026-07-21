@@ -1,4 +1,4 @@
-import { Modal, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { getIcon, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { builtinTools, DEFAULT_TOOLBAR_LAYOUT, type CustomTool } from "./ui/toolSpec";
 import type MicaPlugin from "./main";
 import { OBSIDIAN_CALLOUT_TYPES } from "./wasm/bridge";
@@ -63,6 +63,8 @@ export interface MicaSettings {
 	blockHeaderMode: "hover" | "always" | "never";
 	/** Which side hover tools (drag grip, pencil, cell bar) sit on. */
 	dragHandlePosition: "left" | "right";
+	/** How vertical-ellipsis entity menus normally open. Click always remains available. */
+	actionMenuTrigger: "click" | "hover";
 	/** What clicking outside an inline editor does. */
 	editorClickOutside: "nothing" | "cancel" | "save";
 	/** Draw structural outlines (tabs, sections, cells) by default; per-block
@@ -74,10 +76,18 @@ export interface MicaSettings {
 	editorLineNumbers: boolean;
 	/** Render whitespace characters in the markdown editors. */
 	editorWhitespace: boolean;
+	/** Apply semantic Markdown styling while keeping source markers visible. */
+	editorLiveSyntaxStyling: boolean;
 	/** Preserve tab/grid/cell layout directives in section clipboard copies. */
 	copyIncludeMicaSyntax: boolean;
 	/** Wrap section clipboard copies in a fresh, identity-free Mica code fence. */
 	copyIncludeOuterContainer: boolean;
+	/** Prefix copied lines with aligned plain-text line numbers. */
+	copyIncludeLineNumbers: boolean;
+	/** Number only authored content or every final output line. */
+	copyLineNumberScope: "content" | "output";
+	/** Append locale-aware exact times to relative version ages. */
+	showVersionExactTimestamps: boolean;
 	/** Ordered editor-toolbar item ids ("|" = separator). */
 	toolbarLayout: string[];
 	/** Variant-group defaults (group id → variant id), following last use. */
@@ -112,18 +122,102 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	versionCalloutTypes: OBSIDIAN_CALLOUT_TYPES,
 	blockHeaderMode: "hover",
 	dragHandlePosition: "right",
+	actionMenuTrigger: "click",
 	editorClickOutside: "nothing",
 	showOutlines: false,
 	saveShortcut: "mod-enter",
 	editorLineNumbers: false,
 	editorWhitespace: false,
+	editorLiveSyntaxStyling: true,
 	copyIncludeMicaSyntax: false,
 	copyIncludeOuterContainer: false,
+	copyIncludeLineNumbers: false,
+	copyLineNumberScope: "content",
+	showVersionExactTimestamps: false,
 	toolbarLayout: DEFAULT_TOOLBAR_LAYOUT,
 	toolbarDefaults: {},
 	customTools: [],
 	foldState: {},
 };
+
+/** Every persisted preference declares when its observable effect occurs. The
+ * exhaustive record makes adding a setting without choosing a lifecycle a
+ * type error instead of a latent UI-wiring bug. */
+export type SettingLifecycle =
+	| "immediate-runtime"
+	| "open-widget-rerender"
+	| "toolbar-rerender"
+	| "read-at-use"
+	| "next-open"
+	| "next-startup"
+	| "debouncer-runtime";
+
+export const SETTING_LIFECYCLES = {
+	autoSnapshotEnabled: "debouncer-runtime",
+	snapshotDebounceMs: "debouncer-runtime",
+	diffRefine: "next-open",
+	diffHideSyntax: "next-open",
+	diffIgnoreWs: "next-open",
+	defaultDiffMode: "next-open",
+	showVersionChip: "open-widget-rerender",
+	reconcileOnLoad: "next-startup",
+	autoAddIds: "read-at-use",
+	limitContentHeight: "immediate-runtime",
+	contentMaxHeightPx: "immediate-runtime",
+	editorAutosize: "open-widget-rerender",
+	editorMaxHeightPx: "immediate-runtime",
+	tabGapPx: "immediate-runtime",
+	theme: "immediate-runtime",
+	accentColor: "immediate-runtime",
+	density: "immediate-runtime",
+	cardRadiusPx: "immediate-runtime",
+	tabStyle: "immediate-runtime",
+	animations: "immediate-runtime",
+	versionCalloutTypes: "read-at-use",
+	blockHeaderMode: "open-widget-rerender",
+	dragHandlePosition: "immediate-runtime",
+	actionMenuTrigger: "immediate-runtime",
+	editorClickOutside: "immediate-runtime",
+	showOutlines: "immediate-runtime",
+	saveShortcut: "next-open",
+	editorLineNumbers: "immediate-runtime",
+	editorWhitespace: "immediate-runtime",
+	editorLiveSyntaxStyling: "immediate-runtime",
+	copyIncludeMicaSyntax: "read-at-use",
+	copyIncludeOuterContainer: "read-at-use",
+	copyIncludeLineNumbers: "read-at-use",
+	copyLineNumberScope: "read-at-use",
+	showVersionExactTimestamps: "immediate-runtime",
+	toolbarLayout: "toolbar-rerender",
+	toolbarDefaults: "toolbar-rerender",
+	customTools: "toolbar-rerender",
+	foldState: "read-at-use",
+} as const satisfies Record<keyof MicaSettings, SettingLifecycle>;
+
+/** Apply the declared lifecycle first, then persist the already-mutated value. */
+export async function commitSetting(plugin: MicaPlugin, key: keyof MicaSettings): Promise<void> {
+	switch (SETTING_LIFECYCLES[key]) {
+		case "immediate-runtime":
+			plugin.applyStyleVars();
+			break;
+		case "open-widget-rerender":
+			plugin.refreshViews();
+			break;
+		case "toolbar-rerender":
+			plugin.applyToolbarConfig();
+			break;
+		case "debouncer-runtime":
+			plugin.engine.resetDebouncers();
+			break;
+		case "next-open":
+			plugin.applyNextOpenSettings();
+			break;
+		case "read-at-use":
+		case "next-startup":
+			break;
+	}
+	await plugin.saveSettings();
+}
 
 export class MicaSettingTab extends PluginSettingTab {
 	constructor(private readonly micaPlugin: MicaPlugin) {
@@ -152,7 +246,7 @@ export class MicaSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		const s = this.micaPlugin.settings;
-		const save = (): Promise<void> => this.micaPlugin.saveSettings();
+		const commit = (key: keyof MicaSettings): Promise<void> => commitSetting(this.micaPlugin, key);
 		containerEl.empty();
 
 		// ---------- Versioning ----------
@@ -166,8 +260,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.autoSnapshotEnabled).onChange(async (v) => {
 					s.autoSnapshotEnabled = v;
-					this.micaPlugin.engine.resetDebouncers();
-					await save();
+					await commit("autoSnapshotEnabled");
 					this.display(); // reveal/hide the interval knob
 				}),
 			);
@@ -183,8 +276,7 @@ export class MicaSettingTab extends PluginSettingTab {
 						.setDynamicTooltip()
 						.onChange(async (v) => {
 							s.snapshotDebounceMs = v * 1000;
-							this.micaPlugin.engine.resetDebouncers();
-							await save();
+							await commit("snapshotDebounceMs");
 						}),
 				);
 		}
@@ -197,7 +289,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.autoAddIds).onChange(async (v) => {
 					s.autoAddIds = v;
-					await save();
+					await commit("autoAddIds");
 				}),
 			);
 
@@ -207,7 +299,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.reconcileOnLoad).onChange(async (v) => {
 					s.reconcileOnLoad = v;
-					await save();
+					await commit("reconcileOnLoad");
 				}),
 			);
 
@@ -225,7 +317,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.diffRefine)
 					.onChange(async (v) => {
 						s.diffRefine = v as MicaSettings["diffRefine"];
-						await save();
+						await commit("diffRefine");
 					}),
 			);
 
@@ -240,8 +332,18 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.defaultDiffMode)
 					.onChange(async (v) => {
 						s.defaultDiffMode = v as MicaSettings["defaultDiffMode"];
-						await save();
+						await commit("defaultDiffMode");
 					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Show exact version times")
+			.setDesc("Append the local date and time to each relative age in version history.")
+			.addToggle((t) =>
+				t.setValue(s.showVersionExactTimestamps).onChange(async (v) => {
+					s.showVersionExactTimestamps = v;
+					await commit("showVersionExactTimestamps");
+				}),
 			);
 
 		new Setting(containerEl)
@@ -250,7 +352,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.diffHideSyntax).onChange(async (v) => {
 					s.diffHideSyntax = v;
-					await save();
+					await commit("diffHideSyntax");
 				}),
 			);
 
@@ -260,7 +362,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.diffIgnoreWs).onChange(async (v) => {
 					s.diffIgnoreWs = v;
-					await save();
+					await commit("diffIgnoreWs");
 				}),
 			);
 
@@ -289,8 +391,7 @@ export class MicaSettingTab extends PluginSettingTab {
 				card.createDiv({ cls: "mica-theme-card-name", text: t.name });
 				card.addEventListener("click", async () => {
 					s.theme = t.id;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("theme");
 					paintGallery();
 				});
 			}
@@ -303,8 +404,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addColorPicker((c) =>
 				c.setValue(this.resolvedAccent()).onChange(async (v) => {
 					s.accentColor = v;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("accentColor");
 				}),
 			)
 			.addExtraButton((b) =>
@@ -313,8 +413,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setTooltip("Follow the theme's accent")
 					.onClick(async () => {
 						s.accentColor = "";
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("accentColor");
 						this.display();
 					}),
 			);
@@ -329,8 +428,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.density)
 					.onChange(async (v) => {
 						s.density = v as MicaDensity;
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("density");
 					}),
 			);
 
@@ -344,8 +442,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange(async (v) => {
 						s.cardRadiusPx = v;
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("cardRadiusPx");
 					}),
 			);
 
@@ -360,14 +457,13 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.tabStyle)
 					.onChange(async (v) => {
 						s.tabStyle = v as MicaTabStyle;
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("tabStyle");
 					}),
 			);
 
 		new Setting(containerEl)
 			.setName("Block header")
-			.setDesc("The per-block bar with the name, navigator, and menu: show on hover, always, or never.")
+			.setDesc("The per-block bar with the name and action menu: show on hover, always, or never.")
 			.addDropdown((d) =>
 				d
 					.addOption("hover", "On hover")
@@ -376,14 +472,13 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.blockHeaderMode)
 					.onChange(async (v) => {
 						s.blockHeaderMode = v as MicaSettings["blockHeaderMode"];
-						this.micaPlugin.refreshViews();
-						await save();
+						await commit("blockHeaderMode");
 					}),
 			);
 
 		new Setting(containerEl)
 			.setName("Hover tools position")
-			.setDesc("Which corner a section's drag grip and edit pencil (and a cell's toolbar) appear in.")
+			.setDesc("Which corner a section's drag grip and action menu (and a cell's controls) appear in.")
 			.addDropdown((d) =>
 				d
 					.addOption("right", "Top right")
@@ -391,8 +486,21 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.dragHandlePosition)
 					.onChange(async (v) => {
 						s.dragHandlePosition = v as MicaSettings["dragHandlePosition"];
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("dragHandlePosition");
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Action menus")
+			.setDesc("Open section, tab, grid, and cell menus on click or after a short hover. Click always works.")
+			.addDropdown((d) =>
+				d
+					.addOption("click", "Click")
+					.addOption("hover", "Hover")
+					.setValue(s.actionMenuTrigger)
+					.onChange(async (v) => {
+						s.actionMenuTrigger = v as MicaSettings["actionMenuTrigger"];
+						await commit("actionMenuTrigger");
 					}),
 			);
 
@@ -404,8 +512,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.animations).onChange(async (v) => {
 					s.animations = v;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("animations");
 				}),
 			);
 
@@ -415,8 +522,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.showVersionChip).onChange(async (v) => {
 					s.showVersionChip = v;
-					this.micaPlugin.refreshViews();
-					await save();
+					await commit("showVersionChip");
 				}),
 			);
 
@@ -428,8 +534,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.showOutlines).onChange(async (v) => {
 					s.showOutlines = v;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("showOutlines");
 				}),
 			);
 
@@ -443,8 +548,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange(async (v) => {
 						s.tabGapPx = v;
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("tabGapPx");
 					}),
 			);
 
@@ -454,8 +558,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.limitContentHeight).onChange(async (v) => {
 					s.limitContentHeight = v;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("limitContentHeight");
 					this.display(); // reveal/hide the height knob
 				}),
 			);
@@ -471,8 +574,7 @@ export class MicaSettingTab extends PluginSettingTab {
 						.setDynamicTooltip()
 						.onChange(async (v) => {
 							s.contentMaxHeightPx = v;
-							this.micaPlugin.applyStyleVars();
-							await save();
+							await commit("contentMaxHeightPx");
 						}),
 				);
 		}
@@ -492,7 +594,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.copyIncludeMicaSyntax).onChange(async (v) => {
 					s.copyIncludeMicaSyntax = v;
-					await save();
+					await commit("copyIncludeMicaSyntax");
 				}),
 			);
 
@@ -504,9 +606,36 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.copyIncludeOuterContainer).onChange(async (v) => {
 					s.copyIncludeOuterContainer = v;
-					await save();
+					await commit("copyIncludeOuterContainer");
 				}),
 			);
+
+		new Setting(containerEl)
+			.setName("Include line numbers")
+			.setDesc("Prefix copied lines with aligned plain-text numbers, such as “10 │ text”.")
+			.addToggle((t) =>
+				t.setValue(s.copyIncludeLineNumbers).onChange(async (v) => {
+					s.copyIncludeLineNumbers = v;
+					await commit("copyIncludeLineNumbers");
+					this.display();
+				}),
+			);
+
+		if (s.copyIncludeLineNumbers) {
+			new Setting(containerEl)
+				.setName("Lines to number")
+				.setDesc("Number authored content only, or every final line including Mica wrappers.")
+				.addDropdown((d) =>
+					d
+						.addOption("content", "Content only")
+						.addOption("output", "Complete copied output")
+						.setValue(s.copyLineNumberScope)
+						.onChange(async (v) => {
+							s.copyLineNumberScope = v as MicaSettings["copyLineNumberScope"];
+							await commit("copyLineNumberScope");
+						}),
+				);
+		}
 
 		// ---------- Editors ----------
 		new Setting(containerEl).setHeading().setName("Editors");
@@ -524,15 +653,14 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.editorClickOutside)
 					.onChange(async (v) => {
 						s.editorClickOutside = v as MicaSettings["editorClickOutside"];
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("editorClickOutside");
 					}),
 			);
 
 		new Setting(containerEl)
 			.setName("Editor save shortcut")
 			.setDesc(
-				"The key that saves and closes an editor. Placeholders and tooltips follow your choice; editors already open pick it up when reopened. Esc always cancels.",
+				"The key that saves and closes an editor. New editors, placeholders, and tooltips use the selected shortcut. Esc always cancels.",
 			)
 			.addDropdown((d) =>
 				d
@@ -543,8 +671,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.saveShortcut)
 					.onChange(async (v) => {
 						s.saveShortcut = v as MicaSettings["saveShortcut"];
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("saveShortcut");
 					}),
 			);
 
@@ -554,7 +681,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.editorAutosize).onChange(async (v) => {
 					s.editorAutosize = v;
-					await save();
+					await commit("editorAutosize");
 				}),
 			);
 
@@ -570,36 +697,47 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange(async (v) => {
 						s.editorMaxHeightPx = v;
-						this.micaPlugin.applyStyleVars();
-						await save();
+						await commit("editorMaxHeightPx");
 					}),
 			);
 
 		new Setting(containerEl)
 			.setName("Line numbers")
-			.setDesc("Show line numbers in the markdown editors (also toggleable from the editor toolbar).")
+			.setDesc(
+				"Show line numbers in every Mica source editor: text, cells, combined sections, callouts, code blocks, whole blocks, and version branches. Also toggleable from editor chrome.",
+			)
 			.addToggle((t) =>
 				t.setValue(s.editorLineNumbers).onChange(async (v) => {
 					s.editorLineNumbers = v;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("editorLineNumbers");
 				}),
 			);
 
 		new Setting(containerEl)
 			.setName("Whitespace characters")
-			.setDesc("Render spaces and tabs visibly in the markdown editors.")
+			.setDesc("Render spaces and tabs visibly in every Mica source editor.")
 			.addToggle((t) =>
 				t.setValue(s.editorWhitespace).onChange(async (v) => {
 					s.editorWhitespace = v;
-					this.micaPlugin.applyStyleVars();
-					await save();
+					await commit("editorWhitespace");
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Style Markdown while editing")
+			.setDesc(
+				"Keep source markers visible while applying bold, italic, comment, link, quote, and heading styling.",
+			)
+			.addToggle((t) =>
+				t.setValue(s.editorLiveSyntaxStyling).onChange(async (v) => {
+					s.editorLiveSyntaxStyling = v;
+					await commit("editorLiveSyntaxStyling");
 				}),
 			);
 
 		new Setting(containerEl).setHeading().setName("Editor toolbar");
 		new Setting(containerEl).setDesc(
-			"Compose the ribbon shown in the quick editor and the lightbox: move items between the lists, reorder, add separators, and define your own template buttons.",
+			"Compose the Markdown authoring ribbon shown in quick editors and full lightboxes. Built-ins remain Markdown-only; custom buttons can target Markdown editors, code editors, or both.",
 		);
 		this.renderToolbarEditor(containerEl);
 
@@ -617,7 +755,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setValue(s.versionCalloutTypes)
 					.onChange(async (v) => {
 						s.versionCalloutTypes = v;
-						await save();
+						await commit("versionCalloutTypes");
 					});
 				t.inputEl.rows = 3;
 				t.inputEl.addClass("mica-settings-wide");
@@ -628,7 +766,7 @@ export class MicaSettingTab extends PluginSettingTab {
 					.setTooltip("Reset to all built-in Obsidian callout types")
 					.onClick(async () => {
 						s.versionCalloutTypes = OBSIDIAN_CALLOUT_TYPES;
-						await save();
+						await commit("versionCalloutTypes");
 						this.display();
 					}),
 			);
@@ -641,10 +779,7 @@ export class MicaSettingTab extends PluginSettingTab {
 	 */
 	private renderToolbarEditor(containerEl: HTMLElement): void {
 		const s = this.micaPlugin.settings;
-		const save = async (): Promise<void> => {
-			await this.micaPlugin.saveSettings();
-			this.micaPlugin.applyToolbarConfig();
-		};
+		const save = (): Promise<void> => commitSetting(this.micaPlugin, "toolbarLayout");
 
 		const root = containerEl.createDiv({ cls: "mica-ribbon-editor" });
 		let selectedAvail: string | null = null;
@@ -777,7 +912,7 @@ export class MicaSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Custom buttons")
 			.setDesc(
-				"Your own insert buttons. Templates support {selection}, {all}, {date}, {time}, {datetime}, and {cursor} (where the caret lands).",
+				"Your own Markdown/code insert buttons. Templates support {selection}, {all}, {date}, {time}, {datetime}, and {cursor} (where the caret lands).",
 			)
 			.addButton((b) =>
 				b.setButtonText("New custom button…").onClick(() => {
@@ -787,7 +922,11 @@ export class MicaSettingTab extends PluginSettingTab {
 		for (const tool of s.customTools) {
 			new Setting(containerEl)
 				.setName(tool.name)
-				.setDesc(tool.template.length > 80 ? tool.template.slice(0, 80) + "…" : tool.template)
+				.setDesc(
+					`${tool.surface === "both" ? "Markdown + code" : tool.surface === "code" ? "Code" : "Markdown"} · ${
+						tool.template.length > 80 ? tool.template.slice(0, 80) + "…" : tool.template
+					}`,
+				)
 				.addExtraButton((b) =>
 					b
 						.setIcon("pencil")
@@ -803,8 +942,7 @@ export class MicaSettingTab extends PluginSettingTab {
 						.onClick(async () => {
 							s.customTools = s.customTools.filter((t) => t.id !== tool.id);
 							s.toolbarLayout = s.toolbarLayout.filter((id) => id !== `custom:${tool.id}`);
-							await this.micaPlugin.saveSettings();
-							this.micaPlugin.applyToolbarConfig();
+							await commitSetting(this.micaPlugin, "customTools");
 							this.display();
 						}),
 				);
@@ -817,6 +955,7 @@ class CustomToolModal extends Modal {
 	private name: string;
 	private icon: string;
 	private template: string;
+	private surface: "markdown" | "code" | "both";
 
 	constructor(
 		private readonly plugin: MicaPlugin,
@@ -827,6 +966,7 @@ class CustomToolModal extends Modal {
 		this.name = existing?.name ?? "";
 		this.icon = existing?.icon ?? "sparkles";
 		this.template = existing?.template ?? "";
+		this.surface = existing?.surface ?? "markdown";
 	}
 
 	onOpen(): void {
@@ -846,12 +986,16 @@ class CustomToolModal extends Modal {
 				t.setValue(this.icon).onChange((v) => {
 					this.icon = v.trim();
 					preview.empty();
-					setIcon(preview, this.icon || "sparkles");
+					const icon = this.icon && getIcon(this.icon) ? this.icon : "sparkles";
+					setIcon(preview, icon);
+					preview.toggleClass("is-invalid", Boolean(this.icon) && icon === "sparkles");
 				}),
 			)
 			.then((st) => {
 				preview = st.controlEl.createSpan({ cls: "mica-icon-preview" });
-				setIcon(preview, this.icon || "sparkles");
+				const icon = this.icon && getIcon(this.icon) ? this.icon : "sparkles";
+				setIcon(preview, icon);
+				preview.toggleClass("is-invalid", Boolean(this.icon) && icon === "sparkles");
 			});
 		new Setting(contentEl)
 			.setName("Template")
@@ -865,6 +1009,19 @@ class CustomToolModal extends Modal {
 				t.inputEl.rows = 5;
 				t.inputEl.addClass("mica-settings-wide");
 			});
+		new Setting(contentEl)
+			.setName("Show in")
+			.setDesc("Choose which editor ribbons expose this button.")
+			.addDropdown((d) =>
+				d
+					.addOption("markdown", "Markdown editors")
+					.addOption("code", "Code editors")
+					.addOption("both", "Markdown and code editors")
+					.setValue(this.surface)
+					.onChange((v) => {
+						this.surface = v as typeof this.surface;
+					}),
+			);
 
 		new Setting(contentEl)
 			.addButton((b) =>
@@ -878,23 +1035,43 @@ class CustomToolModal extends Modal {
 					.setButtonText(this.existing ? "Save" : "Create")
 					.onClick(async () => {
 						const name = this.name.trim();
-						if (!name || !this.template) return;
+						if (!name) {
+							new Notice("Give the custom button a name.");
+							return;
+						}
+						if (!this.template.trim()) {
+							new Notice("Give the custom button something to insert.");
+							return;
+						}
+						if (this.icon && !getIcon(this.icon)) {
+							new Notice(`“${this.icon}” is not an available Lucide icon in this Obsidian version.`);
+							return;
+						}
 						const s = this.plugin.settings;
 						if (this.existing) {
 							this.existing.name = name;
 							this.existing.icon = this.icon;
 							this.existing.template = this.template;
+							this.existing.surface = this.surface;
 						} else {
-							const id =
+							const base =
 								name
 									.toLowerCase()
 									.replace(/[^a-z0-9]+/g, "-")
-									.replace(/(^-|-$)/g, "") || String(Date.now());
-							s.customTools.push({ id, name, icon: this.icon, template: this.template });
+									.replace(/(^-|-$)/g, "") || "button";
+							const ids = new Set(s.customTools.map((tool) => tool.id));
+							let id = base;
+							for (let suffix = 2; ids.has(id); suffix++) id = `${base}-${suffix}`;
+							s.customTools.push({
+								id,
+								name,
+								icon: this.icon || "sparkles",
+								template: this.template,
+								surface: this.surface,
+							});
 							s.toolbarLayout.push(`custom:${id}`);
 						}
-						await this.plugin.saveSettings();
-						this.plugin.applyToolbarConfig();
+						await commitSetting(this.plugin, "customTools");
 						this.close();
 						this.onDone();
 					}),

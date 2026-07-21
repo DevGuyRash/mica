@@ -24,6 +24,7 @@ import { EditorLightbox } from "./lightbox";
 import { VersionsModal } from "./versionsModal";
 import { copyNodes, copyText, type CopyOptions } from "./copyPayload";
 import { blockNameValidationError, displayBlockName, type BlockNamePresentation } from "../identity/blockLabel";
+import { mountActionMenu, populateActionMenu, showActionMenuAtEvent, type ActionSpec } from "./actionMenu";
 
 /** The hooks a rendered block uses to mutate itself (Live Preview only). */
 export interface EditHooks {
@@ -96,6 +97,16 @@ export interface RenderCtx {
 	 * registered by the previous render before installing the next pass. */
 	renderPassOwner?: Component;
 	renderPass?: Component;
+	/** Read-only history inspection: structural scopes remain navigable while
+	 * edit/copy/fold/drag chrome and external navigation stay suppressed. */
+	inspection?: { selectedKey?: string; onSelect: (key: string) => void };
+	/** Internal per-render indexes. */
+	combineTargets?: CombineTargetElement[];
+	combineNeighbors?: WeakMap<CombineTargetElement, { previous?: CombineSpec; next?: CombineSpec }>;
+	rebuildCombineIndex?: () => void;
+	buildingCombineIndex?: boolean;
+	inspectionFocusableKeys?: Set<string>;
+	openMenus?: Set<Menu>;
 }
 
 type Container = Extract<MicaNode, { kind: "container" }>;
@@ -128,7 +139,12 @@ interface CopyControl {
 }
 
 function clipboardText(ctx: RenderCtx, target: CopyTarget): string {
-	const options = ctx.copyOptions?.() ?? { includeMicaSyntax: false, includeOuterContainer: false };
+	const options = ctx.copyOptions?.() ?? {
+		includeMicaSyntax: false,
+		includeOuterContainer: false,
+		includeLineNumbers: false,
+		lineNumberScope: "content" as const,
+	};
 	return "nodes" in target ? copyNodes(target.nodes, options) : copyText(target.text, options);
 }
 
@@ -145,22 +161,60 @@ function copyTarget(ctx: RenderCtx, control: CopyControl): void {
 	);
 }
 
-function copyButton(parent: HTMLElement, ctx: RenderCtx, cls: string, control: CopyControl): HTMLButtonElement {
-	const button = iconButton(parent, `mica-copy-btn ${cls}`, "copy", control.label);
-	button.dataset.micaCopyKind = control.kind;
-	if (control.path) button.dataset.micaCopyPath = control.path.join(".");
-	button.addEventListener("pointerdown", (event) => event.stopPropagation());
-	button.addEventListener("click", (event) => {
-		event.stopPropagation();
-		copyTarget(ctx, control);
-	});
-	return button;
+function copyAction(ctx: RenderCtx, control: CopyControl, separatorBefore = false): ActionSpec {
+	return {
+		id: `copy-${control.kind}`,
+		label: control.label,
+		icon: "copy",
+		separatorBefore,
+		run: () => copyTarget(ctx, control),
+	};
+}
+
+function entityMenu(
+	parent: HTMLElement,
+	ctx: RenderCtx,
+	actions: () => readonly ActionSpec[],
+	label: string,
+	cls = "mica-minitool",
+): void {
+	if (ctx.inspection) return;
+	const mounted = mountActionMenu(parent, actions, `${cls} mica-entity-menu`, label, ctx.app);
+	mounted.button.dataset.micaActions = actions()
+		.map((action) => action.id)
+		.join(" ");
+	mounted.button.addEventListener("pointerdown", (event) => event.stopPropagation());
+	ctx.component.register(mounted.destroy);
+}
+
+function ownMenu(ctx: RenderCtx, menu: Menu): Menu {
+	ctx.openMenus?.add(menu);
+	menu.onHide(() => ctx.openMenus?.delete(menu));
+	return menu;
 }
 
 const pathKey = (path: number[]): string => path.join(",");
 const samePath = (a: number[], b: number[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
 const prefixOf = (parent: number[], child: number[]): boolean =>
 	child.length === parent.length + 1 && parent.every((x, i) => x === child[i]);
+
+function markInspectable(el: HTMLElement, ctx: RenderCtx, key: string): void {
+	if (!ctx.inspection) return;
+	el.dataset.micaInspectKey = key;
+	el.toggleClass("is-inspect-selected", ctx.inspection.selectedKey === key);
+	if (!el.hasClass("mica-tab-chip") && !ctx.inspectionFocusableKeys?.has(key)) {
+		ctx.inspectionFocusableKeys?.add(key);
+		el.tabIndex = 0;
+		el.setAttribute("role", "group");
+		el.setAttribute("aria-label", `Selectable ${key.split(":", 1)[0] || "block"} scope`);
+	}
+}
+
+function selectInspectionScope(root: HTMLElement, scope: HTMLElement, ctx: RenderCtx): void {
+	root.querySelectorAll(".is-inspect-selected").forEach((node) => node.removeClass("is-inspect-selected"));
+	scope.addClass("is-inspect-selected");
+	ctx.inspection?.onSelect(scope.dataset.micaInspectKey ?? "block:");
+}
 
 /** `"A {icon=rocket}"` → `["A", "icon=rocket"]`. */
 export function splitTitleAttrs(title: string): [string, string] {
@@ -204,7 +258,57 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 		return;
 	}
 	el.addClass("mica");
+	ctx.openMenus = new Set();
+	ctx.component.register(() => {
+		for (const menu of ctx.openMenus ?? []) menu.hide();
+		ctx.openMenus?.clear();
+	});
 	el.setAttribute("data-mica-mode", ctx.editable ? "edit" : "read");
+	if (ctx.inspection) {
+		ctx.inspectionFocusableKeys = new Set();
+		el.addClass("mica-inspection-render");
+		markInspectable(el, ctx, "block:");
+		let hovered: HTMLElement | null = null;
+		el.addEventListener("pointerover", (event) => {
+			const next = (event.target as HTMLElement).closest<HTMLElement>("[data-mica-inspect-key]");
+			if (!next || !el.contains(next) || next === hovered) return;
+			hovered?.removeClass("is-inspect-hover");
+			hovered = next;
+			hovered.addClass("is-inspect-hover");
+		});
+		el.addEventListener("pointerleave", () => {
+			hovered?.removeClass("is-inspect-hover");
+			hovered = null;
+		});
+		el.addEventListener("click", (event) => {
+			const target = event.target as HTMLElement;
+			if (target.closest("a, .internal-link")) {
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+			const scope = target.closest<HTMLElement>("[data-mica-inspect-key]");
+			if (!scope || !el.contains(scope)) return;
+			selectInspectionScope(el, scope, ctx);
+		});
+		el.addEventListener("keydown", (event) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			const target = event.target as HTMLElement;
+			if (!target.matches("[data-mica-inspect-key]")) return;
+			event.preventDefault();
+			selectInspectionScope(el, target, ctx);
+		});
+		const suppressLinks = (): void => {
+			for (const link of el.querySelectorAll<HTMLElement>("a, .internal-link")) {
+				link.tabIndex = -1;
+				link.setAttribute("aria-disabled", "true");
+			}
+		};
+		const observer = new MutationObserver(suppressLinks);
+		observer.observe(el, { childList: true, subtree: true });
+		ctx.component.register(() => observer.disconnect());
+		suppressLinks();
+	}
 	applyBlockAttrs(el, ctx.blockAttrs ?? {});
 
 	// A repaint closure so collapse and cancels can redraw without a doc change.
@@ -271,10 +375,28 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	}
 
 	const body = el.createDiv({ cls: "mica-block-body" });
+	ctx.combineTargets = [];
+	ctx.combineNeighbors = new WeakMap();
+	ctx.rebuildCombineIndex = () => {
+		const visible = (ctx.combineTargets ?? []).filter(
+			(target) => !target.closest(".mica-tab-panel:not(.is-active), .mica.is-collapsed"),
+		);
+		const neighbors = new WeakMap<CombineTargetElement, { previous?: CombineSpec; next?: CombineSpec }>();
+		for (let index = 0; index < visible.length; index++) {
+			neighbors.set(visible[index], {
+				previous: visible[index - 1]?.micaCombine,
+				next: visible[index + 1]?.micaCombine,
+			});
+		}
+		ctx.combineNeighbors = neighbors;
+	};
 	markGroupContainer(body, [], cst.children.length);
 	const rootInsert = !cst.children.some((c) => c.kind === "container");
 	const autoOpen = takeRegionReveal(ctx, []);
+	ctx.buildingCombineIndex = true;
 	renderNodes(cst.children, body, ctx, [], { insert: rootInsert, autoOpen });
+	ctx.buildingCombineIndex = false;
+	ctx.rebuildCombineIndex();
 	if (ctx.chip) renderFooter(el, ctx, ctx.chip);
 }
 
@@ -303,19 +425,6 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	const mode = ctx.headerMode ?? "hover";
 	if (mode === "never" && !ctx.ui?.collapsed) return;
 	const head = el.createDiv({ cls: `mica-head ${mode === "always" || ctx.ui?.collapsed ? "is-pinned" : ""}` });
-
-	// Collapse chevron.
-	const collapse = iconButton(
-		head,
-		"mica-head-btn mica-head-collapse",
-		ctx.ui?.collapsed ? "chevron-right" : "chevron-down",
-		ctx.ui?.collapsed ? "Expand block" : "Collapse block",
-	);
-	collapse.addEventListener("click", () => {
-		if (!ctx.ui) return;
-		ctx.ui.collapsed = !ctx.ui.collapsed;
-		rerender(cst, el, ctx);
-	});
 
 	// Name (click to rename in LP).
 	const name = ctx.blockAttrs?.["name"] ?? "";
@@ -384,96 +493,104 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	});
 	setIcon(modeIco, ctx.editable ? "pencil" : "book-open");
 
-	// Wrap toggle: wrap long lines everywhere in the block, or let regions
-	// scroll horizontally. Persisted as a fence attr, travels with the note.
-	if (ctx.editable) {
-		const wrapped = (ctx.blockAttrs?.["wrap"] ?? "on") !== "off";
-		const wrapBtn = iconButton(
-			head,
-			"mica-head-btn",
-			wrapped ? "wrap-text" : "arrow-right-from-line",
-			wrapped ? "Long lines wrap (click: scroll instead)" : "Long lines scroll (click: wrap instead)",
-		);
-		wrapBtn.setAttribute("aria-pressed", String(wrapped));
-		wrapBtn.addEventListener("click", () => ctx.editable?.setAttr("wrap", wrapped ? "off" : null));
-	}
-
-	copyButton(head, ctx, "mica-head-btn", {
-		kind: "block",
-		label: "Copy block contents",
-		notice: "Block copied.",
-		target: { nodes: cst.children },
-	});
-
-	// Navigator.
-	iconButton(head, "mica-head-btn", "list-tree", "Block navigator").addEventListener("click", (e) => {
-		openNavigator(cst, el, ctx, e);
-	});
-
-	// Overflow menu.
-	iconButton(head, "mica-head-btn", "ellipsis-vertical", "Block menu").addEventListener("click", (e) => {
-		const menu = new Menu();
-		if (ctx.editable) {
-			menu.addItem((i) =>
-				i
-					.setTitle("Edit block source")
-					.setIcon("file-code")
-					.onClick(() => {
-						new EditorLightbox({
-							app: ctx.app,
-							title: ctx.blockAttrs?.["name"] ? `Edit “${ctx.blockAttrs["name"]}”` : "Edit block source",
-							initial: serializeCst(cst),
-							sourcePath: ctx.sourcePath,
-							onSave: (value) => {
-								if (!ctx.editable?.replaceAll(serializeCst(cst), value)) {
-									new Notice(
-										"Mica: the block changed while the editor was open. Your edit was not applied.",
-									);
-									return false;
-								}
-								return true;
-							},
-						}).open();
-					}),
-			);
-			menu.addItem((i) =>
-				i
-					.setTitle("Block appearance…")
-					.setIcon("palette")
-					.onClick(() => openAppearance(el, ctx)),
-			);
-			menu.addSeparator();
-		}
-		menu.addItem((i) =>
-			i
-				.setTitle("Copy block contents")
-				.setIcon("copy")
-				.onClick(() =>
-					copyTarget(ctx, {
+	entityMenu(
+		head,
+		ctx,
+		() => {
+			const actions: ActionSpec[] = [];
+			if (ctx.ui) {
+				actions.push({
+					id: "collapse",
+					label: ctx.ui.collapsed ? "Expand block" : "Collapse block",
+					icon: ctx.ui.collapsed ? "chevron-right" : "chevron-down",
+					run: () => {
+						ctx.ui!.collapsed = !ctx.ui!.collapsed;
+						rerender(cst, el, ctx);
+					},
+				});
+			}
+			if (ctx.editable) {
+				const wrapped = (ctx.blockAttrs?.["wrap"] ?? "on") !== "off";
+				actions.push(
+					{
+						id: "wrap",
+						label: wrapped ? "Wrap long lines" : "Scroll long lines",
+						icon: wrapped ? "wrap-text" : "arrow-right-from-line",
+						checked: wrapped,
+						run: () => ctx.editable?.setAttr("wrap", wrapped ? "off" : null),
+					},
+					{
+						id: "edit-source",
+						label: "Edit block source",
+						icon: "file-code",
+						run: () => {
+							new EditorLightbox({
+								app: ctx.app,
+								title: ctx.blockAttrs?.["name"]
+									? `Edit “${ctx.blockAttrs["name"]}”`
+									: "Edit block source",
+								initial: serializeCst(cst),
+								sourcePath: ctx.sourcePath,
+								onSave: (value) => {
+									if (!ctx.editable?.replaceAll(serializeCst(cst), value)) {
+										new Notice(
+											"Mica: the block changed while the editor was open. Your edit was not applied.",
+										);
+										return false;
+									}
+									return true;
+								},
+							}).open();
+						},
+					},
+					{
+						id: "appearance",
+						label: "Block appearance…",
+						icon: "palette",
+						run: () => openAppearance(el, ctx),
+					},
+				);
+			}
+			actions.push(
+				copyAction(
+					ctx,
+					{
 						kind: "block",
 						label: "Copy block contents",
 						notice: "Block copied.",
 						target: { nodes: cst.children },
-					}),
+					},
+					Boolean(actions.length),
 				),
-		);
-		if (ctx.chip) {
-			const chip = ctx.chip;
-			menu.addItem((i) =>
-				i
-					.setTitle("Version history…")
-					.setIcon("history")
-					.onClick(() => new VersionsModal(chip.plugin, chip.file, chip.blockId).open()),
+				{
+					id: "navigator",
+					label: "Block navigator",
+					icon: "list-tree",
+					run: () => openNavigator(cst, el, ctx),
+				},
 			);
-			menu.addItem((i) =>
-				i
-					.setTitle("Save version now")
-					.setIcon("save")
-					.onClick(() => void saveVersionNow(chip.plugin, chip.file)),
-			);
-		}
-		menu.showAtMouseEvent(e);
-	});
+			if (ctx.chip) {
+				const chip = ctx.chip;
+				actions.push(
+					{
+						id: "history",
+						label: "Version history…",
+						icon: "history",
+						run: () => new VersionsModal(chip.plugin, chip.file, chip.blockId).open(),
+					},
+					{
+						id: "save-version",
+						label: "Save version now",
+						icon: "save",
+						run: () => void saveVersionNow(chip.plugin, chip.file),
+					},
+				);
+			}
+			return actions;
+		},
+		"Block actions",
+		"mica-head-btn",
+	);
 }
 
 function countTabs(nodes: MicaNode[]): number {
@@ -525,21 +642,23 @@ function renderFoldBar(
 	setIcon(kindIco, icon);
 	bar.createSpan({ cls: "mica-fold-text", text: summary });
 	bar.setAttribute("aria-label", "Unfold");
+	bar.setAttribute("role", "button");
+	bar.setAttribute("aria-expanded", "false");
+	bar.tabIndex = 0;
 	bar.addEventListener("click", (e) => {
 		e.stopPropagation();
 		toggleFold(ctx, key);
 	});
-	if (drag?.copy || (ctx.editable && drag)) {
+	bar.addEventListener("keydown", (event) => {
+		if (event.key !== "Enter" && event.key !== " ") return;
+		if ((event.target as HTMLElement).closest("button") && event.target !== bar) return;
+		event.preventDefault();
+		toggleFold(ctx, key);
+	});
+	if (drag?.copy || drag) {
 		bar.createDiv({ cls: "mica-footer-spacer" });
-		if (drag?.copy) copyButton(bar, ctx, "mica-minitool", drag.copy);
 	}
 	if (ctx.editable && drag) {
-		// The unfold toggle mirrors the fold button's corner, so the cursor
-		// that just folded lands directly on the control that reverses it.
-		iconButton(bar, "mica-minitool", "chevrons-up-down", "Unfold").addEventListener("click", (e) => {
-			e.stopPropagation();
-			toggleFold(ctx, key);
-		});
 		const grip = iconButton(bar, "mica-region-grip mica-fold-grip", "grip-vertical", "Drag to move");
 		grip.addEventListener("click", (e) => e.stopPropagation());
 		makeDraggable(
@@ -550,6 +669,42 @@ function renderFoldBar(
 			drag.path,
 			(op) => applyDragOp(ctx, op),
 			drag.itemEl,
+		);
+	}
+	if (drag) {
+		entityMenu(
+			bar,
+			ctx,
+			() => {
+				const actions: ActionSpec[] = [];
+				if (drag.copy) actions.push(copyAction(ctx, drag.copy));
+				if (ctx.editable) {
+					actions.push({
+						id: "delete",
+						label: "Delete folded item",
+						icon: "trash-2",
+						danger: true,
+						separatorBefore: true,
+						run: () =>
+							deleteWithUndo(
+								ctx,
+								drag.region
+									? {
+											op: "saveRegion",
+											path: drag.path,
+											start: drag.region.start,
+											end: drag.region.end,
+											expected: drag.text ?? "",
+											text: "",
+										}
+									: { op: "deleteNode", path: drag.path },
+								"Folded item deleted",
+							),
+					});
+				}
+				return actions;
+			},
+			"Folded item actions",
 		);
 	}
 }
@@ -660,14 +815,17 @@ interface NavRow {
  * reveals (unfolding + switching tabs as needed); dragging a row reorders it
  * among its SIBLINGS — drop before a sibling, or after the parent's last row.
  */
-function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e: MouseEvent): void {
+function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e?: MouseEvent): void {
 	closeActiveNavigator?.();
 	// Body-level + fixed: never clipped by the block, and it SURVIVES the
 	// block re-renders that reveal/unfold trigger — so it stays open while
 	// the user jumps between several targets. Outside click / Esc closes.
 	const pop = document.body.createDiv({ cls: "mica-popover mica-navpop" });
-	const left = Math.min(Math.max(8, e.clientX - 260), window.innerWidth - 348);
-	const top = Math.min(e.clientY + 12, window.innerHeight - 120);
+	const anchor = root.getBoundingClientRect();
+	const clientX = e?.clientX ?? anchor.right;
+	const clientY = e?.clientY ?? anchor.top;
+	const left = Math.min(Math.max(8, clientX - 260), window.innerWidth - 348);
+	const top = Math.min(clientY + 12, window.innerHeight - 120);
 	pop.style.left = `${left}px`;
 	pop.style.top = `${top}px`;
 	pop.style.maxHeight = `${Math.max(120, window.innerHeight - top - 16)}px`;
@@ -1198,7 +1356,7 @@ function showInsertMenu(
 	onText?: () => void,
 	tail = false,
 ): void {
-	const menu = new Menu();
+	const menu = ownMenu(ctx, new Menu());
 	menu.addItem((i) =>
 		i
 			.setTitle("Text")
@@ -1281,7 +1439,7 @@ function showCellTypeMenu(
 	e: MouseEvent,
 	extra?: (menu: Menu) => void,
 ): void {
-	const menu = new Menu();
+	const menu = ownMenu(ctx, new Menu());
 	const addCellWith = (follow?: StructOp): void => {
 		ctx.editable?.apply({ op: "insertCell", path: gridPath, at });
 		// The second op targets the fresh cell; each dispatch re-scans the live
@@ -1395,100 +1553,132 @@ function combineOp(source: CombineSpec, target: CombineSpec): StructOp {
 
 /** Keyboard/touch alternative to the dwell gesture: expose the nearest
  * compatible sections in document order through the ordinary Obsidian menu. */
-function addCombineMenuItems(menu: Menu, region: HTMLElement, ctx: RenderCtx, target: RegionTarget): void {
+function combineActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
 	const source = combineSpecFor(target);
-	const root = region.closest<HTMLElement>(".mica");
-	if (!source || !root) return;
-	const candidates = Array.from(root.querySelectorAll<CombineTargetElement>(".mica-region")).filter(
-		(element) => element.micaCombine && element.offsetParent !== null,
-	);
-	const index = candidates.indexOf(region as CombineTargetElement);
-	if (index < 0) return;
+	if (!source) return [];
+	const indexed = ctx.combineNeighbors?.get(region as CombineTargetElement);
+	if (!indexed) return [];
 	const neighbors = [
-		{ element: candidates[index - 1], direction: "previous" },
-		{ element: candidates[index + 1], direction: "next" },
-	].filter((entry): entry is { element: CombineTargetElement; direction: string } =>
-		Boolean(entry.element?.micaCombine),
-	);
-	if (!neighbors.length) return;
-	menu.addSeparator();
-	for (const { element, direction } of neighbors) {
-		const destination = element.micaCombine!;
-		menu.addItem((item) =>
-			item
-				.setTitle(`Combine with ${direction} section`)
-				.setIcon("combine")
-				.onClick(() => applyWithUndo(ctx, combineOp(source, destination), "Sections combined")),
+		{ destination: indexed.previous, direction: "previous" },
+		{ destination: indexed.next, direction: "next" },
+	].filter((entry): entry is { destination: CombineSpec; direction: string } => Boolean(entry.destination));
+	return neighbors.map(({ destination, direction }, index) => {
+		return {
+			id: `combine-${direction}`,
+			label: `Combine with ${direction} section`,
+			icon: "combine",
+			separatorBefore: index === 0,
+			run: () => applyWithUndo(ctx, combineOp(source, destination), "Sections combined"),
+		};
+	});
+}
+
+function sectionActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
+	const actions: ActionSpec[] = [copyAction(ctx, regionCopyControl(target))];
+	if (target.logical) {
+		if (ctx.editable)
+			actions.push(
+				{
+					id: "edit",
+					label: "Edit combined source",
+					icon: "file-code",
+					run: () => openQuickEdit(region, ctx, target),
+				},
+				{
+					id: "uncombine",
+					label: "Uncombine section",
+					icon: "ungroup",
+					run: () =>
+						applyWithUndo(
+							ctx,
+							{ op: "uncombineSection", path: target.logical!.path },
+							"Section uncombined",
+						),
+				},
+			);
+		actions.push(...combineActions(region, ctx, target));
+	} else if (ctx.editable) {
+		const kind = classifySection(target.original);
+		actions.push(
+			{
+				id: "kind",
+				label: `Content type: ${sectionKindLabel(kind)}`,
+				checked: true,
+				disabled: true,
+				run: () => undefined,
+			},
+			{ id: "edit", label: "Edit source", icon: "file-code", run: () => openQuickEdit(region, ctx, target) },
+			{
+				id: "lightbox",
+				label: "Edit source in lightbox",
+				icon: "maximize-2",
+				run: () => openLightboxFor(ctx, target),
+			},
+		);
+		if (kind === "callout") {
+			actions.push({
+				id: "fields",
+				label: "Edit callout fields…",
+				icon: "megaphone",
+				run: () => openCalloutEditor(ctx, target),
+			});
+		} else if (kind === "code") {
+			actions.push({
+				id: "fields",
+				label: "Edit language and code…",
+				icon: "file-code-2",
+				run: () => openCodeBlockEditor(ctx, target),
+			});
+		}
+		for (const destination of ["markdown", "callout", "code"] as const) {
+			if (destination === kind) continue;
+			actions.push({
+				id: `convert-${destination}`,
+				label: `Convert to ${sectionKindLabel(destination)}`,
+				icon: destination === "markdown" ? "text" : destination === "callout" ? "megaphone" : "square-code",
+				separatorBefore: actions.every((action) => !action.id.startsWith("convert-")),
+				run: () => convertRegion(ctx, target, destination),
+			});
+		}
+		actions.push(...combineActions(region, ctx, target));
+	}
+	if (ctx.editable) {
+		const fkey = foldKeyForRegion(target);
+		actions.push(
+			{
+				id: "fold",
+				label: "Fold this section",
+				icon: "chevrons-down-up",
+				separatorBefore: true,
+				run: () => toggleFold(ctx, fkey),
+			},
+			{
+				id: "delete",
+				label: "Delete this section",
+				icon: "trash-2",
+				danger: true,
+				separatorBefore: true,
+				run: () => {
+					const op: StructOp = target.logical
+						? { op: "deleteNode", path: target.logical.path }
+						: {
+								op: "saveRegion",
+								path: target.path,
+								start: target.start,
+								end: target.end,
+								expected: target.original,
+								text: "",
+							};
+					deleteWithUndo(ctx, op, "Section deleted");
+				},
+			},
 		);
 	}
+	return actions;
 }
 
 function populateSectionMenu(menu: Menu, region: HTMLElement, ctx: RenderCtx, target: RegionTarget): void {
-	if (target.logical) {
-		menu.addItem((item) =>
-			item
-				.setTitle("Edit combined source")
-				.setIcon("file-code")
-				.onClick(() => openQuickEdit(region, ctx, target)),
-		);
-		menu.addItem((item) =>
-			item
-				.setTitle("Uncombine section")
-				.setIcon("ungroup")
-				.onClick(() =>
-					applyWithUndo(ctx, { op: "uncombineSection", path: target.logical!.path }, "Section uncombined"),
-				),
-		);
-		addCombineMenuItems(menu, region, ctx, target);
-		return;
-	}
-
-	const kind = classifySection(target.original);
-	menu.addItem((item) =>
-		item
-			.setTitle(`Content type: ${sectionKindLabel(kind)}`)
-			.setChecked(true)
-			.setDisabled(true),
-	);
-	menu.addItem((item) => item.setTitle("Rendered Markdown view").setIcon("eye").setChecked(true).setDisabled(true));
-	menu.addItem((item) =>
-		item
-			.setTitle("Edit source")
-			.setIcon("file-code")
-			.onClick(() => openQuickEdit(region, ctx, target)),
-	);
-	menu.addItem((item) =>
-		item
-			.setTitle("Edit source in lightbox")
-			.setIcon("maximize-2")
-			.onClick(() => openLightboxFor(ctx, target)),
-	);
-	if (kind === "callout") {
-		menu.addItem((item) =>
-			item
-				.setTitle("Edit callout fields…")
-				.setIcon("megaphone")
-				.onClick(() => openCalloutEditor(ctx, target)),
-		);
-	} else if (kind === "code") {
-		menu.addItem((item) =>
-			item
-				.setTitle("Edit language and code…")
-				.setIcon("file-code-2")
-				.onClick(() => openCodeBlockEditor(ctx, target)),
-		);
-	}
-	menu.addSeparator();
-	for (const destination of ["markdown", "callout", "code"] as const) {
-		if (destination === kind) continue;
-		menu.addItem((item) =>
-			item
-				.setTitle(`Convert to ${sectionKindLabel(destination)}`)
-				.setIcon(destination === "markdown" ? "text" : destination === "callout" ? "megaphone" : "square-code")
-				.onClick(() => convertRegion(ctx, target, destination)),
-		);
-	}
-	addCombineMenuItems(menu, region, ctx, target);
+	populateActionMenu(menu, sectionActions(region, ctx, target));
 }
 
 function renderRegion(
@@ -1500,10 +1690,23 @@ function renderRegion(
 ): HTMLElement {
 	const region = el.createDiv({ cls: `mica-region ${sole ? "is-sole" : ""}` });
 	const combine = combineSpecFor(target);
-	if (combine) (region as CombineTargetElement).micaCombine = combine;
+	if (combine) {
+		const combineRegion = region as CombineTargetElement;
+		combineRegion.micaCombine = combine;
+		ctx.combineTargets?.push(combineRegion);
+	}
 	const logicalIndex = target.logical?.path[target.logical.path.length - 1];
 	if (logicalIndex !== undefined) region.setAttribute("data-mica-idx", String(logicalIndex));
 	else if (target.start < target.end) region.setAttribute("data-mica-idx", String(target.start));
+	const classified = target.logical ? "markdown" : classifySection(target.original);
+	const inspectKind = classified === "markdown" ? "section" : classified;
+	markInspectable(
+		region,
+		ctx,
+		target.logical
+			? `${inspectKind}:${target.logical.path.join(".")}`
+			: `${inspectKind}:${target.path.join(".")}:${target.start}-${target.end}`,
+	);
 	paintRegionView(region, ctx, target);
 
 	if (ctx.editable) {
@@ -1527,7 +1730,7 @@ function renderRegion(
 		region.addEventListener("contextmenu", (e) => {
 			if (region.hasClass("is-editing")) return;
 			e.preventDefault();
-			const menu = new Menu();
+			const menu = ownMenu(ctx, new Menu());
 			populateSectionMenu(menu, region, ctx, target);
 			menu.showAtMouseEvent(e);
 		});
@@ -1564,78 +1767,99 @@ function wireNestedCallouts(
 		const tools = el.createDiv({ cls: "mica-region-tools mica-nested-tools" });
 		const stop = (e: Event): void => e.stopPropagation();
 		const nestedText = (): string => dedentNested(target.original, nc);
-		copyButton(tools, ctx, "mica-minitool", {
+		const copy: CopyControl = {
 			kind: "nested-callout",
 			label: "Copy nested callout",
 			notice: "Nested callout copied.",
 			path: [...target.path, target.start, i],
 			target: () => ({ text: nestedText() }),
-		});
-		if (!ctx.editable) return;
-
-		const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag this callout out");
-		grip.addEventListener("click", stop);
+		};
 		const without = (): string => spliceLines(target.original, nc.startLine, nc.endLine, null);
-		makeDraggable(
-			grip,
-			{
-				kind: "region",
-				fromPath: target.path,
-				text: nestedText,
-				virtualSplice: {
-					path: target.path,
-					start: target.start,
-					end: target.end,
-					expected: target.original,
-					without,
-					insertCount: () => parseBlock(nestedText()).children.length,
-				},
-			},
-			target.path,
-			(op) => ctx.editable?.apply(op),
-			el,
-		);
-
-		iconButton(tools, "mica-minitool", "maximize-2", "Edit this callout (type, title, body)").addEventListener(
-			"click",
-			(e) => {
-				e.stopPropagation();
-				const parsed = parseCallout(nestedText());
-				if (!parsed) return;
-				openCalloutEditorFor(ctx, parsed, (rebuilt) => {
-					const next = spliceLines(target.original, nc.startLine, nc.endLine, requoteOnce(rebuilt).trimEnd());
-					if (next === target.original) return;
-					const accepted =
-						ctx.editable?.apply({
-							op: "saveRegion",
-							path: target.path,
-							start: target.start,
-							end: target.end,
-							expected: target.original,
-							text: next,
-						}) ?? false;
-					if (!accepted)
-						new Notice("Mica: the callout changed while you were editing. Your edit is still open.");
-					return accepted;
-				});
-			},
-		);
-
-		iconButton(tools, "mica-minitool mica-region-x", "x", "Delete this callout").addEventListener("click", (e) => {
-			e.stopPropagation();
-			deleteWithUndo(
-				ctx,
+		if (ctx.editable) {
+			const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag this callout out");
+			grip.addEventListener("click", stop);
+			makeDraggable(
+				grip,
 				{
-					op: "saveRegion",
-					path: target.path,
-					start: target.start,
-					end: target.end,
-					expected: target.original,
-					text: without(),
+					kind: "region",
+					fromPath: target.path,
+					text: nestedText,
+					virtualSplice: {
+						path: target.path,
+						start: target.start,
+						end: target.end,
+						expected: target.original,
+						without,
+						insertCount: () => parseBlock(nestedText()).children.length,
+					},
 				},
-				"Nested callout deleted",
+				target.path,
+				(op) => ctx.editable?.apply(op),
+				el,
 			);
-		});
+		}
+		entityMenu(
+			tools,
+			ctx,
+			() => {
+				const actions: ActionSpec[] = [copyAction(ctx, copy)];
+				if (!ctx.editable) return actions;
+				actions.push({
+					id: "edit",
+					label: "Edit this callout",
+					icon: "maximize-2",
+					run: () => {
+						const parsed = parseCallout(nestedText());
+						if (!parsed) return;
+						openCalloutEditorFor(ctx, parsed, (rebuilt) => {
+							const next = spliceLines(
+								target.original,
+								nc.startLine,
+								nc.endLine,
+								requoteOnce(rebuilt).trimEnd(),
+							);
+							if (next === target.original) return;
+							const accepted =
+								ctx.editable?.apply({
+									op: "saveRegion",
+									path: target.path,
+									start: target.start,
+									end: target.end,
+									expected: target.original,
+									text: next,
+								}) ?? false;
+							if (!accepted)
+								new Notice(
+									"Mica: the callout changed while you were editing. Your edit is still open.",
+								);
+							return accepted;
+						});
+					},
+				});
+				actions.push({
+					id: "delete",
+					label: "Delete this callout",
+					icon: "trash-2",
+					danger: true,
+					separatorBefore: true,
+					run: () =>
+						deleteWithUndo(
+							ctx,
+							{
+								op: "saveRegion",
+								path: target.path,
+								start: target.start,
+								end: target.end,
+								expected: target.original,
+								text: without(),
+							},
+							"Nested callout deleted",
+						),
+				});
+				return actions;
+			},
+			"Nested callout actions",
+		);
 	});
 }
 
@@ -1665,84 +1889,96 @@ function wireNestedCodeBlocks(
 		host.addClass("mica-nested-code");
 		const tools = host.createDiv({ cls: "mica-region-tools mica-nested-tools mica-nested-code-tools" });
 		const nestedText = (): string => materializeQuotedSection(target.original, code);
-		copyButton(tools, ctx, "mica-minitool", {
+		const copy: CopyControl = {
 			kind: "nested-code",
 			label: "Copy nested code block",
 			notice: "Nested code block copied.",
 			path: [...target.path, target.start, i],
 			target: () => ({ text: nestedText() }),
-		});
-		if (!ctx.editable) return;
-
-		const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag this code block out");
-		grip.addEventListener("click", (event) => event.stopPropagation());
+		};
 		const without = (): string => spliceQuotedSection(target.original, code, null);
-		makeDraggable(
-			grip,
-			{
-				kind: "region",
-				fromPath: target.path,
-				text: nestedText,
-				virtualSplice: {
-					path: target.path,
-					start: target.start,
-					end: target.end,
-					expected: target.original,
-					without,
-					insertCount: () => parseBlock(nestedText()).children.length,
+		if (ctx.editable) {
+			const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag this code block out");
+			grip.addEventListener("click", (event) => event.stopPropagation());
+			makeDraggable(
+				grip,
+				{
+					kind: "region",
+					fromPath: target.path,
+					text: nestedText,
+					virtualSplice: {
+						path: target.path,
+						start: target.start,
+						end: target.end,
+						expected: target.original,
+						without,
+						insertCount: () => parseBlock(nestedText()).children.length,
+					},
 				},
-			},
-			target.path,
-			(op) => ctx.editable?.apply(op),
-			host,
-		);
-
+				target.path,
+				(op) => ctx.editable?.apply(op),
+				host,
+			);
+		}
 		const parsed = parseCodeFence(nestedText());
-		if (parsed) {
-			iconButton(tools, "mica-minitool", "file-code-2", "Edit this code block (language, body)").addEventListener(
-				"click",
-				(event) => {
-					event.stopPropagation();
-					openCodeBlockEditorFor(ctx, parsed, (rebuilt) => {
-						// Saving an untouched nested editor must be a byte-for-byte no-op;
-						// requoting is needed only after an actual structured change.
-						if (rebuilt === nestedText()) return true;
-						const next = spliceQuotedSection(target.original, code, rebuilt);
-						if (next === target.original) return true;
-						const accepted =
-							ctx.editable?.apply({
+		entityMenu(
+			tools,
+			ctx,
+			() => {
+				const actions: ActionSpec[] = [copyAction(ctx, copy)];
+				if (!ctx.editable) return actions;
+				if (parsed)
+					actions.push({
+						id: "edit",
+						label: "Edit this code block",
+						icon: "file-code-2",
+						run: () => {
+							openCodeBlockEditorFor(ctx, parsed, (rebuilt) => {
+								// Saving an untouched nested editor must be a byte-for-byte no-op;
+								// requoting is needed only after an actual structured change.
+								if (rebuilt === nestedText()) return true;
+								const next = spliceQuotedSection(target.original, code, rebuilt);
+								if (next === target.original) return true;
+								const accepted =
+									ctx.editable?.apply({
+										op: "saveRegion",
+										path: target.path,
+										start: target.start,
+										end: target.end,
+										expected: target.original,
+										text: next,
+									}) ?? false;
+								if (!accepted)
+									new Notice(
+										"Mica: the code block changed while you were editing. Your edit is still open.",
+									);
+								return accepted;
+							});
+						},
+					});
+				actions.push({
+					id: "delete",
+					label: "Delete this code block",
+					icon: "trash-2",
+					danger: true,
+					separatorBefore: true,
+					run: () =>
+						deleteWithUndo(
+							ctx,
+							{
 								op: "saveRegion",
 								path: target.path,
 								start: target.start,
 								end: target.end,
 								expected: target.original,
-								text: next,
-							}) ?? false;
-						if (!accepted)
-							new Notice("Mica: the code block changed while you were editing. Your edit is still open.");
-						return accepted;
-					});
-				},
-			);
-		}
-
-		iconButton(tools, "mica-minitool mica-region-x", "x", "Delete this code block").addEventListener(
-			"click",
-			(event) => {
-				event.stopPropagation();
-				deleteWithUndo(
-					ctx,
-					{
-						op: "saveRegion",
-						path: target.path,
-						start: target.start,
-						end: target.end,
-						expected: target.original,
-						text: without(),
-					},
-					"Nested code block deleted",
-				);
+								text: without(),
+							},
+							"Nested code block deleted",
+						),
+				});
+				return actions;
 			},
+			"Nested code block actions",
 		);
 	});
 }
@@ -1768,21 +2004,7 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 	if (target.original.trim()) {
 		renderMarkdown(target.original, view, ctx);
 		const tools = region.createDiv({ cls: "mica-region-tools" });
-		copyButton(tools, ctx, "mica-minitool", regionCopyControl(target));
 		if (ctx.editable) {
-			iconButton(
-				tools,
-				"mica-minitool mica-section-mode",
-				target.logical ? "group" : "replace",
-				target.logical ? "Combined section options" : "Section type and source options",
-			).addEventListener("click", (event) => {
-				event.stopPropagation();
-				const menu = new Menu();
-				populateSectionMenu(menu, region, ctx, target);
-				menu.showAtMouseEvent(event);
-			});
-			// One hover tool: the grip. Clicking the text edits; the pencil was
-			// a redundant second path to the same action.
 			const grip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move · click text to edit");
 			grip.addEventListener("click", (e) => e.stopPropagation());
 			makeDraggable(
@@ -1805,62 +2027,8 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 				(op) => applyDragOp(ctx, op),
 				region,
 			);
-			if (!target.logical && parseCallout(target.original)) {
-				iconButton(tools, "mica-minitool", "maximize-2", "Edit callout (type, title, body)").addEventListener(
-					"click",
-					(e) => {
-						e.stopPropagation();
-						openCalloutEditor(ctx, target);
-					},
-				);
-			}
-			if (!target.logical && parseCodeFence(target.original)) {
-				iconButton(tools, "mica-minitool", "file-code-2", "Edit code block (language, body)").addEventListener(
-					"click",
-					(e) => {
-						e.stopPropagation();
-						openCodeBlockEditor(ctx, target);
-					},
-				);
-			}
-			if (target.logical) {
-				iconButton(tools, "mica-minitool", "ungroup", "Uncombine this section").addEventListener(
-					"click",
-					(e) => {
-						e.stopPropagation();
-						applyWithUndo(
-							ctx,
-							{ op: "uncombineSection", path: target.logical!.path },
-							"Section uncombined",
-						);
-					},
-				);
-			}
-			iconButton(tools, "mica-minitool", "chevrons-down-up", "Fold this section").addEventListener(
-				"click",
-				(e) => {
-					e.stopPropagation();
-					toggleFold(ctx, fkey);
-				},
-			);
-			iconButton(tools, "mica-minitool mica-region-x", "x", "Delete this section").addEventListener(
-				"click",
-				(e) => {
-					e.stopPropagation();
-					const op: StructOp = target.logical
-						? { op: "deleteNode", path: target.logical.path }
-						: {
-								op: "saveRegion",
-								path: target.path,
-								start: target.start,
-								end: target.end,
-								expected: target.original,
-								text: "",
-							};
-					deleteWithUndo(ctx, op, "Section deleted");
-				},
-			);
 		}
+		entityMenu(tools, ctx, () => sectionActions(region, ctx, target), "Section actions");
 		const nested = findNestedSections(target.original);
 		wireNestedCallouts(view, ctx, target, nested.callouts);
 		wireNestedCodeBlocks(view, ctx, target, nested.codeBlocks);
@@ -1935,6 +2103,7 @@ function renderLogicalSection(node: Container, el: HTMLElement, ctx: RenderCtx, 
 
 function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-tabs" });
+	markInspectable(wrap, ctx, `tabs:${path.join(".")}`);
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
 	wrap.setAttribute("data-mica-node", path.join("."));
 	const tkey = nodeFoldKey(path);
@@ -1986,6 +2155,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		});
 		panelEls.forEach((p, m) => p.toggleClass("is-active", m === k));
 		ctx.ui?.active.set(pk, k);
+		if (!ctx.buildingCombineIndex) ctx.rebuildCombineIndex?.();
 		if (focus) btns[k]?.focus();
 	};
 
@@ -1994,6 +2164,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		const [display] = splitTitleAttrs(tab.title);
 		const icon = titleAttr(tab.title, "icon");
 		const chip = nav.createDiv({ cls: "mica-tab-chip" });
+		markInspectable(chip, ctx, `tab:${[...path, x.idx].join(".")}`);
 		chip.addClass("mica-chip-copyable");
 		chip.setAttribute("data-mica-idx", String(x.idx));
 		const btn = chip.createEl("button", {
@@ -2003,13 +2174,20 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		if (icon) setIcon(btn.createSpan({ cls: "mica-tab-icon" }), icon);
 		btn.createSpan({ text: display || `Tab ${k + 1}` });
 		btn.addEventListener("click", () => activate(k));
-		copyButton(chip, ctx, "mica-chip-copy", {
+		const tabCopy: CopyControl = {
 			kind: "tab",
 			label: `Copy tab “${display || `Tab ${k + 1}`}” contents`,
 			notice: "Tab copied.",
 			path: [...path, x.idx],
 			target: { nodes: [tab] },
-		});
+		};
+		entityMenu(
+			chip,
+			ctx,
+			() => tabActions(ctx, path, x.idx, display, tab.title, chip, btn, tabCopy),
+			"Tab actions",
+			"mica-chip-menu",
+		);
 
 		if (ctx.editable) {
 			chip.addClass("mica-chip-editable");
@@ -2017,13 +2195,12 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				e.preventDefault();
 				startRename(chip, btn, ctx, path, x.idx, display, tab.title);
 			});
-			iconButton(chip, "mica-chip-x", "x", "Delete tab").addEventListener("click", (e) => {
-				e.stopPropagation();
-				deleteWithUndo(ctx, { op: "deleteTab", path, index: x.idx }, "Tab deleted");
-			});
 			chip.addEventListener("contextmenu", (e) => {
 				e.preventDefault();
-				tabContextMenu(e, ctx, path, x.idx, display);
+				ownMenu(
+					ctx,
+					showActionMenuAtEvent(e, tabActions(ctx, path, x.idx, display, tab.title, chip, btn, tabCopy)),
+				);
 			});
 			makeDraggable(chip, "tab", [...path, x.idx], (op) => ctx.editable?.apply(op), chip);
 			// Keyboard reorder: Alt+←/→ moves the focused tab.
@@ -2037,6 +2214,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			});
 		}
 		const panel = panels.createDiv({ cls: "mica-tab-panel", attr: { role: "tabpanel" } });
+		markInspectable(panel, ctx, `tab:${[...path, x.idx].join(".")}`);
 		const body = panel.createDiv({ cls: "mica-tab-body" });
 		markGroupContainer(body, [...path, x.idx], tab.children.length);
 		// A freshly inserted tab is ACTIVATED but never auto-opens an editor —
@@ -2055,7 +2233,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	// All-tabs menu (find a tab when the strip overflows).
 	if (tabs.length > 5) {
 		iconButton(sticky, "mica-head-btn", "chevron-down", "All tabs…").addEventListener("click", (e) => {
-			const menu = new Menu();
+			const menu = ownMenu(ctx, new Menu());
 			tabs.forEach((x, k) => {
 				const [display] = splitTitleAttrs((x.c as Container).title);
 				menu.addItem((i) =>
@@ -2068,21 +2246,14 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			menu.showAtMouseEvent(e);
 		});
 	}
-	copyButton(sticky, ctx, "mica-minitool", {
+	const groupCopy: CopyControl = {
 		kind: "tabs",
 		label: "Copy tab group contents",
 		notice: "Tab group copied.",
 		path,
 		target: { nodes: [node] },
-	});
+	};
 	if (ctx.editable) {
-		iconButton(sticky, "mica-minitool mica-group-fold", "chevrons-down-up", "Fold this tab group").addEventListener(
-			"click",
-			(e) => {
-				e.stopPropagation();
-				toggleFold(ctx, tkey);
-			},
-		);
 		const grip = iconButton(sticky, "mica-group-grip", "grip-vertical", "Drag to move this tab group");
 		makeDraggable(
 			grip,
@@ -2091,11 +2262,33 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			(op) => ctx.editable?.apply(op),
 			wrap,
 		);
-		iconButton(sticky, "mica-group-x", "trash-2", "Delete tab group").addEventListener("click", (e) => {
-			e.stopPropagation();
-			deleteWithUndo(ctx, { op: "deleteNode", path }, "Tab group deleted");
-		});
 	}
+	entityMenu(
+		sticky,
+		ctx,
+		() => {
+			const actions: ActionSpec[] = [copyAction(ctx, groupCopy)];
+			if (ctx.editable)
+				actions.push(
+					{
+						id: "fold",
+						label: "Fold this tab group",
+						icon: "chevrons-down-up",
+						run: () => toggleFold(ctx, tkey),
+					},
+					{
+						id: "delete",
+						label: "Delete tab group",
+						icon: "trash-2",
+						danger: true,
+						separatorBefore: true,
+						run: () => deleteWithUndo(ctx, { op: "deleteNode", path }, "Tab group deleted"),
+					},
+				);
+			return actions;
+		},
+		"Tab group actions",
+	);
 
 	nav.addEventListener("keydown", (ev: KeyboardEvent) => {
 		if (ev.altKey) return; // Alt+arrows = reorder (handled on the chip)
@@ -2120,42 +2313,51 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 	if (btns.length) activate(active, revealTab >= 0);
 }
 
-function tabContextMenu(e: MouseEvent, ctx: RenderCtx, path: number[], idx: number, display: string): void {
-	const menu = new Menu();
-	menu.addItem((i) =>
-		i
-			.setTitle("Rename")
-			.setIcon("pencil")
-			.onClick(() => {
-				const chip = (e.target as HTMLElement).closest(".mica-tab-chip") as HTMLElement | null;
-				const btn = chip?.querySelector(".mica-tab-btn") as HTMLElement | null;
-				if (chip && btn) startRename(chip, btn, ctx, path, idx, display, display);
-			}),
-	);
-	menu.addItem((i) =>
-		i
-			.setTitle("Set icon…")
-			.setIcon("smile")
-			.onClick(() => {
+function tabActions(
+	ctx: RenderCtx,
+	path: number[],
+	idx: number,
+	display: string,
+	originalTitle: string,
+	chip: HTMLElement,
+	button: HTMLElement,
+	copy: CopyControl,
+): ActionSpec[] {
+	const actions: ActionSpec[] = [copyAction(ctx, copy)];
+	if (!ctx.editable) return actions;
+	actions.push(
+		{
+			id: "rename",
+			label: "Rename",
+			icon: "pencil",
+			run: () => startRename(chip, button, ctx, path, idx, display, originalTitle),
+		},
+		{
+			id: "icon",
+			label: "Set icon…",
+			icon: "smile",
+			run: () => {
 				const name = window.prompt("Lucide icon name (empty to remove):", "");
 				if (name === null) return;
 				ctx.editable?.apply({ op: "setTabAttr", path, index: idx, key: "icon", value: name.trim() || null });
-			}),
+			},
+		},
+		{
+			id: "duplicate",
+			label: "Duplicate",
+			icon: "copy-plus",
+			run: () => ctx.editable?.apply({ op: "duplicateNode", path: [...path, idx] }),
+		},
+		{
+			id: "delete",
+			label: "Delete",
+			icon: "trash-2",
+			danger: true,
+			separatorBefore: true,
+			run: () => deleteWithUndo(ctx, { op: "deleteTab", path, index: idx }, "Tab deleted"),
+		},
 	);
-	menu.addItem((i) =>
-		i
-			.setTitle("Duplicate")
-			.setIcon("copy-plus")
-			.onClick(() => ctx.editable?.apply({ op: "duplicateNode", path: [...path, idx] })),
-	);
-	menu.addSeparator();
-	menu.addItem((i) =>
-		i
-			.setTitle("Delete")
-			.setIcon("trash-2")
-			.onClick(() => deleteWithUndo(ctx, { op: "deleteTab", path, index: idx }, "Tab deleted")),
-	);
-	menu.showAtMouseEvent(e);
+	return actions;
 }
 
 function startRename(
@@ -2345,7 +2547,7 @@ function mountGridResizers(
 		strip.addEventListener("contextmenu", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			const menu = new Menu();
+			const menu = ownMenu(ctx, new Menu());
 			menu.addItem((i) =>
 				i
 					.setTitle("New column here")
@@ -2441,7 +2643,7 @@ function mountGridResizers(
 		strip.addEventListener("contextmenu", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			const menu = new Menu();
+			const menu = ownMenu(ctx, new Menu());
 			menu.addItem((i) =>
 				i
 					.setTitle("New row here")
@@ -2563,7 +2765,7 @@ function mountGridHandles(
 	const rowHandles: HTMLElement[] = [];
 
 	const colMenu = (c: number, e: MouseEvent): void => {
-		const menu = new Menu();
+		const menu = ownMenu(ctx, new Menu());
 		menu.addItem((i) =>
 			i
 				.setTitle("Insert column left")
@@ -2608,7 +2810,7 @@ function mountGridHandles(
 	};
 
 	const rowMenu = (r: number, e: MouseEvent): void => {
-		const menu = new Menu();
+		const menu = ownMenu(ctx, new Menu());
 		menu.addItem((i) =>
 			i
 				.setTitle("Insert row above")
@@ -2834,6 +3036,7 @@ function mountGridHandles(
 
 function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: number[]): void {
 	const wrap = el.createDiv({ cls: "mica-grid-wrap" });
+	markInspectable(wrap, ctx, `grid:${path.join(".")}`);
 	wrap.setAttribute("data-mica-idx", String(path[path.length - 1] ?? 0));
 	wrap.setAttribute("data-mica-node", path.join("."));
 	const gkey = nodeFoldKey(path);
@@ -2888,6 +3091,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		if (c.kind !== "container" || c.name !== "cell") return;
 		const cellPath = [...path, idx];
 		const cell = grid.createDiv({ cls: "mica-cell" });
+		markInspectable(cell, ctx, `cell:${cellPath.join(".")}`);
 		cell.setAttribute("data-mica-idx", String(idx));
 		cell.setAttribute("data-mica-node", cellPath.join("."));
 		markGroupContainer(cell, cellPath, c.children.length);
@@ -2896,48 +3100,58 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		if (ctx.editable) {
 			const drag = iconButton(bar, "mica-cell-tool", "grip-vertical", "Drag to move this cell");
 			makeDraggable(drag, "cell", cellPath, (op) => ctx.editable?.apply(op), cell);
-			iconButton(bar, "mica-cell-tool", "maximize-2", "Edit this cell in the full editor").addEventListener(
-				"click",
-				(e) => {
-					e.stopPropagation();
-					openLightboxFor(ctx, {
-						path: cellPath,
-						start: 0,
-						end: c.children.length,
-						original: serializeCst({ children: c.children }),
-					});
-				},
-			);
-			// Clear, not delete: removing a cell from flow shifts every later
-			// cell across columns — geometry changes belong to the row/column
-			// handles. An empty cell keeps the lattice true.
-			iconButton(bar, "mica-cell-tool", "eraser", "Clear cell").addEventListener("click", (e) => {
-				e.stopPropagation();
-				deleteWithUndo(ctx, { op: "clearCell", path, index: idx }, "Cell cleared");
-			});
 		}
-		copyButton(bar, ctx, "mica-cell-tool", {
+		const cellCopy: CopyControl = {
 			kind: "cell",
 			label: `Copy cell ${idx + 1} contents`,
 			notice: "Cell copied.",
 			path: cellPath,
 			target: { nodes: [c] },
-		});
+		};
+		entityMenu(
+			bar,
+			ctx,
+			() => {
+				const actions: ActionSpec[] = [copyAction(ctx, cellCopy)];
+				if (ctx.editable)
+					actions.push(
+						{
+							id: "edit",
+							label: "Edit this cell in the full editor",
+							icon: "maximize-2",
+							run: () =>
+								openLightboxFor(ctx, {
+									path: cellPath,
+									start: 0,
+									end: c.children.length,
+									original: serializeCst({ children: c.children }),
+								}),
+						},
+						{
+							id: "clear",
+							label: "Clear cell",
+							icon: "eraser",
+							danger: true,
+							separatorBefore: true,
+							run: () => deleteWithUndo(ctx, { op: "clearCell", path, index: idx }, "Cell cleared"),
+						},
+					);
+				return actions;
+			},
+			`Cell ${idx + 1} actions`,
+			"mica-cell-tool",
+		);
 	});
 
 	const tools = wrap.createDiv({ cls: "mica-grid-tools" });
-	copyButton(tools, ctx, "mica-minitool", {
+	const gridCopy: CopyControl = {
 		kind: "grid",
 		label: "Copy grid contents",
 		notice: "Grid copied.",
 		path,
 		target: { nodes: [node] },
-	});
+	};
 	if (ctx.editable) {
-		iconButton(tools, "mica-minitool", "chevrons-down-up", "Fold this grid").addEventListener("click", (e) => {
-			e.stopPropagation();
-			toggleFold(ctx, gkey);
-		});
 		const topGrip = iconButton(tools, "mica-region-grip", "grip-vertical", "Drag to move this grid");
 		topGrip.addEventListener("click", (e) => e.stopPropagation());
 		makeDraggable(
@@ -2947,11 +3161,6 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			(op) => ctx.editable?.apply(op),
 			wrap,
 		);
-		iconButton(tools, "mica-minitool mica-region-x", "x", "Delete grid").addEventListener("click", (e) => {
-			e.stopPropagation();
-			deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted");
-		});
-
 		// Grid resizers: dividers between columns (fr shares) and rows (min px).
 		mountGridResizers(grid, ctx, path, cols, widths, rowHeights);
 
@@ -3016,6 +3225,27 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 		colStep(1, "plus", "One more column");
 		bar.createDiv({ cls: "mica-nav-spacer" });
 	}
+	entityMenu(
+		tools,
+		ctx,
+		() => {
+			const actions: ActionSpec[] = [copyAction(ctx, gridCopy)];
+			if (ctx.editable)
+				actions.push(
+					{ id: "fold", label: "Fold this grid", icon: "chevrons-down-up", run: () => toggleFold(ctx, gkey) },
+					{
+						id: "delete",
+						label: "Delete grid",
+						icon: "trash-2",
+						danger: true,
+						separatorBefore: true,
+						run: () => deleteWithUndo(ctx, { op: "deleteNode", path }, "Grid deleted"),
+					},
+				);
+			return actions;
+		},
+		"Grid actions",
+	);
 }
 
 /** Guarded structural changes that discard or regroup syntax offer one-click Undo. */
@@ -3078,7 +3308,7 @@ function renderVersionChip(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo): vo
 	btn.addEventListener("click", () => new VersionsModal(p, chip.file, chip.blockId).open());
 	btn.addEventListener("contextmenu", (e) => {
 		e.preventDefault();
-		const menu = new Menu();
+		const menu = ownMenu(ctx, new Menu());
 		const on = p.settings.autoSnapshotEnabled;
 		menu.addItem((i) =>
 			i

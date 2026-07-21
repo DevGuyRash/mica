@@ -102,6 +102,8 @@ class MicaWidget extends WidgetType {
 			copyOptions: () => ({
 				includeMicaSyntax: this.plugin.settings.copyIncludeMicaSyntax,
 				includeOuterContainer: this.plugin.settings.copyIncludeOuterContainer,
+				includeLineNumbers: this.plugin.settings.copyIncludeLineNumbers,
+				lineNumberScope: this.plugin.settings.copyLineNumberScope,
 			}),
 			preImage: () => this.liveContent(view) ?? this.content,
 		});

@@ -67,6 +67,8 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 				copyOptions: () => ({
 					includeMicaSyntax: plugin.settings.copyIncludeMicaSyntax,
 					includeOuterContainer: plugin.settings.copyIncludeOuterContainer,
+					includeLineNumbers: plugin.settings.copyIncludeLineNumbers,
+					lineNumberScope: plugin.settings.copyLineNumberScope,
 				}),
 			});
 		} catch (e) {

@@ -22,6 +22,27 @@ async function docContains(_pred: string): Promise<string> {
 	});
 }
 
+async function clickLatestMenuItem(title: string): Promise<void> {
+	await browser.waitUntil(
+		() =>
+			browser.executeObsidian(
+				(_, expected) =>
+					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
+						(element) => element.textContent?.trim() === expected,
+					),
+				title,
+			),
+		{ timeout: 8000, timeoutMsg: `menu item never appeared: ${title}` },
+	);
+	await browser.executeObsidian((_, expected) => {
+		const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+		const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+			(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
+		);
+		item?.click();
+	}, title);
+}
+
 describe("grid column resize + wrap toggle", function () {
 	it("dragging the column divider persists colw fractions into the grid header", async function () {
 		await seedAndOpen(
@@ -64,7 +85,7 @@ describe("grid column resize + wrap toggle", function () {
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
-					() => document.querySelectorAll(".mica-lp .mica-head-btn[aria-pressed]").length >= 1,
+					() => document.querySelectorAll('.mica-lp .mica-head [data-mica-actions~="wrap"]').length >= 1,
 				),
 			{ timeout: 8000, timeoutMsg: "the wrap toggle never rendered" },
 		);
@@ -74,8 +95,9 @@ describe("grid column resize + wrap toggle", function () {
 		);
 		if (before !== "on") throw new Error(`expected default wrap=on, got ${before}`);
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-head-btn[aria-pressed]") as HTMLElement).click();
+			(document.querySelector('.mica-lp .mica-head [data-mica-actions~="wrap"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Wrap long lines");
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(({ app, obsidian }) => {
@@ -98,15 +120,21 @@ describe("round 6: folds, click-outside, region delete", function () {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("Foldme"),
 			) as HTMLElement;
-			(region.querySelector('[aria-label="Fold this section"]') as HTMLElement).click();
+			(region.querySelector('[data-mica-actions~="fold"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Fold this section");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-fold-bar").length === 1),
 			{ timeout: 8000, timeoutMsg: "the fold bar never appeared" },
 		);
-		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-fold-bar") as HTMLElement).click();
-		});
+		expect(
+			await browser.executeObsidian(() => {
+				const bar = document.querySelector(".mica-lp .mica-fold-bar") as HTMLElement;
+				bar.focus();
+				return { role: bar.getAttribute("role"), tabIndex: bar.tabIndex };
+			}),
+		).toEqual({ role: "button", tabIndex: 0 });
+		await browser.keys([Key.Enter]);
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
@@ -297,8 +325,9 @@ describe("round 6: folds, click-outside, region delete", function () {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("Delete me"),
 			) as HTMLElement;
-			(region.querySelector('[aria-label="Delete this section"]') as HTMLElement).click();
+			(region.querySelector('[data-mica-actions~="delete"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Delete this section");
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(({ app, obsidian }) => {
@@ -333,8 +362,9 @@ describe("round 6: folds, click-outside, region delete", function () {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("remove me"),
 			) as HTMLElement;
-			(region.querySelector('[aria-label="Delete this section"]') as HTMLElement).click();
+			(region.querySelector('[data-mica-actions~="delete"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Delete this section");
 		await browser.waitUntil(async () => !(await docContains("")).includes("remove me"), {
 			timeout: 8000,
 			timeoutMsg: "the section was not deleted",
@@ -366,8 +396,9 @@ describe("structured callout editor", function () {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("Old title"),
 			) as HTMLElement;
-			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
+			(region.querySelector('[data-mica-actions~="fields"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Edit callout fields…");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-coedit-title"))),
 			{ timeout: 8000, timeoutMsg: "callout editor never opened" },
@@ -408,17 +439,20 @@ describe("structured callout editor", function () {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((candidate) =>
 				candidate.textContent?.includes("Lifecycle"),
 			) as HTMLElement;
-			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
+			(region.querySelector('[data-mica-actions~="fields"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Edit callout fields…");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-coedit-type"))),
 			{ timeout: 8000, timeoutMsg: "callout editor never opened" },
 		);
 
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lightbox .mica-editor-menu") as HTMLButtonElement).click();
+		});
+		await clickLatestMenuItem("Live preview");
 		const opened = await browser.executeObsidian(() => {
 			const modal = document.querySelector(".mica-lightbox") as HTMLElement;
-			(modal.querySelector('[aria-label="Toggle live preview pane"]') as HTMLButtonElement).click();
-
 			const listeners = new Set<EventListenerOrEventListenerObject>();
 			const originalAdd = document.addEventListener;
 			const originalRemove = document.removeEventListener;
@@ -500,8 +534,9 @@ describe("structured callout editor", function () {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("Old title"),
 			) as HTMLElement;
-			(region.querySelector('[aria-label="Edit callout (type, title, body)"]') as HTMLElement).click();
+			(region.querySelector('[data-mica-actions~="fields"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Edit callout fields…");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lightbox-fields").length === 1),
 			{ timeout: 8000, timeoutMsg: "the callout editor never opened" },
@@ -609,16 +644,18 @@ describe("block navigator", function () {
 		);
 		// Fold the whole tabs group.
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-group-fold") as HTMLElement).click();
+			(document.querySelector('.mica-lp .mica-tabs [data-mica-actions~="fold"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Fold this tab group");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-fold-bar").length === 1),
 			{ timeout: 8000, timeoutMsg: "the group never folded" },
 		);
 		// Navigator → click the buried callout's row.
 		await browser.executeObsidian(() => {
-			(document.querySelector('.mica-lp .mica-head-btn[aria-label="Block navigator"]') as HTMLElement).click();
+			(document.querySelector('.mica-lp .mica-head [data-mica-actions~="navigator"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Block navigator");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-navpop .mica-nav-row").length >= 2),
 			{ timeout: 8000, timeoutMsg: "the navigator popover never opened" },
@@ -664,8 +701,9 @@ describe("block navigator", function () {
 			{ timeout: 8000, timeoutMsg: "regions never rendered" },
 		);
 		await browser.executeObsidian(() => {
-			(document.querySelector('.mica-lp .mica-head-btn[aria-label="Block navigator"]') as HTMLElement).click();
+			(document.querySelector('.mica-lp .mica-head [data-mica-actions~="navigator"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Block navigator");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-navpop .mica-nav-row").length >= 3),
 			{ timeout: 8000, timeoutMsg: "the navigator popover never opened" },
@@ -906,8 +944,9 @@ describe("round 12: chip ✕, nested callout tools", function () {
 		await browser.executeObsidian(() => {
 			const chips = Array.from(document.querySelectorAll(".mica-lp .mica-tab-chip")) as HTMLElement[];
 			const last = chips[chips.length - 1];
-			(last.querySelector(".mica-chip-x") as HTMLElement).click();
+			(last.querySelector('[data-mica-actions~="delete"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Delete");
 		await browser.waitUntil(
 			async () => {
 				const v = await docContains("");
@@ -928,8 +967,9 @@ describe("round 12: chip ✕, nested callout tools", function () {
 		);
 		await browser.executeObsidian(() => {
 			const inner = document.querySelector(".mica-lp .mica-nested-callout") as HTMLElement;
-			(inner.querySelector(".mica-region-x") as HTMLElement).click();
+			(inner.querySelector('[data-mica-actions~="delete"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Delete this callout");
 		await browser.waitUntil(
 			async () => {
 				const v = await docContains("");
@@ -1159,9 +1199,10 @@ describe("round 13: boundary adds, editor click-to-end, body popovers", function
 		);
 		await browser.executeObsidian(() => {
 			const cell = document.querySelector(".mica-lp .mica-cell") as HTMLElement;
-			const clear = cell.querySelector('.mica-cell-bar [aria-label="Clear cell"]') as HTMLElement;
+			const clear = cell.querySelector('.mica-cell-bar [data-mica-actions~="clear"]') as HTMLElement;
 			clear.click();
 		});
+		await clickLatestMenuItem("Clear cell");
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(({ app, obsidian }) => {

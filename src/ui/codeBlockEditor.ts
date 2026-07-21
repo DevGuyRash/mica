@@ -3,6 +3,7 @@ import { buildCodeFence, parseCodeFence, type ParsedCodeFence } from "./codeFenc
 import { EditorLightbox } from "./lightbox";
 import type { RenderCtx } from "./blockShell";
 import type { RegionTarget } from "./quickEdit";
+import { resolveCodeLanguage } from "./codeLangs";
 
 /** Open the structured editor for a top-level fenced-code region. */
 export function openCodeBlockEditor(ctx: RenderCtx, target: RegionTarget): void {
@@ -48,7 +49,7 @@ export function openCodeBlockEditorFor(
 		isDirty: (body) => body !== parsed.body || state.infoRaw !== parsed.infoRaw,
 		header: (host, refresh, setEditorLanguage) => {
 			const row = host.createDiv({ cls: "mica-coedit-row" });
-			row.createSpan({ text: "Language / info (optional)" });
+			row.createSpan({ cls: "mica-coedit-label", text: "Language / info" });
 			const input = row.createEl("input", {
 				cls: "mica-coedit-title mica-codeedit-info",
 				attr: {
@@ -59,6 +60,14 @@ export function openCodeBlockEditorFor(
 				},
 			});
 			input.value = state.infoRaw;
+			const status = row.createSpan({ cls: "mica-codeedit-status" });
+			const paintStatus = (): void => {
+				const token = state.infoRaw.trimStart().match(/^[^\s]+/)?.[0] ?? "";
+				const language = token ? resolveCodeLanguage(token) : null;
+				status.setText(language?.name ?? "Plain text");
+				status.toggleClass("is-plain", !language);
+			};
+			paintStatus();
 			let warnedAboutBackticks = false;
 			input.addEventListener("input", () => {
 				const safe = parsed.fenceChar === "`" ? input.value.replaceAll("`", "") : input.value;
@@ -71,6 +80,7 @@ export function openCodeBlockEditorFor(
 				}
 				state.infoRaw = safe;
 				setEditorLanguage({ kind: "code", info: state.infoRaw });
+				paintStatus();
 				refresh();
 			});
 		},

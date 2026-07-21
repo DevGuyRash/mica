@@ -1,17 +1,37 @@
-import { Menu, Modal, Notice, setIcon, TFile } from "obsidian";
+import { Component, Menu, Modal, Notice, setIcon, TFile } from "obsidian";
 import type MicaPlugin from "../main";
-import { contentSignature, diffText, makePatch, scanBlocksView, type VersionMeta } from "../wasm/bridge";
+import { contentSignature, diffText, makePatch, parseBlock, scanBlocksView, type VersionMeta } from "../wasm/bridge";
 import { readObject } from "../storage/sidecar";
 import { interactiveDiffIssue } from "../diff/budget";
 import { renderDiff, renderNUp, renderPatch } from "../diff/diffView";
 import { EditorLightbox } from "./lightbox";
 import { matchingVersions, VERSION_ROW_PAGE_SIZE, versionPageBounds } from "./versionWindow";
+import { renderCst } from "./blockShell";
+import {
+	buildScopeIndex,
+	locatorFor,
+	resolveScope,
+	scopeBreadcrumb,
+	scopeFingerprint,
+	scopeSource,
+	MAX_SCOPE_INDEX_CODE_UNITS,
+	ScopeIndexTooLargeError,
+	type ScopeIndex,
+	type ScopeLocator,
+	type ScopeResolution,
+} from "./versionScope";
 
 interface Row {
 	meta: VersionMeta;
 	/** 1-based add-order number (v1 = oldest) — matches the mica CLI. */
 	n: number;
 	head: boolean;
+}
+
+interface FocusedPair {
+	base: string;
+	selected: string;
+	caption: string;
 }
 
 const WORKING = "__working__";
@@ -43,6 +63,21 @@ export class VersionsModal extends Modal {
 	private listEl: HTMLElement | null = null;
 	private initialized = false;
 	private rowPageStart = 0;
+	private mode: "diff" | "inspect" = "diff";
+	private inspectSelectedKey = "block:";
+	private focusedLocator: ScopeLocator | null = null;
+	private inspectVersionKey: string | null = null;
+	private manualPick: { side: "base" | "selected"; key: string; base: string; selected: string } | null = null;
+	private readonly scopeIndexes = new Map<string, ScopeIndex>();
+	private readonly manualScopes = new Map<string, string>();
+	private readonly focusDispositions = new Map<string, "added" | "removed">();
+	private readonly scopeStatuses = new Map<
+		string,
+		"changed" | "unchanged" | "added" | "removed" | "needs matching"
+	>();
+	private inspectorChild: Component | null = null;
+	private removeSettingsListener: (() => void) | null = null;
+	private readonly openMenus = new Set<Menu>();
 
 	constructor(
 		private readonly plugin: MicaPlugin,
@@ -96,6 +131,9 @@ export class VersionsModal extends Modal {
 			this.step(1);
 			return false;
 		});
+		const onSettingsChange = (): void => this.renderList();
+		document.addEventListener("mica-settings-change", onSettingsChange);
+		this.removeSettingsListener = () => document.removeEventListener("mica-settings-change", onSettingsChange);
 		await this.reload();
 	}
 
@@ -111,6 +149,11 @@ export class VersionsModal extends Modal {
 		const next = includesWorking && nextIndex === 0 ? WORKING : this.rows[nextIndex - offset]?.meta.hash;
 		if (next && next !== this.selected) {
 			this.selected = next;
+			if (this.mode === "inspect") {
+				this.inspectSelectedKey = "block:";
+				this.inspectVersionKey = null;
+				this.manualPick = null;
+			}
 			this.revealRowPage(next);
 			this.renderList();
 			this.renderDiffSurface();
@@ -122,6 +165,7 @@ export class VersionsModal extends Modal {
 		const versions = state?.versions ?? [];
 		this.rows = versions.map((meta, i) => ({ meta, n: i + 1, head: state?.head === meta.hash })).reverse(); // newest first
 		this.contents.clear();
+		this.scopeIndexes.clear();
 		this.missing.clear();
 		// The live block content = the "working copy" pseudo-version.
 		const doc = await this.plugin.app.vault.read(this.file);
@@ -182,6 +226,7 @@ export class VersionsModal extends Modal {
 					const oldest = this.contents.keys().next().value as string | undefined;
 					if (!oldest) break;
 					this.contents.delete(oldest);
+					this.scopeIndexes.delete(oldest);
 				}
 				return true;
 			})
@@ -235,7 +280,10 @@ export class VersionsModal extends Modal {
 			return;
 		}
 		const root = contentEl.createDiv({ cls: "mica-versions-root" });
-		this.listEl = root.createDiv({ cls: "mica-versions-list" });
+		this.listEl = root.createDiv({
+			cls: "mica-versions-list",
+			attr: { role: "listbox", "aria-label": "Block versions" },
+		});
 		const main = root.createDiv({ cls: "mica-versions-main" });
 		this.renderList();
 		this.renderToolbar(main);
@@ -253,13 +301,30 @@ export class VersionsModal extends Modal {
 		if (this.isDirty() || this.selected === WORKING) {
 			const row = list.createDiv({
 				cls: `mica-vrow is-working ${this.selected === WORKING ? "is-selected" : ""}`,
+				attr: {
+					role: "option",
+					tabindex: this.selected === WORKING ? "0" : "-1",
+					"aria-selected": String(this.selected === WORKING),
+				},
 			});
 			row.createDiv({ cls: "mica-vrow-title", text: "Working copy" });
 			row.createDiv({ cls: "mica-vrow-sub", text: this.isDirty() ? "unsaved changes" : "matches head" });
-			row.addEventListener("click", () => {
+			const activateWorking = (): void => {
 				this.selected = WORKING;
+				if (this.mode === "inspect") {
+					this.inspectSelectedKey = "block:";
+					this.inspectVersionKey = null;
+					this.manualPick = null;
+				}
 				this.renderList();
 				this.renderDiffSurface();
+			};
+			row.addEventListener("click", activateWorking);
+			row.addEventListener("keydown", (event) => {
+				if (event.target !== row) return;
+				if (event.key !== "Enter" && event.key !== " ") return;
+				event.preventDefault();
+				activateWorking();
 			});
 		}
 
@@ -271,6 +336,11 @@ export class VersionsModal extends Modal {
 				cls: `mica-vrow ${this.selected === r.meta.hash ? "is-selected" : ""} ${r.head ? "is-head" : ""} ${
 					baseHash === r.meta.hash ? "is-base" : ""
 				}`,
+				attr: {
+					role: "option",
+					tabindex: this.selected === r.meta.hash ? "0" : "-1",
+					"aria-selected": String(this.selected === r.meta.hash),
+				},
 			});
 			const title = row.createDiv({ cls: "mica-vrow-title" });
 			title.createSpan({ cls: "mica-vrow-n", text: `v${r.n}` });
@@ -281,16 +351,38 @@ export class VersionsModal extends Modal {
 				setIcon(headIco, "check");
 			}
 			const sub = row.createDiv({ cls: "mica-vrow-sub" });
-			sub.createSpan({ text: relTime(r.meta.ts) });
+			const time = sub.createEl("time", {
+				text: versionTime(r.meta.ts, this.plugin.settings.showVersionExactTimestamps),
+				attr: { datetime: new Date(r.meta.ts).toISOString(), title: exactTimeTitle(r.meta.ts) },
+			});
+			void time;
+			const scopeStatus = this.scopeStatuses.get(r.meta.hash);
+			if (scopeStatus)
+				sub.createSpan({
+					cls: `mica-vrow-scope is-${scopeStatus.replace(" ", "-")}`,
+					text: ` · ${scopeStatus}`,
+				});
 			const preview = this.contents.has(r.meta.hash) ? firstLine(this.text(r.meta.hash)) : "";
 			if (this.missing.has(r.meta.hash)) sub.createSpan({ cls: "mica-vrow-preview", text: " · object missing" });
 			if (preview) sub.createSpan({ cls: "mica-vrow-preview", text: ` · ${preview}` });
 
-			row.addEventListener("click", async () => {
+			const activateVersion = async (): Promise<void> => {
 				this.selected = r.meta.hash;
+				if (this.mode === "inspect") {
+					this.inspectSelectedKey = "block:";
+					this.inspectVersionKey = null;
+					this.manualPick = null;
+				}
 				await this.loadContent(r.meta.hash);
 				this.renderList();
 				this.renderDiffSurface();
+			};
+			row.addEventListener("click", () => void activateVersion());
+			row.addEventListener("keydown", (event) => {
+				if (event.target !== row) return;
+				if (event.key !== "Enter" && event.key !== " ") return;
+				event.preventDefault();
+				void activateVersion();
 			});
 			row.addEventListener("contextmenu", (e) => {
 				e.preventDefault();
@@ -345,7 +437,7 @@ export class VersionsModal extends Modal {
 	}
 
 	private versionMenu(e: MouseEvent, r: Row): void {
-		const menu = new Menu();
+		const menu = this.ownMenu(new Menu());
 		menu.addItem((i) =>
 			i
 				.setTitle("Restore this version")
@@ -463,6 +555,23 @@ export class VersionsModal extends Modal {
 			}
 		};
 
+		seg(
+			group("View"),
+			[
+				["diff", "Diff"],
+				["inspect", "Inspect"],
+			],
+			this.mode,
+			(mode) => {
+				this.mode = mode;
+				if (mode === "diff") {
+					this.manualPick = null;
+					this.inspectVersionKey = null;
+				}
+				this.render();
+			},
+		);
+
 		// The base is always shown RESOLVED — "previous" names the version
 		// stored just before the SELECTED one, never relative to head.
 		const bk = this.baseKey();
@@ -480,7 +589,7 @@ export class VersionsModal extends Modal {
 			attr: { type: "button", "aria-label": "Choose what the selected version is compared against" },
 		});
 		baseBtn.addEventListener("click", (e) => {
-			const menu = new Menu();
+			const menu = this.ownMenu(new Menu());
 			menu.addItem((i) =>
 				i
 					.setTitle("Auto — the version before the selected one")
@@ -591,6 +700,8 @@ export class VersionsModal extends Modal {
 
 	private setBase(mode: "previous" | "head" | string): void {
 		this.baseMode = mode;
+		this.manualPick = null;
+		this.inspectVersionKey = null;
 		this.revealRowPage(mode);
 		this.render();
 	}
@@ -616,10 +727,335 @@ export class VersionsModal extends Modal {
 		return r ? `v${r.n}` : hash.slice(0, 10);
 	}
 
+	private ownMenu(menu: Menu): Menu {
+		this.openMenus.add(menu);
+		menu.onHide(() => this.openMenus.delete(menu));
+		return menu;
+	}
+
+	private scopeIndexFor(key: string): ScopeIndex {
+		const cached = this.scopeIndexes.get(key);
+		if (cached) {
+			this.scopeIndexes.delete(key);
+			this.scopeIndexes.set(key, cached);
+			return cached;
+		}
+		const index = buildScopeIndex(this.text(key));
+		this.scopeIndexes.set(key, index);
+		while (this.scopeIndexes.size > CONTENT_CACHE_LIMIT) {
+			const oldest = this.scopeIndexes.keys().next().value as string | undefined;
+			if (oldest === undefined) break;
+			this.scopeIndexes.delete(oldest);
+		}
+		return index;
+	}
+
+	private disposeInspector(): void {
+		if (!this.inspectorChild) return;
+		this.inspectorChild.unload();
+		this.inspectorChild = null;
+	}
+
+	private renderInspectSurface(surface: HTMLElement): void {
+		const key = this.inspectVersionKey ?? this.selected;
+		if (key !== WORKING && this.missing.has(key)) {
+			surface.createDiv({ cls: "mica-diff-caption", text: "This version object is missing or unreadable." });
+			return;
+		}
+		if (key !== WORKING && !this.contents.has(key)) {
+			surface.createDiv({ cls: "mica-diff-caption", text: "Loading the selected version…" });
+			void this.loadContent(key).then(() => {
+				this.renderList();
+				this.renderDiffSurface();
+			});
+			return;
+		}
+		let index: ScopeIndex;
+		try {
+			index = this.scopeIndexFor(key);
+		} catch (error) {
+			const detail =
+				error instanceof ScopeIndexTooLargeError
+					? `This snapshot exceeds the ${Math.floor(MAX_SCOPE_INDEX_CODE_UNITS / 1024)} KiB interactive inspector limit. Whole-block history remains available.`
+					: `This snapshot could not be inspected: ${error instanceof Error ? error.message : String(error)}`;
+			surface.createDiv({ cls: "mica-diff-caption", text: detail });
+			return;
+		}
+		if (!index.byKey.has(this.inspectSelectedKey)) this.inspectSelectedKey = "block:";
+		surface.createDiv({
+			cls: "mica-diff-caption",
+			text: `Inspecting ${key === WORKING ? "working copy" : this.nameOf(key)} · choose a Mica object, then compare it`,
+		});
+		const viewport = surface.createDiv({ cls: "mica-inspector-viewport" });
+		const render = viewport.createDiv({ cls: "mica-inspector-render" });
+		const footer = surface.createDiv({ cls: "mica-inspector-footer" });
+		const child = new Component();
+		child.load();
+		this.inspectorChild = child;
+
+		const paintFooter = (scopeKey: string): void => {
+			const selected = index.byKey.get(scopeKey) ?? index.byKey.get("block:");
+			if (!selected) return;
+			this.inspectSelectedKey = selected.key;
+			footer.empty();
+			const breadcrumb = footer.createDiv({
+				cls: "mica-inspector-breadcrumb",
+				attr: { "aria-label": "Selected scope ancestry" },
+			});
+			const ancestors = index.scopes
+				.filter((scope) => scope.start <= selected.start && scope.end >= selected.end)
+				.sort((left, right) => right.end - right.start - (left.end - left.start));
+			for (const [position, scope] of ancestors.entries()) {
+				if (position) breadcrumb.createSpan({ cls: "mica-inspector-separator", text: "›" });
+				const label = scopeBreadcrumb(scope).at(-1) ?? scope.kind;
+				const button = breadcrumb.createEl("button", { text: label, attr: { type: "button" } });
+				button.toggleClass("is-current", scope.key === selected.key);
+				button.addEventListener("click", () => {
+					render
+						.querySelectorAll(".is-inspect-selected")
+						.forEach((node) => node.removeClass("is-inspect-selected"));
+					render.querySelectorAll<HTMLElement>("[data-mica-inspect-key]").forEach((node) => {
+						if (node.dataset.micaInspectKey === scope.key) node.addClass("is-inspect-selected");
+					});
+					paintFooter(scope.key);
+				});
+			}
+			footer.createDiv({ cls: "mica-footer-spacer" });
+			const compare = footer.createEl("button", {
+				cls: "mod-cta",
+				text: "Compare selected",
+				attr: { type: "button" },
+			});
+			if (this.manualPick) compare.setText("Pair selected scope");
+			compare.addEventListener("click", () => {
+				if (this.manualPick) {
+					const pick = this.manualPick;
+					this.manualScopes.set(
+						this.manualScopeKey(pick.base, pick.selected, pick.side, pick.key),
+						selected.key,
+					);
+					this.manualPick = null;
+					this.inspectVersionKey = null;
+				} else {
+					this.focusedLocator = locatorFor(selected, index);
+					this.manualScopes.clear();
+					this.focusDispositions.clear();
+					this.scopeStatuses.clear();
+				}
+				this.mode = "diff";
+				this.render();
+			});
+		};
+
+		renderCst(parseBlock(this.text(key)), render, {
+			app: this.app,
+			sourcePath: this.file.path,
+			component: child,
+			headerMode: "never",
+			inspection: { selectedKey: this.inspectSelectedKey, onSelect: paintFooter },
+		});
+		paintFooter(this.inspectSelectedKey);
+	}
+
+	private locatorId(): string {
+		const locator = this.focusedLocator;
+		return locator ? JSON.stringify([locator.kind, locator.signature, locator.label, locator.ancestry]) : "";
+	}
+
+	private manualScopeKey(base: string, selected: string, side: "base" | "selected", key: string): string {
+		return JSON.stringify([base, selected, side, key, this.locatorId()]);
+	}
+
+	private resolveFocused(key: string, base: string, selected: string, side: "base" | "selected"): ScopeResolution {
+		if (!this.focusedLocator) return { kind: "missing" };
+		return resolveScope(
+			this.scopeIndexFor(key),
+			this.focusedLocator,
+			this.manualScopes.get(this.manualScopeKey(base, selected, side, key)),
+		);
+	}
+
+	private renderResolutionPicker(
+		surface: HTMLElement,
+		side: "base" | "selected",
+		key: string,
+		resolution: Exclude<ScopeResolution, { kind: "exact" }>,
+		base: string,
+		selected: string,
+		allowedDisposition: "added" | "removed" | null,
+	): void {
+		const label = side === "base" ? "comparison base" : "selected snapshot";
+		surface.createDiv({
+			cls: "mica-diff-caption",
+			text:
+				resolution.kind === "missing"
+					? `The focused object is missing from the ${label}. Choose how to compare it.`
+					: `More than one object could be the focused object in the ${label}. Choose the counterpart explicitly.`,
+		});
+		const picker = surface.createDiv({ cls: "mica-scope-picker" });
+		if (resolution.kind === "ambiguous") {
+			for (const candidate of resolution.candidates) {
+				const button = picker.createEl("button", {
+					cls: "mica-scope-candidate",
+					attr: { type: "button" },
+				});
+				button.createDiv({ cls: "mica-scope-candidate-title", text: scopeBreadcrumb(candidate).join(" › ") });
+				button.createDiv({
+					cls: "mica-scope-candidate-preview",
+					text: firstLine(scopeSource(this.scopeIndexFor(key), candidate)) || "Empty scope",
+				});
+				button.addEventListener("click", () => {
+					this.manualScopes.set(this.manualScopeKey(base, selected, side, key), candidate.key);
+					this.renderDiffSurface();
+				});
+			}
+			if (resolution.truncated)
+				picker.createDiv({
+					cls: "mica-diff-caption",
+					text: "More matching scopes exist; inspect the snapshot to choose one that is not listed.",
+				});
+		}
+		const actions = surface.createDiv({ cls: "mica-scope-picker-actions" });
+		if (side === "base") {
+			const chooseBase = actions.createEl("button", { text: "Choose another base…", attr: { type: "button" } });
+			chooseBase.addEventListener("click", () => this.promptForBase());
+		}
+		const inspect = actions.createEl("button", { text: "Inspect snapshot to choose…", attr: { type: "button" } });
+		inspect.addEventListener("click", () => {
+			this.manualPick = { side, key, base, selected };
+			this.inspectVersionKey = key;
+			this.inspectSelectedKey = "block:";
+			this.mode = "inspect";
+			this.render();
+		});
+		for (const disposition of allowedDisposition ? [allowedDisposition] : []) {
+			const button = actions.createEl("button", {
+				text: disposition === "added" ? "Treat it as added" : "Treat it as removed",
+				attr: { type: "button" },
+			});
+			button.addEventListener("click", () => {
+				this.focusDispositions.set(`${base}→${selected}|${this.locatorId()}`, disposition);
+				this.renderDiffSurface();
+			});
+		}
+		const cancel = actions.createEl("button", { text: "Cancel focused comparison", attr: { type: "button" } });
+		cancel.addEventListener("click", () => {
+			this.focusedLocator = null;
+			this.scopeStatuses.clear();
+			this.render();
+		});
+	}
+
+	private focusedPair(surface: HTMLElement, baseKey: string): FocusedPair | null {
+		if (!this.focusedLocator || this.compareSet.size >= 2) return null;
+		if (
+			this.text(baseKey).length > MAX_SCOPE_INDEX_CODE_UNITS ||
+			this.text(this.selected).length > MAX_SCOPE_INDEX_CODE_UNITS
+		) {
+			surface.createDiv({
+				cls: "mica-diff-caption",
+				text: `Focused comparison exceeds the ${Math.floor(MAX_SCOPE_INDEX_CODE_UNITS / 1024)} KiB interactive inspector limit. Cancel focused comparison to use the whole-block view.`,
+			});
+			return null;
+		}
+		const baseResolution = this.resolveFocused(baseKey, baseKey, this.selected, "base");
+		const selectedResolution = this.resolveFocused(this.selected, baseKey, this.selected, "selected");
+		const disposition = this.focusDispositions.get(`${baseKey}→${this.selected}|${this.locatorId()}`);
+		if (disposition === "added" && baseResolution.kind === "missing" && selectedResolution.kind === "exact") {
+			this.updateScopeStatus();
+			return {
+				base: "",
+				selected: scopeSource(this.scopeIndexFor(this.selected), selectedResolution.scope),
+				caption: `${this.focusedLocator.label || this.focusedLocator.kind} · added`,
+			};
+		}
+		if (disposition === "removed" && baseResolution.kind === "exact" && selectedResolution.kind === "missing") {
+			this.updateScopeStatus();
+			return {
+				base: scopeSource(this.scopeIndexFor(baseKey), baseResolution.scope),
+				selected: "",
+				caption: `${this.focusedLocator.label || this.focusedLocator.kind} · removed`,
+			};
+		}
+		if (selectedResolution.kind !== "exact") {
+			this.renderResolutionPicker(
+				surface,
+				"selected",
+				this.selected,
+				selectedResolution,
+				baseKey,
+				this.selected,
+				selectedResolution.kind === "missing" && baseResolution.kind === "exact" ? "removed" : null,
+			);
+			this.updateScopeStatus();
+			return null;
+		}
+		if (baseResolution.kind !== "exact") {
+			this.renderResolutionPicker(
+				surface,
+				"base",
+				baseKey,
+				baseResolution,
+				baseKey,
+				this.selected,
+				baseResolution.kind === "missing" && selectedResolution.kind === "exact" ? "added" : null,
+			);
+			this.updateScopeStatus();
+			return null;
+		}
+		this.updateScopeStatus();
+		return {
+			base: scopeSource(this.scopeIndexFor(baseKey), baseResolution.scope),
+			selected: scopeSource(this.scopeIndexFor(this.selected), selectedResolution.scope),
+			caption: scopeBreadcrumb(selectedResolution.scope).join(" › "),
+		};
+	}
+
+	private updateScopeStatus(): void {
+		if (!this.focusedLocator || this.selected === WORKING) return;
+		const rowIndex = this.rows.findIndex((row) => row.meta.hash === this.selected);
+		if (rowIndex < 0) return;
+		const previous = this.rows[rowIndex + 1];
+		if (previous && !this.contents.has(previous.meta.hash) && !this.missing.has(previous.meta.hash)) {
+			void this.loadContent(previous.meta.hash).then(() => this.updateScopeStatus());
+			return;
+		}
+		const previousKey = previous?.meta.hash ?? this.selected;
+		const currentResolution = this.resolveFocused(this.selected, previousKey, this.selected, "selected");
+		const previousResolution = previous
+			? this.resolveFocused(previous.meta.hash, previousKey, this.selected, "base")
+			: { kind: "missing" as const };
+		const disposition = this.focusDispositions.get(`${previousKey}→${this.selected}|${this.locatorId()}`);
+		let status: "changed" | "unchanged" | "added" | "removed" | "needs matching";
+		if (disposition === "added") status = "added";
+		else if (disposition === "removed") status = "removed";
+		else if (currentResolution.kind === "ambiguous" || previousResolution.kind === "ambiguous")
+			status = "needs matching";
+		else if (currentResolution.kind === "missing")
+			status = previousResolution.kind === "exact" ? "removed" : "needs matching";
+		else if (previousResolution.kind === "missing") status = "added";
+		else {
+			status =
+				scopeFingerprint(this.scopeIndexFor(this.selected), currentResolution.scope) ===
+				scopeFingerprint(this.scopeIndexFor(previous.meta.hash), previousResolution.scope)
+					? "unchanged"
+					: "changed";
+		}
+		if (this.scopeStatuses.get(this.selected) !== status) {
+			this.scopeStatuses.set(this.selected, status);
+			queueMicrotask(() => this.renderList());
+		}
+	}
+
 	private renderDiffSurface(): void {
 		const surface = this.surface;
 		if (!surface) return;
+		this.disposeInspector();
 		surface.empty();
+		if (this.mode === "inspect") {
+			this.renderInspectSurface(surface);
+			return;
+		}
 		const bk = this.baseKey();
 		const needed = new Set<string>();
 		if (bk !== WORKING) needed.add(bk);
@@ -642,10 +1078,16 @@ export class VersionsModal extends Modal {
 			});
 			return;
 		}
-		const baseRaw = this.text(bk);
-		const selectedRaw = this.text(this.selected);
+		let baseRaw = this.text(bk);
+		let selectedRaw = this.text(this.selected);
+		const focused = this.focusedPair(surface, bk);
+		if (this.focusedLocator && this.compareSet.size < 2 && !focused) return;
+		if (focused) {
+			baseRaw = focused.base;
+			selectedRaw = focused.selected;
+		}
 		const caption = surface.createDiv({ cls: "mica-diff-caption" });
-		const names = `${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${
+		const names = `${focused ? `${focused.caption} · ` : ""}${bk === WORKING ? "working copy" : this.nameOf(bk)} → ${
 			this.selected === WORKING ? "working copy" : this.nameOf(this.selected)
 		}`;
 		const body = surface.createDiv();
@@ -707,8 +1149,17 @@ export class VersionsModal extends Modal {
 			this.render();
 			return;
 		}
-		const baseRaw = this.text(this.baseKey());
-		const selectedRaw = this.text(this.selected);
+		let baseRaw = this.text(this.baseKey());
+		let selectedRaw = this.text(this.selected);
+		if (this.focusedLocator && this.compareSet.size < 2) {
+			const focused = this.focusedPair(document.createElement("div"), this.baseKey());
+			if (!focused) {
+				new Notice("Choose the focused object's counterpart before copying its patch.");
+				return;
+			}
+			baseRaw = focused.base;
+			selectedRaw = focused.selected;
+		}
 		const issue = interactiveDiffIssue(baseRaw, selectedRaw, "line");
 		if (issue) {
 			new Notice(`Mica: ${issue}. Use the mica CLI for this comparison.`);
@@ -730,9 +1181,18 @@ export class VersionsModal extends Modal {
 	}
 
 	onClose(): void {
+		for (const menu of this.openMenus) menu.hide();
+		this.openMenus.clear();
+		this.disposeInspector();
+		this.removeSettingsListener?.();
+		this.removeSettingsListener = null;
 		this.surface = null;
 		this.listEl = null;
 		this.contents.clear();
+		this.scopeIndexes.clear();
+		this.manualScopes.clear();
+		this.focusDispositions.clear();
+		this.scopeStatuses.clear();
 		this.missing.clear();
 		this.contentEl.empty();
 	}
@@ -744,8 +1204,24 @@ function relTime(ts: number): string {
 	if (secs < 60) return `${secs}s ago`;
 	if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
 	if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
-	if (secs < 7 * 86400) return `${Math.floor(secs / 86400)}d ago`;
-	return new Date(ts).toLocaleDateString();
+	if (secs < 30 * 86400) return `${Math.floor(secs / 86400)}d ago`;
+	if (secs < 365 * 86400) return `${Math.floor(secs / (30 * 86400))}mo ago`;
+	return `${Math.floor(secs / (365 * 86400))}y ago`;
+}
+
+function versionTime(ts: number, exact: boolean): string {
+	const relative = relTime(ts);
+	return exact
+		? `${relative} · ${new Date(ts).toLocaleString(undefined, {
+				dateStyle: "medium",
+				timeStyle: "medium",
+			})}`
+		: relative;
+}
+
+function exactTimeTitle(ts: number): string {
+	const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
+	return `${new Date(ts).toISOString()} · ${zone}`;
 }
 
 function firstLine(content: string): string {

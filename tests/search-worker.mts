@@ -1,0 +1,65 @@
+import assert from "node:assert/strict";
+import { Worker } from "node:worker_threads";
+import { SEARCH_WORKER_SOURCE } from "../src/ui/searchWorker.ts";
+
+interface Request {
+	id: number;
+	type: "scan" | "replace";
+	doc: string;
+	needle: string;
+	regex: boolean;
+	flags: string;
+	matchCase: boolean;
+	replacement?: string;
+	target?: number;
+}
+
+async function run(request: Request): Promise<{ ok: boolean; text?: string; ranges?: ArrayBuffer; error?: string }> {
+	const wrapper = `
+const { parentPort } = require("node:worker_threads");
+const self = { postMessage: (value, transfer) => parentPort.postMessage(value, transfer) };
+${SEARCH_WORKER_SOURCE}
+parentPort.on("message", (data) => self.onmessage({ data }));
+`;
+	const worker = new Worker(wrapper, { eval: true });
+	try {
+		return await new Promise((resolve, reject) => {
+			worker.once("message", resolve);
+			worker.once("error", reject);
+			worker.postMessage(request);
+		});
+	} finally {
+		await worker.terminate();
+	}
+}
+
+const replace = async (needle: string, doc: string, replacement: string, flags = "u") =>
+	run({ id: 1, type: "replace", doc, needle, regex: true, flags, matchCase: true, replacement, target: -1 });
+
+assert.equal((await replace("(?<a>x)|(?<b>y)", "x", "$<b>")).text, "");
+assert.equal((await replace("(?<x>a)?b", "b", "$<x>-")).text, "-");
+assert.equal((await replace("(a)", "a", "$1|$&|$$|$<missing>")).text, "a|a|$|$<missing>");
+assert.equal((await replace("(?<word>a)", "a", "$<word>")).text, "a");
+
+const lookbehind = await run({
+	id: 2,
+	type: "scan",
+	doc: "€12 €34",
+	needle: "(?<=€)\\d+",
+	regex: true,
+	flags: "gu",
+	matchCase: true,
+});
+assert.equal(new Uint32Array(lookbehind.ranges!).length / 2, 2);
+const zeroWidth = await run({
+	id: 3,
+	type: "scan",
+	doc: "😀😀",
+	needle: "(?=😀)",
+	regex: true,
+	flags: "gu",
+	matchCase: true,
+});
+assert.deepEqual([...new Uint32Array(zeroWidth.ranges!)], [0, 0, 2, 2]);
+
+console.log("SEARCH WORKER OK");

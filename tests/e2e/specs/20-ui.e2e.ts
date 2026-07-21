@@ -74,6 +74,27 @@ async function setAutoSave(enabled: boolean): Promise<void> {
 	}, enabled);
 }
 
+async function clickLatestMenuItem(title: string): Promise<void> {
+	await browser.waitUntil(
+		() =>
+			browser.executeObsidian(
+				(_, expected) =>
+					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
+						(element) => element.textContent?.trim() === expected,
+					),
+				title,
+			),
+		{ timeout: 8000, timeoutMsg: `menu item never appeared: ${title}` },
+	);
+	await browser.executeObsidian((_, expected) => {
+		const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+		const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+			(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
+		);
+		item?.click();
+	}, title);
+}
+
 describe("rendering canaries (plugin-owned hooks only)", function () {
 	before(async function () {
 		await browser.executeObsidian(async ({ app }, content) => {
@@ -461,9 +482,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				browser.executeObsidian(({ app, obsidian }) => {
 					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
 					return Boolean(
-						view?.containerEl.querySelector('[data-mica-copy-kind="grid"]') &&
-						view.containerEl.querySelector('[data-mica-copy-kind="nested-callout"]') &&
-						view.containerEl.querySelector('[data-mica-copy-kind="code"]'),
+						view?.containerEl.querySelector('[data-mica-actions~="copy-grid"]') &&
+						view.containerEl.querySelector('[data-mica-actions~="copy-nested-callout"]') &&
+						view.containerEl.querySelector('[data-mica-actions~="copy-code"]'),
 					);
 				}),
 			{ timeout: 8000, timeoutMsg: "section copy controls never rendered" },
@@ -471,7 +492,12 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 
 		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
 			type CopyPlugin = {
-				settings: { copyIncludeMicaSyntax: boolean; copyIncludeOuterContainer: boolean };
+				settings: {
+					copyIncludeMicaSyntax: boolean;
+					copyIncludeOuterContainer: boolean;
+					copyIncludeLineNumbers: boolean;
+					copyLineNumberScope: "content" | "output";
+				};
 			};
 			const plugin = (
 				app as unknown as { plugins: { getPlugin(id: string): CopyPlugin | null } }
@@ -479,10 +505,13 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
 			if (!plugin || !view) throw new Error("Mica or the active Markdown view is unavailable");
 			const root = view.containerEl;
-			const kinds = Array.from(root.querySelectorAll<HTMLElement>("[data-mica-copy-kind]")).map(
-				(button) => button.dataset.micaCopyKind ?? "",
+			const kinds = Array.from(root.querySelectorAll<HTMLElement>("[data-mica-actions]")).flatMap((button) =>
+				(button.dataset.micaActions ?? "")
+					.split(" ")
+					.filter((action) => action.startsWith("copy-"))
+					.map((action) => action.slice(5)),
 			);
-			const button = root.querySelector<HTMLElement>('[data-mica-copy-kind="grid"]');
+			const button = root.querySelector<HTMLElement>('[data-mica-actions~="copy-grid"]');
 			if (!button) throw new Error("grid copy control is unavailable");
 
 			const clipboard = navigator.clipboard;
@@ -497,8 +526,11 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			const previous = {
 				syntax: plugin.settings.copyIncludeMicaSyntax,
 				outer: plugin.settings.copyIncludeOuterContainer,
+				lineNumbers: plugin.settings.copyIncludeLineNumbers,
+				lineScope: plugin.settings.copyLineNumberScope,
 			};
 			const outputs: string[] = [];
+			const numbered: string[] = [];
 			const before = view.editor.getValue();
 			const activeBefore = root.querySelector(".mica-tab-btn.is-active")?.textContent ?? "";
 			try {
@@ -510,17 +542,40 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				] as const) {
 					plugin.settings.copyIncludeMicaSyntax = syntax;
 					plugin.settings.copyIncludeOuterContainer = outer;
+					plugin.settings.copyIncludeLineNumbers = false;
 					copied = "";
 					button.click();
+					const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+					const copy = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+						(item) => item.querySelector(".menu-item-title")?.textContent?.trim() === "Copy grid contents",
+					);
+					copy?.click();
 					await Promise.resolve();
 					outputs.push(copied);
+				}
+				plugin.settings.copyIncludeMicaSyntax = true;
+				plugin.settings.copyIncludeOuterContainer = true;
+				plugin.settings.copyIncludeLineNumbers = true;
+				for (const scope of ["content", "output"] as const) {
+					plugin.settings.copyLineNumberScope = scope;
+					copied = "";
+					button.click();
+					const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+					const copy = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+						(item) => item.querySelector(".menu-item-title")?.textContent?.trim() === "Copy grid contents",
+					);
+					copy?.click();
+					await Promise.resolve();
+					numbered.push(copied);
 				}
 			} finally {
 				plugin.settings.copyIncludeMicaSyntax = previous.syntax;
 				plugin.settings.copyIncludeOuterContainer = previous.outer;
+				plugin.settings.copyIncludeLineNumbers = previous.lineNumbers;
+				plugin.settings.copyLineNumberScope = previous.lineScope;
 				Object.defineProperty(clipboard, "writeText", { configurable: true, value: originalWrite });
 			}
-			const keyboardCopy = root.querySelector<HTMLElement>('[data-mica-copy-kind="text"]');
+			const keyboardCopy = root.querySelector<HTMLElement>('[data-mica-actions~="copy-text"]');
 			keyboardCopy?.focus();
 			// The toolbar intentionally fades in; wait past that visual transition
 			// before asserting the keyboard-revealed state.
@@ -529,6 +584,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			return {
 				kinds,
 				outputs,
+				numbered,
 				sourceUnchanged: view.editor.getValue() === before,
 				activeUnchanged: (root.querySelector(".mica-tab-btn.is-active")?.textContent ?? "") === activeBefore,
 				editors: root.querySelectorAll(".mica-mdeditor").length,
@@ -558,13 +614,16 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			"```mica\ncell text\n```",
 			`\`\`\`mica\n${gridSyntax}\`\`\``,
 		]);
+		expect(result.numbered[0]).toContain(":::grid {cols=1}\n:::cell\n1 │ cell text\n:::\n:::");
+		expect(result.numbered[0]).not.toMatch(/^\s*1 │ ````mica/m);
+		expect(result.numbered[1]).toMatch(/^1\s+│ ```+mica\n2\s+│ :::grid/m);
 		expect(result.sourceUnchanged).toBe(true);
 		expect(result.activeUnchanged).toBe(true);
 		expect(result.editors).toBe(0);
 		expect(result.keyboardVisible).toBe(true);
 	});
 
-	it("shows the two clipboard settings and copy controls in Reading view", async function () {
+	it("shows all clipboard projection settings and copy controls in Reading view", async function () {
 		const reading = await browser.executeObsidian(async ({ app, obsidian }) => {
 			const el = document.createElement("div");
 			document.body.appendChild(el);
@@ -579,8 +638,11 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			);
 			const result = {
 				mode: el.querySelector(".mica")?.getAttribute("data-mica-mode") ?? "",
-				kinds: Array.from(el.querySelectorAll<HTMLElement>("[data-mica-copy-kind]")).map(
-					(button) => button.dataset.micaCopyKind ?? "",
+				kinds: Array.from(el.querySelectorAll<HTMLElement>("[data-mica-actions]")).flatMap((button) =>
+					(button.dataset.micaActions ?? "")
+						.split(" ")
+						.filter((action) => action.startsWith("copy-"))
+						.map((action) => action.slice(5)),
 				),
 			};
 			comp.unload();
@@ -590,10 +652,16 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(reading.mode).toBe("read");
 		for (const kind of ["block", "grid", "cell", "text"]) expect(reading.kinds).toContain(kind);
 
-		await browser.executeObsidian(({ app }) => {
+		const previousLineNumbers = await browser.executeObsidian(({ app }) => {
+			const plugin = (
+				app as unknown as {
+					plugins: { getPlugin(id: string): { settings: { copyIncludeLineNumbers: boolean } } | null };
+				}
+			).plugins.getPlugin("mica");
 			const setting = (app as unknown as { setting: { open(): void; openTabById(id: string): void } }).setting;
 			setting.open();
 			setting.openTabById("mica");
+			return plugin?.settings.copyIncludeLineNumbers ?? false;
 		});
 		await browser.waitUntil(
 			() =>
@@ -603,11 +671,35 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 					);
 					return (
 						names.includes("Include Mica layout syntax") &&
-						names.includes("Wrap copies in an outer Mica block")
+						names.includes("Wrap copies in an outer Mica block") &&
+						names.includes("Include line numbers")
 					);
 				}),
 			{ timeout: 8000, timeoutMsg: "the clipboard settings did not render" },
 		);
+		if (!previousLineNumbers)
+			await browser.executeObsidian(() => {
+				const row = Array.from(document.querySelectorAll<HTMLElement>(".setting-item")).find(
+					(item) => item.querySelector(".setting-item-name")?.textContent?.trim() === "Include line numbers",
+				);
+				(row?.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.click();
+			});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll<HTMLElement>(".setting-item-name")).some(
+						(element) => element.textContent?.trim() === "Lines to number",
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the line-number scope setting did not reveal live" },
+		);
+		if (!previousLineNumbers)
+			await browser.executeObsidian(() => {
+				const row = Array.from(document.querySelectorAll<HTMLElement>(".setting-item")).find(
+					(item) => item.querySelector(".setting-item-name")?.textContent?.trim() === "Include line numbers",
+				);
+				(row?.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.click();
+			});
 		await browser.executeObsidian(({ app }) => {
 			(app as unknown as { setting: { close(): void } }).setting.close();
 		});
@@ -618,13 +710,16 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
-					() => document.querySelectorAll(".mica-lp .mica-tab-chip .mica-chip-x").length > 0,
+					() => document.querySelectorAll('.mica-lp .mica-tab-chip [data-mica-actions~="delete"]').length > 0,
 				),
 			{ timeout: 8000, timeoutMsg: "the tab delete × never appeared" },
 		);
 		await browser.executeObsidian(() =>
-			(document.querySelector(".mica-lp .mica-tab-chip .mica-chip-x") as HTMLElement | null)?.click(),
+			(
+				document.querySelector('.mica-lp .mica-tab-chip [data-mica-actions~="delete"]') as HTMLElement | null
+			)?.click(),
 		);
+		await clickLatestMenuItem("Delete");
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(

@@ -34,6 +34,8 @@ export interface CustomTool {
 	name: string;
 	icon: string;
 	template: string;
+	/** Editor surfaces that expose this button. Missing on legacy settings means Markdown. */
+	surface?: "markdown" | "code" | "both";
 }
 
 /** Toolbar configuration, owned by settings and injected at plugin load. */
@@ -74,10 +76,25 @@ let config: ToolbarConfig = {
 	customs: [],
 	onDefaultChange: () => undefined,
 };
+let builtinCache: ToolItem[] | null = null;
+let builtinIndex = new Map<string, ToolItem>();
+let customIndex = new Map<string, CustomTool>();
+
+const configListeners = new Set<() => void>();
 
 /** Install the live toolbar configuration (main.ts, on load + settings change). */
 export function setToolbarConfig(cfg: ToolbarConfig): void {
 	config = cfg;
+	customIndex = new Map();
+	for (const tool of cfg.customs) if (!customIndex.has(tool.id)) customIndex.set(tool.id, tool);
+	for (const listener of [...configListeners]) listener();
+}
+
+/** Mounted toolbars subscribe so settings changes repaint their controls without
+ * replacing the CodeMirror document or its undo history. */
+export function onToolbarConfigChange(listener: () => void): () => void {
+	configListeners.add(listener);
+	return () => configListeners.delete(listener);
 }
 
 /** The live toolbar configuration. */
@@ -87,7 +104,8 @@ export function toolbarConfig(): ToolbarConfig {
 
 /** All built-in ribbon items, in a stable catalog order. */
 export function builtinTools(): ToolItem[] {
-	return [
+	if (builtinCache) return builtinCache;
+	builtinCache = [
 		{ id: "bold", icon: "bold", label: "Bold", run: (v) => verbs.toggleInline(v, "**") },
 		{ id: "italic", icon: "italic", label: "Italic", run: (v) => verbs.toggleInline(v, "*") },
 		{ id: "strikethrough", icon: "strikethrough", label: "Strikethrough", run: (v) => verbs.toggleInline(v, "~~") },
@@ -135,14 +153,19 @@ export function builtinTools(): ToolItem[] {
 		{ id: "table", icon: "table", label: "Table…", special: "table" },
 		{ id: "hr", icon: "minus", label: "Horizontal rule", run: (v) => verbs.insertHr(v) },
 	];
+	builtinIndex = new Map(builtinCache.map((tool) => [tool.id, tool]));
+	return builtinCache;
 }
 
 /** Resolve an id (builtin or `custom:*`) into a ribbon item. */
-export function resolveTool(id: string): ToolItem | null {
-	const builtin = builtinTools().find((t) => t.id === id);
-	if (builtin) return builtin;
-	const custom = config.customs.find((c) => `custom:${c.id}` === id);
+export function resolveTool(id: string, surface: "markdown" | "code" = "markdown"): ToolItem | null {
+	builtinTools();
+	const builtin = builtinIndex.get(id);
+	if (builtin) return surface === "markdown" ? builtin : null;
+	const custom = id.startsWith("custom:") ? customIndex.get(id.slice("custom:".length)) : undefined;
 	if (custom) {
+		const target = custom.surface ?? "markdown";
+		if (target !== "both" && target !== surface) return null;
 		return {
 			id,
 			icon: custom.icon || "sparkles",

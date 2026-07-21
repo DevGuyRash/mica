@@ -84,23 +84,37 @@ export function openCalloutEditorFor(
 			paintType();
 			typeBtn.addEventListener("click", () => {
 				closeTypePicker?.();
+				typeBtn.setAttribute("aria-expanded", "true");
 				const panel = row.createDiv({ cls: "mica-popover mica-coedit-typepop" }) as HTMLElement & {
 					micaClose?: () => void;
 				};
 				let closed = false;
-				const close = (): void => {
+				function closeOwned(): void {
+					close();
+				}
+				const close = (restoreFocus = false): void => {
 					if (closed) return;
 					closed = true;
 					panel.remove();
 					document.removeEventListener("pointerdown", onOut, true);
-					if (closeTypePicker === close) closeTypePicker = null;
+					document.removeEventListener("keydown", onKey, true);
+					if (closeTypePicker === closeOwned) closeTypePicker = null;
+					typeBtn.setAttribute("aria-expanded", "false");
+					if (restoreFocus && typeBtn.isConnected) typeBtn.focus();
 				};
-				closeTypePicker = close;
-				panel.micaClose = close;
+				closeTypePicker = closeOwned;
+				panel.micaClose = () => close();
 				const onOut = (ev: PointerEvent): void => {
 					if (!panel.contains(ev.target as Node)) close();
 				};
+				const onKey = (event: KeyboardEvent): void => {
+					if (event.key !== "Escape") return;
+					event.preventDefault();
+					event.stopPropagation();
+					close(true);
+				};
 				document.addEventListener("pointerdown", onOut, true);
+				document.addEventListener("keydown", onKey, true);
 				buildCalloutTypeGrid(panel, ctx.app, (t) => {
 					state.type = t.id;
 					paintType();

@@ -17,6 +17,8 @@ import { DEFAULT_SETTINGS, MicaSettingTab, type MicaSettings } from "./settings"
 import { setToolbarConfig } from "./ui/toolSpec";
 import { disposeToolbarUi } from "./ui/toolbarView";
 import type { BlockUi } from "./ui/blockShell";
+import { setActionMenuTrigger } from "./ui/actionMenu";
+import { normalizeCustomToolConfig } from "./ui/customToolConfig";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, the
@@ -33,6 +35,10 @@ export default class MicaPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await initCore();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
+		const customConfig = normalizeCustomToolConfig(this.settings.customTools ?? [], this.settings.toolbarLayout);
+		this.settings.customTools = customConfig.customTools;
+		this.settings.toolbarLayout = customConfig.toolbarLayout;
+		if (customConfig.changed) await this.saveSettings();
 		this.applyStyleVars();
 		this.applyToolbarConfig();
 		this.engine = new VersionEngine(this);
@@ -197,9 +203,17 @@ export default class MicaPlugin extends Plugin {
 			customs: this.settings.customTools,
 			onDefaultChange: (groupId, variantId) => {
 				this.settings.toolbarDefaults[groupId] = variantId;
+				// Repaint the same default in every mounted toolbar without replacing
+				// any editor document or undo history.
+				this.applyToolbarConfig();
 				void this.saveSettings();
 			},
 		});
+	}
+
+	/** Preferences whose observable contract begins with the next editor/modal. */
+	applyNextOpenSettings(): void {
+		setSaveShortcut(this.settings.saveShortcut);
 	}
 
 	/**
@@ -233,13 +247,20 @@ export default class MicaPlugin extends Plugin {
 		b.setAttribute("data-mica-tabstyle", s.tabStyle);
 		b.setAttribute("data-mica-grip", s.dragHandlePosition);
 		setEditorBehavior(s.editorClickOutside);
-		setEditorViewPrefs({ lineNumbers: s.editorLineNumbers, whitespace: s.editorWhitespace });
-		setSaveShortcut(s.saveShortcut);
+		setActionMenuTrigger(s.actionMenuTrigger);
+		setEditorViewPrefs({
+			lineNumbers: s.editorLineNumbers,
+			whitespace: s.editorWhitespace,
+			liveSyntax: s.editorLiveSyntaxStyling,
+		});
+		this.applyNextOpenSettings();
 		registerViewPrefsPersistence((p) => {
 			this.settings.editorLineNumbers = p.lineNumbers;
 			this.settings.editorWhitespace = p.whitespace;
+			this.settings.editorLiveSyntaxStyling = p.liveSyntax;
 			void this.saveSettings();
 		});
+		document.dispatchEvent(new CustomEvent("mica-settings-change"));
 		b.toggleClass("mica-animate", s.animations);
 		b.toggleClass("mica-outlines", s.showOutlines);
 		const set = (k: string, v: string | null): void => {

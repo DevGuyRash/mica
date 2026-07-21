@@ -3,8 +3,9 @@ import type { StructOp } from "../cst/ops";
 import type { MicaNode } from "../wasm/bridge";
 import type { RenderCtx } from "./blockShell";
 import { EditorLightbox } from "./lightbox";
-import { MdEditor, saveShortcutLabel } from "./mdEditor";
+import { editorViewPrefs, MdEditor, saveShortcutLabel, toggleViewPref } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
+import { mountActionMenu, type ActionSpec } from "./actionMenu";
 
 export interface RegionTarget {
 	path: number[];
@@ -210,17 +211,20 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	const cancel = bar.createEl("button", { cls: "mica-qe-cancel", text: "Cancel", attr: { type: "button" } });
 	const tools = bar.createDiv({ cls: "mica-qe-tools" });
 	bar.createDiv({ cls: "mica-footer-spacer" });
-	const expand = bar.createEl("button", {
-		cls: "clickable-icon mica-qe-expand",
-		attr: { type: "button", "aria-label": "Open in the full editor (Ctrl/Cmd+click a section does this directly)" },
+	const lineBtn = bar.createEl("button", {
+		cls: "clickable-icon mica-qe-lines",
+		attr: { type: "button", "aria-label": "Toggle line numbers", "aria-pressed": "false" },
 	});
-	setIcon(expand, "maximize-2");
+	setIcon(lineBtn, "list-ordered");
 
 	const host = region.createDiv({ cls: "mica-qe-host" });
 	if (!(ctx.editorAutosize ?? true)) host.addClass("is-fixed");
 
 	let discardArmed = false;
+	let discardTimer: number | null = null;
 	const disarm = (): void => {
+		if (discardTimer !== null) window.clearTimeout(discardTimer);
+		discardTimer = null;
 		if (!discardArmed) return;
 		discardArmed = false;
 		cancel.removeClass("mica-danger");
@@ -241,20 +245,73 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	});
 
 	const destroyToolbar = buildToolbar(tools, ctx.app, () => editor.view, true);
+	const updateLineButton = (): void => {
+		const on = editorViewPrefs().lineNumbers;
+		lineBtn.setAttribute("aria-pressed", String(on));
+		lineBtn.toggleClass("is-on", on);
+	};
+	lineBtn.addEventListener("mousedown", (event) => event.preventDefault());
+	lineBtn.addEventListener("click", () => toggleViewPref("lineNumbers"));
+	document.addEventListener("mica-editor-prefs-change", updateLineButton);
+	updateLineButton();
+	const openExpanded = (): void => {
+		disarm();
+		openEditors.delete(entry);
+		const value = editor.getValue();
+		destroyToolbar();
+		actionMenu.destroy();
+		document.removeEventListener("mica-editor-prefs-change", updateLineButton);
+		editor.destroy();
+		region.removeClass("is-editing");
+		ctx.repaintRegion?.(region, target);
+		openLightboxFor(ctx, target, value);
+	};
+	const actionMenu = mountActionMenu(
+		bar,
+		() => {
+			const prefs = editorViewPrefs();
+			return [
+				{ id: "expand", label: "Open in the full editor", icon: "maximize-2", run: openExpanded },
+				{
+					id: "whitespace",
+					label: "Show whitespace",
+					icon: "pilcrow",
+					checked: prefs.whitespace,
+					run: () => toggleViewPref("whitespace"),
+				},
+				{
+					id: "syntax",
+					label: "Style Markdown source",
+					icon: "wand-sparkles",
+					checked: prefs.liveSyntax,
+					run: () => toggleViewPref("liveSyntax"),
+				},
+			] satisfies ActionSpec[];
+		},
+		"mica-qe-actions",
+		"Editor actions",
+		ctx.app,
+	);
 
 	const closeToView = (): void => {
+		disarm();
 		openEditors.delete(entry);
 		setDraft(null);
 		destroyToolbar();
+		actionMenu.destroy();
+		document.removeEventListener("mica-editor-prefs-change", updateLineButton);
 		editor.destroy();
 		region.removeClass("is-editing");
 		if (region.isConnected) ctx.repaintRegion?.(region, target);
 	};
 	const preserveDraft = (value: string): void => setDraft(value === target.original ? null : value);
 	const destroyDetached = (): void => {
+		disarm();
 		openEditors.delete(entry);
 		preserveDraft(editor.getValue());
 		destroyToolbar();
+		actionMenu.destroy();
+		document.removeEventListener("mica-editor-prefs-change", updateLineButton);
 		editor.destroy();
 	};
 	const opFor = (value: string): StructOp => ({
@@ -286,6 +343,10 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	const commit = (): void => commitAllOpen();
 
 	const requestCancel = (): void => {
+		if (actionMenu.isOpen()) {
+			actionMenu.close();
+			return;
+		}
 		if (editor.getValue() === target.original || discardArmed) {
 			closeToView();
 			return;
@@ -293,23 +354,13 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		discardArmed = true;
 		cancel.addClass("mica-danger");
 		cancel.setText("Discard changes?");
-		window.setTimeout(disarm, 2500);
+		discardTimer = window.setTimeout(disarm, 2500);
 	};
 
 	save.addEventListener("mousedown", (e) => e.preventDefault());
 	save.addEventListener("click", commit);
 	cancel.addEventListener("mousedown", (e) => e.preventDefault());
 	cancel.addEventListener("click", requestCancel);
-	expand.addEventListener("mousedown", (e) => e.preventDefault());
-	expand.addEventListener("click", () => {
-		openEditors.delete(entry);
-		const value = editor.getValue();
-		destroyToolbar();
-		editor.destroy();
-		region.removeClass("is-editing");
-		ctx.repaintRegion?.(region, target);
-		openLightboxFor(ctx, target, value);
-	});
 }
 
 /** The full-screen editor for a region (Expand, or Ctrl/Cmd+click). */

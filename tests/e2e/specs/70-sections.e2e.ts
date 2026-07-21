@@ -41,6 +41,55 @@ async function clickLatestMenuItem(title: string): Promise<void> {
 	}, title);
 }
 
+async function expectOneLogicalEditor(expected: string): Promise<void> {
+	await browser.waitUntil(
+		() =>
+			browser.executeObsidian(({ app, obsidian }) => {
+				const root = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.containerEl;
+				return (
+					root?.querySelectorAll(".mica-lp .mica-logical-section").length === 1 &&
+					root.querySelectorAll(".mica-lp .mica-region").length === 1
+				);
+			}),
+		{ timeout: 8000, timeoutMsg: "the normalized body did not render as one logical region" },
+	);
+	await browser.executeObsidian(({ app, obsidian }) => {
+		const root = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.containerEl;
+		(root?.querySelector(".mica-lp .mica-logical-section .mica-md") as HTMLElement | null)?.click();
+	});
+	await browser.waitUntil(
+		() =>
+			browser.executeObsidian(({ app, obsidian }) => {
+				const root = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.containerEl;
+				return root?.querySelectorAll(".mica-lp .mica-logical-section .mica-mdeditor").length === 1;
+			}),
+		{ timeout: 8000, timeoutMsg: "the normalized body did not open one logical editor" },
+	);
+	const state = await browser.executeObsidian(({ app, obsidian }) => {
+		const root = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.containerEl;
+		const host = root?.querySelector(".mica-lp .mica-logical-section .mica-mdeditor") as
+			(HTMLElement & { micaEditor?: { getValue(): string } }) | null;
+		return {
+			editors: root?.querySelectorAll(".mica-lp .mica-mdeditor").length ?? -1,
+			value: host?.micaEditor?.getValue() ?? null,
+		};
+	});
+	expect(state.editors).toBe(1);
+	expect(state.value).toBe(expected);
+	await browser.executeObsidian(({ app, obsidian }) => {
+		const root = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.containerEl;
+		(root?.querySelector(".mica-lp .mica-qe-cancel") as HTMLButtonElement | null)?.click();
+	});
+	await browser.waitUntil(
+		() =>
+			browser.executeObsidian(({ app, obsidian }) => {
+				const root = app.workspace.getActiveViewOfType(obsidian.MarkdownView)?.containerEl;
+				return root?.querySelectorAll(".mica-lp .mica-mdeditor").length === 0;
+			}),
+		{ timeout: 8000, timeoutMsg: "the unchanged normalized editor did not close" },
+	);
+}
+
 describe("structured sections", function () {
 	it("keeps multiple paragraphs typed in one text editor as one section", async function () {
 		await seedAndOpen("MultiParagraphSection.md", "Intro.\n\n```mica id=multi-paragraph\nAlpha\n```\n");
@@ -73,18 +122,66 @@ describe("structured sections", function () {
 		).toBe(true);
 	});
 
+	it("restores normalized history as one logical editor", async function () {
+		const note = "NormalizedHistorySection.md";
+		const block = "normalized-history-section";
+		const historicalBody =
+			'Historical paragraph.\n\n> [!note] Historical detail\n> Keep this attached.\n\n```js\nconsole.log("historical");\n```\n';
+		const currentBody =
+			'Current paragraph.\n\n> [!tip] Current detail\n> Keep this attached too.\n\n```ts\nconsole.log("current");\n```\n';
+		const historical = `:::section\n${historicalBody}:::\n`;
+		const current = `:::section\n${currentBody}:::\n`;
+		await seedAndOpen(note, `Intro.\n\n\`\`\`\`mica id=${block}\n${historical}\`\`\`\`\n`);
+		await browser.executeObsidian((_, path) => window.mica.versionsSnapshot(path), note);
+		const [historicalVersion] = await browser.executeObsidian(
+			(_, path, id) => window.mica.versionsList(path, id),
+			note,
+			block,
+		);
+		if (!historicalVersion) throw new Error("the historical normalized version was not snapshotted");
+
+		await browser.executeObsidian(
+			async (_, path, id, source) => window.mica.blockUpdate(path, id, source),
+			note,
+			block,
+			current,
+		);
+		await browser.waitUntil(
+			async () =>
+				(await browser.executeObsidian((_, path, id) => window.mica.blockRead(path, id), note, block)) ===
+				current,
+			{ timeout: 8000, timeoutMsg: "the current normalized body did not become live" },
+		);
+		await expectOneLogicalEditor(currentBody);
+
+		await browser.executeObsidian(
+			(_, path, id, hash) => window.mica.versionsRevert(path, id, hash),
+			note,
+			block,
+			historicalVersion.hash,
+		);
+		await browser.waitUntil(
+			async () =>
+				(await browser.executeObsidian((_, path, id) => window.mica.blockRead(path, id), note, block)) ===
+				historical,
+			{ timeout: 8000, timeoutMsg: "the historical normalized body did not restore byte-exactly" },
+		);
+		await expectOneLogicalEditor(historicalBody);
+	});
+
 	it("edits a named code block and grows both inner and Mica fences safely", async function () {
 		await seedAndOpen("StructuredCode.md", "Intro.\n\n````mica id=code-structured\n```md\n# before\n```\n````\n");
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(() =>
-					Boolean(document.querySelector('.mica-lp [aria-label="Edit code block (language, body)"]')),
+					Boolean(document.querySelector('.mica-lp .mica-region [data-mica-actions~="fields"]')),
 				),
 			{ timeout: 8000, timeoutMsg: "the structured code action never rendered" },
 		);
 		await browser.executeObsidian(() => {
-			(document.querySelector('.mica-lp [aria-label="Edit code block (language, body)"]') as HTMLElement).click();
+			(document.querySelector('.mica-lp .mica-region [data-mica-actions~="fields"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Edit language and code…");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-codeedit-info"))),
 			{ timeout: 8000, timeoutMsg: "the structured code editor never opened" },
@@ -123,21 +220,14 @@ describe("structured sections", function () {
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(() =>
-					Boolean(
-						document.querySelector(
-							'.mica-lp .mica-nested-code [aria-label="Edit this code block (language, body)"]',
-						),
-					),
+					Boolean(document.querySelector('.mica-lp .mica-nested-code [data-mica-actions~="edit"]')),
 				),
 			{ timeout: 8000, timeoutMsg: "nested code did not receive unambiguous tools" },
 		);
 		await browser.executeObsidian(() => {
-			(
-				document.querySelector(
-					'.mica-lp .mica-nested-code [aria-label="Edit this code block (language, body)"]',
-				) as HTMLElement
-			).click();
+			(document.querySelector('.mica-lp .mica-nested-code [data-mica-actions~="edit"]') as HTMLElement).click();
 		});
+		await clickLatestMenuItem("Edit this code block");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-codeedit-info"))),
 			{ timeout: 8000, timeoutMsg: "nested code editor never opened" },
@@ -159,11 +249,14 @@ describe("structured sections", function () {
 	it("converts among rendered Markdown, callout, code, and source editing", async function () {
 		await seedAndOpen("SectionModes.md", "Intro.\n\n```mica id=section-modes\nAlpha **bold**\n```\n");
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-section-mode"))),
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector(".mica-lp .mica-region .mica-entity-menu")),
+				),
 			{ timeout: 8000, timeoutMsg: "section mode control never rendered" },
 		);
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-section-mode") as HTMLElement).click();
+			(document.querySelector(".mica-lp .mica-region .mica-entity-menu") as HTMLElement).click();
 		});
 		await clickLatestMenuItem("Convert to Callout");
 		await browser.waitUntil(async () => (await documentSource()).includes("> [!note]\n> Alpha **bold**"), {
@@ -172,7 +265,7 @@ describe("structured sections", function () {
 		});
 
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-section-mode") as HTMLElement).click();
+			(document.querySelector(".mica-lp .mica-region .mica-entity-menu") as HTMLElement).click();
 		});
 		await clickLatestMenuItem("Convert to Code block");
 		await browser.waitUntil(async () => (await documentSource()).includes("```\nAlpha **bold**\n```"), {
@@ -181,7 +274,7 @@ describe("structured sections", function () {
 		});
 
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-section-mode") as HTMLElement).click();
+			(document.querySelector(".mica-lp .mica-region .mica-entity-menu") as HTMLElement).click();
 		});
 		await clickLatestMenuItem("Edit source");
 		await browser.waitUntil(
@@ -251,7 +344,7 @@ describe("structured sections", function () {
 			{ timeout: 8000, timeoutMsg: "the logical section did not render as one region" },
 		);
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp .mica-logical-section .mica-section-mode") as HTMLElement).click();
+			(document.querySelector(".mica-lp .mica-logical-section .mica-entity-menu") as HTMLElement).click();
 		});
 		await clickLatestMenuItem("Uncombine section");
 		await browser.waitUntil(async () => !(await documentSource()).includes(":::section"), {

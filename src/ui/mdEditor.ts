@@ -1,11 +1,20 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { Compartment } from "@codemirror/state";
-import { highlightWhitespace, lineNumbers } from "@codemirror/view";
+import { Compartment, StateEffect, type Range } from "@codemirror/state";
+import {
+	Decoration,
+	EditorView,
+	highlightWhitespace,
+	keymap,
+	lineNumbers,
+	placeholder as cmPlaceholder,
+	ViewPlugin,
+	type DecorationSet,
+	type ViewUpdate,
+} from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { resolveCodeLanguage } from "./codeLangs";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { Platform, Scope, type App } from "obsidian";
 
@@ -68,9 +77,10 @@ function saveKeyScope(): [Array<"Mod" | "Shift">, string] | null {
 export interface EditorViewPrefs {
 	lineNumbers: boolean;
 	whitespace: boolean;
+	liveSyntax: boolean;
 }
 
-let viewPrefs: EditorViewPrefs = { lineNumbers: false, whitespace: false };
+let viewPrefs: EditorViewPrefs = { lineNumbers: false, whitespace: false, liveSyntax: true };
 let persistPrefs: ((prefs: EditorViewPrefs) => void) | null = null;
 const openInstances = new Set<MdEditor>();
 
@@ -78,6 +88,7 @@ const openInstances = new Set<MdEditor>();
 export function setEditorViewPrefs(prefs: EditorViewPrefs): void {
 	viewPrefs = prefs;
 	for (const ed of openInstances) ed.applyViewPrefs();
+	if (typeof document !== "undefined") document.dispatchEvent(new CustomEvent("mica-editor-prefs-change"));
 }
 
 /** The host registers how toggled prefs persist (plugin settings). */
@@ -127,8 +138,119 @@ export type EditorLanguage = { kind: "markdown" } | { kind: "code"; info: string
 
 const MARKDOWN_LANGUAGE: EditorLanguage = { kind: "markdown" };
 
+interface SearchHighlights {
+	ranges: Uint32Array;
+	current: number;
+}
+
+const setSearchHighlightsEffect = StateEffect.define<SearchHighlights>();
+
+/** Search results may be numerous; retain compact offsets but create CM
+ * decorations only for visible ranges. Rebuilding is O(visible matches). */
+class SearchHighlightPlugin {
+	decorations: DecorationSet = Decoration.none;
+	private ranges: Uint32Array<ArrayBufferLike> = new Uint32Array();
+	private current = -1;
+
+	constructor(view: EditorView) {
+		this.rebuild(view);
+	}
+
+	update(update: ViewUpdate): void {
+		let changed = update.viewportChanged;
+		if (update.docChanged) {
+			this.ranges = new Uint32Array();
+			this.current = -1;
+			changed = true;
+		}
+		for (const effect of update.transactions.flatMap((transaction) => transaction.effects)) {
+			if (!effect.is(setSearchHighlightsEffect)) continue;
+			this.ranges = effect.value.ranges;
+			this.current = effect.value.current;
+			changed = true;
+		}
+		if (changed) this.rebuild(update.view);
+	}
+
+	private rebuild(view: EditorView): void {
+		const marks: { from: number; to: number; decoration: Decoration }[] = [];
+		for (const visible of view.visibleRanges) {
+			let pair = lowerBoundPair(this.ranges, visible.from);
+			if (pair > 0 && this.ranges[pair * 2 - 1] >= visible.from) pair--;
+			for (; pair * 2 < this.ranges.length; pair++) {
+				const from = this.ranges[pair * 2];
+				const rawTo = this.ranges[pair * 2 + 1];
+				if (from > visible.to) break;
+				if (rawTo < visible.from) continue;
+				const to = rawTo > from ? rawTo : Math.min(view.state.doc.length, from + 1);
+				if (to <= from) continue;
+				marks.push({
+					from,
+					to,
+					decoration: Decoration.mark({
+						class: pair === this.current ? "mica-search-current" : "mica-search-match",
+					}),
+				});
+			}
+		}
+		this.decorations = Decoration.set(
+			marks.map(({ from, to, decoration }) => decoration.range(from, to)),
+			true,
+		);
+	}
+}
+
+const searchHighlightExtension = ViewPlugin.fromClass(SearchHighlightPlugin, {
+	decorations: (plugin) => plugin.decorations,
+});
+
+/** Obsidian's ==highlight== syntax is not CommonMark. Scan only visible
+ * ranges, preserve every marker, and let the document parser handle all
+ * standard Markdown incrementally. */
+class MarkdownHighlightPlugin {
+	decorations: DecorationSet;
+
+	constructor(view: EditorView) {
+		this.decorations = this.build(view);
+	}
+
+	update(update: ViewUpdate): void {
+		if (update.docChanged || update.viewportChanged) this.decorations = this.build(update.view);
+	}
+
+	private build(view: EditorView): DecorationSet {
+		const decorations: Range<Decoration>[] = [];
+		for (const visible of view.visibleRanges) {
+			const text = view.state.sliceDoc(visible.from, visible.to);
+			const pattern = /==(?=\S)(.*?\S)==/gu;
+			let match: RegExpExecArray | null;
+			while ((match = pattern.exec(text)) !== null) {
+				const from = visible.from + match.index;
+				const to = from + match[0].length;
+				decorations.push(Decoration.mark({ class: "mica-mhighlight" }).range(from, to));
+			}
+		}
+		return Decoration.set(decorations, true);
+	}
+}
+
+const markdownHighlightExtension = ViewPlugin.fromClass(MarkdownHighlightPlugin, {
+	decorations: (plugin) => plugin.decorations,
+});
+
+function lowerBoundPair(ranges: Uint32Array, position: number): number {
+	let low = 0;
+	let high = ranges.length / 2;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if (ranges[middle * 2] < position) low = middle + 1;
+		else high = middle;
+	}
+	return low;
+}
+
 function markdownExtension(): Extension {
-	return markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage });
+	return [markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage }), markdownHighlightExtension];
 }
 
 function infoLanguage(info: string): string {
@@ -181,7 +303,7 @@ const micaEditorTheme = EditorView.theme({
 		height: "100%",
 		backgroundColor: "transparent",
 		fontSize: "var(--font-text-size, 16px)",
-		color: "var(--text-normal, #ddd)",
+		color: "var(--text-normal)",
 	},
 	"&.cm-focused": { outline: "none" },
 	".cm-scroller": {
@@ -198,37 +320,104 @@ const micaEditorTheme = EditorView.theme({
 		minHeight: "2.2em",
 	},
 	".cm-line": { padding: "1px 4px" },
+	".cm-gutters": {
+		background: "var(--mica-gutter-background, transparent)",
+		color: "var(--mica-gutter-foreground, var(--text-faint))",
+		borderRight: "1px solid var(--mica-gutter-divider, var(--background-modifier-border))",
+		fontFamily: "var(--font-monospace, monospace)",
+		fontSize: "var(--mica-gutter-font-size, 0.78em)",
+		fontVariantNumeric: "tabular-nums",
+	},
+	".cm-lineNumbers .cm-gutterElement": {
+		minWidth: "calc(2ch + var(--mica-gutter-padding, 8px))",
+		padding: "0 var(--mica-gutter-padding, 8px) 0 4px",
+	},
+	".cm-activeLineGutter": {
+		background: "var(--mica-gutter-active-background, color-mix(in srgb, var(--mica-accent) 8%, transparent))",
+		color: "var(--mica-gutter-active-foreground, var(--text-muted))",
+	},
 	".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--mica-accent, var(--text-accent))" },
 	"&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection": {
-		background: "color-mix(in srgb, var(--mica-accent, #7c5cff) 25%, transparent)",
+		background: "color-mix(in srgb, var(--mica-accent) 25%, transparent)",
 	},
-	".cm-activeLine": { background: "color-mix(in srgb, var(--mica-accent, #7c5cff) 7%, transparent)" },
-	".cm-placeholder": { color: "var(--text-faint, #888)", fontStyle: "italic" },
-	".mica-mh": { fontWeight: "700", color: "var(--text-normal, #eee)" },
-	".mica-mh1": { fontSize: "1.4em" },
-	".mica-mh2": { fontSize: "1.25em" },
-	".mica-mh3": { fontSize: "1.12em" },
-	".mica-mstrong": { fontWeight: "700" },
-	".mica-mem": { fontStyle: "italic" },
-	".mica-mstrike": { textDecoration: "line-through", color: "var(--text-muted, #999)" },
-	".mica-mcode": {
+	".cm-activeLine": { background: "color-mix(in srgb, var(--mica-accent) 7%, transparent)" },
+	".mica-search-match": {
+		background: "var(--mica-search-match, color-mix(in srgb, var(--text-accent) 20%, transparent))",
+		borderRadius: "2px",
+	},
+	".mica-search-current": {
+		background: "var(--mica-search-current, color-mix(in srgb, var(--text-accent) 38%, transparent))",
+		boxShadow: "inset 0 -1px 0 var(--text-accent)",
+		borderRadius: "2px",
+	},
+	".cm-placeholder": { color: "var(--text-faint)", fontStyle: "italic" },
+	"&[data-mica-live-syntax='on'] .mica-mh": {
+		fontWeight: "var(--bold-weight, 700)",
+		color: "var(--text-normal)",
+	},
+	"&[data-mica-live-syntax='on'] .mica-mstrong": { fontWeight: "var(--bold-weight, 700)" },
+	"&[data-mica-live-syntax='on'] .mica-mem": { fontStyle: "italic" },
+	"&[data-mica-live-syntax='on'] .mica-mstrike": {
+		textDecoration: "line-through",
+		color: "var(--text-muted)",
+	},
+	"&[data-mica-live-syntax='on'] .mica-mcode": {
 		fontFamily: "var(--font-monospace, monospace)",
 		fontSize: "0.92em",
-		color: "var(--code-normal, var(--text-normal, #eee))",
+		color: "var(--code-normal, var(--text-normal))",
 	},
-	".mica-mquote": { color: "var(--text-muted, #999)" },
-	".mica-mlink, .mica-murl": { color: "var(--link-color, var(--text-accent, #7c5cff))" },
-	".mica-mmark": { color: "color-mix(in srgb, var(--mica-accent, #7c5cff) 75%, var(--text-faint, #777))" },
-	".mica-ck": { color: "var(--code-keyword, #cf8e6d)" },
-	".mica-cs": { color: "var(--code-string, #6aab73)" },
-	".mica-cc": { color: "var(--code-comment, #7a7e85)", fontStyle: "italic" },
-	".mica-cv": { color: "var(--code-value, #2aacb8)" },
-	".mica-cf": { color: "var(--code-function, #56a8f5)" },
-	".mica-ct": { color: "var(--code-important, #c77dbb)" },
-	".mica-cp": { color: "var(--code-property, #c77dbb)" },
-	".mica-cg": { color: "var(--code-tag, #e8bf6a)" },
-	".mica-co": { color: "var(--code-operator, var(--text-muted, #999))" },
-	".mica-cm": { color: "var(--code-comment, #7a7e85)" },
+	"&[data-mica-live-syntax='on'] .mica-mquote": { color: "var(--text-muted)" },
+	"&[data-mica-live-syntax='on'] .mica-mlink, &[data-mica-live-syntax='on'] .mica-murl": {
+		color: "var(--link-color, var(--text-accent))",
+	},
+	"&[data-mica-live-syntax='on'] .mica-mmark": {
+		color: "var(--text-faint)",
+	},
+	"&[data-mica-live-syntax='on'] .mica-mhighlight": {
+		background: "var(--text-highlight-bg)",
+		borderRadius: "2px",
+	},
+	"&[data-mica-markdown-syntax='off'] .mica-ck, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-ck":
+		{
+			color: "var(--code-keyword, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cs, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cs":
+		{
+			color: "var(--code-string, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cc, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cc":
+		{
+			color: "var(--code-comment, var(--text-muted))",
+			fontStyle: "italic",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cv, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cv":
+		{
+			color: "var(--code-value, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cf, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cf":
+		{
+			color: "var(--code-function, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-ct, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-ct":
+		{
+			color: "var(--code-important, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cp, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cp":
+		{
+			color: "var(--code-property, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cg, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cg":
+		{
+			color: "var(--code-tag, var(--text-normal))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-co, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-co":
+		{
+			color: "var(--code-operator, var(--text-muted))",
+		},
+	"&[data-mica-markdown-syntax='off'] .mica-cm, &[data-mica-markdown-syntax='on'][data-mica-live-syntax='on'] .mica-cm":
+		{
+			color: "var(--code-comment, var(--text-muted))",
+		},
 });
 
 /**
@@ -339,17 +528,20 @@ export class MdEditor {
 					this.syntax.of(initialLanguage.kind === "markdown" ? markdownExtension() : []),
 					syntaxHighlighting(mdHighlight),
 					micaEditorTheme,
+					searchHighlightExtension,
 					this.viewOpts.of(viewPrefsExtensions()),
 					EditorView.lineWrapping,
 					cmPlaceholder(opts.placeholder ?? "Write markdown…"),
 					EditorView.updateListener.of((u) => {
 						if (u.docChanged) opts.onChange?.(u.state.sliceDoc());
-						if (u.selectionSet || u.docChanged) opts.onSelection?.();
+						else if (u.selectionSet) opts.onSelection?.();
 					}),
 				],
 			}),
 		});
 		this.view.dom.dataset.micaEditorKind = initialLanguage.kind;
+		this.paintSyntaxKind(initialLanguage);
+		this.view.dom.dataset.micaLiveSyntax = viewPrefs.liveSyntax ? "on" : "off";
 		if (initialLanguage.kind === "code") this.setLanguage(initialLanguage);
 		// Clicking the empty space BELOW the last line should behave like
 		// clicking the end of the document. Listen on the LIGHT-DOM host:
@@ -357,7 +549,25 @@ export class MdEditor {
 		// listener, and composedPath() still lets us skip real content hits.
 		this.host.addEventListener("mousedown", (e) => {
 			const path = e.composedPath() as HTMLElement[];
-			if (path.some((n) => n instanceof HTMLElement && n.classList?.contains("cm-content"))) return;
+			if (
+				path.some(
+					(n) =>
+						n instanceof HTMLElement &&
+						(n.classList?.contains("cm-content") ||
+							n.classList?.contains("cm-gutters") ||
+							n.classList?.contains("cm-panel") ||
+							n.classList?.contains("cm-tooltip")),
+				)
+			)
+				return;
+			// Only the scroller's own empty area represents space below the last
+			// line. Scrollbars and unrelated shadow chrome keep their native action.
+			const target = path.find((node) => node instanceof HTMLElement) as HTMLElement | undefined;
+			if (target !== this.host && !target?.classList.contains("cm-scroller")) return;
+			if (target?.classList.contains("cm-scroller")) {
+				const rect = target.getBoundingClientRect();
+				if (e.clientX >= rect.left + target.clientWidth || e.clientY >= rect.top + target.clientHeight) return;
+			}
 			e.preventDefault();
 			this.view.dispatch({ selection: { anchor: this.view.state.doc.length } });
 			this.view.focus();
@@ -382,6 +592,19 @@ export class MdEditor {
 		this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: value } });
 	}
 
+	setSearchHighlights(ranges: Uint32Array, current: number): void {
+		this.view.dispatch({ effects: setSearchHighlightsEffect.of({ ranges, current }) });
+	}
+
+	revealRange(from: number, to: number): void {
+		const end = Math.max(from, to);
+		this.view.dispatch({
+			selection: { anchor: from, head: end },
+			effects: EditorView.scrollIntoView(from, { y: "center" }),
+		});
+		this.view.focus();
+	}
+
 	focus(): void {
 		this.view.focus();
 	}
@@ -393,6 +616,7 @@ export class MdEditor {
 		if (this.destroyed) return;
 		const request = ++this.syntaxRequest;
 		this.view.dom.dataset.micaEditorKind = language.kind;
+		this.paintSyntaxKind(language);
 		if (language.kind === "markdown") {
 			this.view.dispatch({ effects: this.syntax.reconfigure(markdownExtension()) });
 			return;
@@ -408,7 +632,13 @@ export class MdEditor {
 			.load()
 			.then((support) => {
 				if (this.destroyed || request !== this.syntaxRequest) return;
-				this.view.dispatch({ effects: this.syntax.reconfigure(support) });
+				this.view.dispatch({
+					effects: this.syntax.reconfigure(
+						["md", "markdown"].includes(name.toLocaleLowerCase())
+							? [support, markdownHighlightExtension]
+							: support,
+					),
+				});
 			})
 			.catch(() => {
 				// Optional highlighting must never make an otherwise valid code fence
@@ -416,8 +646,16 @@ export class MdEditor {
 			});
 	}
 
+	private paintSyntaxKind(language: EditorLanguage): void {
+		const markdownSyntax =
+			language.kind === "markdown" ||
+			["md", "markdown"].includes(infoLanguage(language.info).toLocaleLowerCase());
+		this.view.dom.dataset.micaMarkdownSyntax = markdownSyntax ? "on" : "off";
+	}
+
 	/** Re-apply the shared view prefs (line numbers / whitespace) live. */
 	applyViewPrefs(): void {
+		this.view.dom.dataset.micaLiveSyntax = viewPrefs.liveSyntax ? "on" : "off";
 		this.view.dispatch({ effects: this.viewOpts.reconfigure(viewPrefsExtensions()) });
 	}
 
