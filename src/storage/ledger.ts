@@ -11,6 +11,41 @@ export const MAX_FUTURE_EVENT_SKEW_MS = 86_400_000; // 24 hours
 
 const HASH_PATTERN = /^b3:(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 
+const LEDGER_EVENT_TYPES = new Set(["add-version", "replace-version", "set-head", "label"]);
+
+/** Raised when valid JSON names a ledger event type this reader cannot safely
+ * interpret. This is a format-compatibility failure, not a torn record. */
+export class UnknownLedgerEventTypeError extends Error {
+	constructor(readonly eventType: string) {
+		super(`Mica: unknown ledger event type ${JSON.stringify(eventType)}`);
+		this.name = "UnknownLedgerEventTypeError";
+	}
+}
+
+export type InvalidLedgerEventField = "eid" | "ts" | "block" | "hash" | "target";
+
+/** Raised when a syntactically valid replacement record cannot be interpreted
+ * safely. Unlike malformed JSON, this record advertises a storage contract and
+ * therefore represents sidecar corruption rather than a recoverable torn tail. */
+export class InvalidLedgerEventError extends Error {
+	readonly eventType = "replace-version";
+
+	constructor(
+		readonly field: InvalidLedgerEventField,
+		readonly reason: string,
+	) {
+		super(`Mica: invalid replace-version event: ${field} ${reason}`);
+		this.name = "InvalidLedgerEventError";
+	}
+}
+
+/** Fail closed when a syntactically valid record advertises a typed ledger
+ * contract this reader does not understand. Untyped JSON remains ignorable. */
+export function assertKnownLedgerEventType(value: unknown): void {
+	if (!isRecord(value) || typeof value.type !== "string") return;
+	if (!LEDGER_EVENT_TYPES.has(value.type)) throw new UnknownLedgerEventTypeError(value.type);
+}
+
 export function isObjectHash(value: unknown): value is string {
 	return typeof value === "string" && HASH_PATTERN.test(value);
 }
@@ -24,7 +59,8 @@ export function isLedgerEvent(value: unknown): value is LedgerEvent {
 export function isLedgerEventAt(value: unknown, nowMs: number): value is LedgerEvent {
 	if (!isRecord(value)) return false;
 	if (typeof value.eid !== "string" || typeof value.block !== "string") return false;
-	const latest = Math.min(MAX_EVENT_TIMESTAMP_MS, Math.max(0, nowMs) + MAX_FUTURE_EVENT_SKEW_MS);
+	if (value.type === "replace-version" && (!value.eid.length || !value.block.length)) return false;
+	const latest = latestEventTimestamp(nowMs);
 	if (!Number.isSafeInteger(value.ts) || (value.ts as number) < 0 || (value.ts as number) > latest) {
 		return false;
 	}
@@ -32,6 +68,8 @@ export function isLedgerEventAt(value: unknown, nowMs: number): value is LedgerE
 	switch (value.type) {
 		case "add-version":
 			return optionalString(value.label) && optionalString(value.origin) && optionalHash(value.parent);
+		case "replace-version":
+			return typeof value.target === "string" && value.target.length > 0;
 		case "set-head":
 			return true;
 		case "label":
@@ -67,24 +105,25 @@ export function parseLedgerDocument(text: string): ParsedLedger {
 			if (raw.length > MAX_LEDGER_LINE_BYTES || utf8ByteLength(raw) > MAX_LEDGER_LINE_BYTES) {
 				throw new Error(`Mica: ledger line exceeds ${MAX_LEDGER_LINE_BYTES} bytes`);
 			}
+			let value: unknown;
 			try {
-				const value: unknown = JSON.parse(trimmed);
-				if (isLedgerEventAt(value, now)) {
-					const previous = byEid.get(value.eid);
-					if (previous && !sameLedgerEvent(previous, value)) {
-						throw new Error(`Mica: ledger eid ${JSON.stringify(value.eid)} has conflicting events`);
-					}
-					if (!previous) {
-						byEid.set(value.eid, value);
-						events.push(value);
-					}
-				}
-			} catch (error) {
-				// A conflicting duplicate is an integrity failure, not a malformed
-				// line that can safely be ignored.
-				if (error instanceof Error && error.message.startsWith("Mica: ledger eid ")) throw error;
+				value = JSON.parse(trimmed);
+			} catch {
 				// Ignore malformed/truncated records. A later verified append always
 				// starts on a fresh line, so one damaged tail cannot hide recovery.
+				value = undefined;
+			}
+			assertKnownLedgerEventType(value);
+			assertValidReplacementLedgerEventAt(value, now);
+			if (isLedgerEventAt(value, now)) {
+				const previous = byEid.get(value.eid);
+				if (previous && !sameLedgerEvent(previous, value)) {
+					throw new Error(`Mica: ledger eid ${JSON.stringify(value.eid)} has conflicting events`);
+				}
+				if (!previous) {
+					byEid.set(value.eid, value);
+					events.push(value);
+				}
 			}
 		}
 		if (newline < 0) break;
@@ -121,8 +160,10 @@ export function classifyEventBatch(existing: readonly LedgerEvent[], intended: r
 
 export function validateEventBatch(events: readonly LedgerEvent[]): void {
 	const byEid = new Map<string, LedgerEvent>();
+	const now = Date.now();
 	for (const event of events) {
-		if (!isLedgerEvent(event)) throw new Error("Mica: refusing to append an invalid ledger event");
+		assertValidReplacementLedgerEventAt(event, now);
+		if (!isLedgerEventAt(event, now)) throw new Error("Mica: refusing to append an invalid ledger event");
 		const previous = byEid.get(event.eid);
 		if (previous && !sameLedgerEvent(previous, event)) {
 			throw new Error(`Mica: append batch reuses eid ${JSON.stringify(event.eid)} for different events`);
@@ -141,19 +182,44 @@ export function orderedLedgerEvents(events: readonly LedgerEvent[]): LedgerEvent
 
 /** Remint event identities without changing fold semantics. Sorting the minted
  * ids before assigning them removes any dependency on UUID-generator monotonicity
- * within one millisecond. */
+ * within one millisecond. Replacement targets are rewritten from a complete
+ * old-to-new eid map so copied histories remain self-contained. */
 export function remintLedgerEventIds(events: readonly LedgerEvent[], newEventId: () => string): LedgerEvent[] {
 	return remintOrderedLedgerEventIds(orderedLedgerEvents(events), newEventId);
 }
 
 /** Faster remint for an already-authoritatively-ordered history. Callers that
- * cache that order can clone it repeatedly without re-sorting the source. */
+ * cache that order can clone it repeatedly without re-sorting the source. A
+ * partial history containing an unresolved replacement target is rejected. */
 export function remintOrderedLedgerEventIds(
 	orderedEvents: readonly LedgerEvent[],
 	newEventId: () => string,
 ): LedgerEvent[] {
 	const eids = orderedEvents.map(() => newEventId()).sort(compareAscii);
-	return orderedEvents.map((event, index) => ({ ...event, eid: eids[index] }));
+	const minted = new Set<string>();
+	const remintedBySource = new Map<string, string>();
+	for (let index = 0; index < orderedEvents.length; index++) {
+		const event = orderedEvents[index];
+		const eid = eids[index];
+		if (remintedBySource.has(event.eid)) {
+			throw new Error(`Mica: cannot remint history with duplicate source eid ${JSON.stringify(event.eid)}`);
+		}
+		if (minted.has(eid)) throw new Error(`Mica: event id generator produced duplicate eid ${JSON.stringify(eid)}`);
+		remintedBySource.set(event.eid, eid);
+		minted.add(eid);
+	}
+	return orderedEvents.map((event) => {
+		const eid = remintedBySource.get(event.eid);
+		if (!eid) throw new Error(`Mica: missing reminted eid for ${JSON.stringify(event.eid)}`);
+		if (event.type !== "replace-version") return { ...event, eid };
+		const target = remintedBySource.get(event.target);
+		if (!target) {
+			throw new Error(
+				`Mica: replacement event ${JSON.stringify(event.eid)} has absent target ${JSON.stringify(event.target)}`,
+			);
+		}
+		return { ...event, eid, target };
+	});
 }
 
 function compareAscii(left: string, right: string): number {
@@ -177,6 +243,9 @@ function sameLedgerEvent(left: LedgerEvent, right: LedgerEvent): boolean {
 			(left.parent ?? null) === (right.parent ?? null)
 		);
 	}
+	if (left.type === "replace-version" && right.type === "replace-version") {
+		return left.target === right.target;
+	}
 	if (left.type === "label" && right.type === "label") return (left.label ?? null) === (right.label ?? null);
 	return left.type === "set-head" && right.type === "set-head";
 }
@@ -191,6 +260,31 @@ function optionalString(value: unknown): boolean {
 
 function optionalHash(value: unknown): boolean {
 	return value === undefined || value === null || isObjectHash(value);
+}
+
+function assertValidReplacementLedgerEventAt(value: unknown, nowMs: number): void {
+	if (!isRecord(value) || value.type !== "replace-version") return;
+	if (typeof value.eid !== "string" || value.eid.length === 0) {
+		throw new InvalidLedgerEventError("eid", "must be a non-empty string");
+	}
+	if (
+		!Number.isSafeInteger(value.ts) ||
+		(value.ts as number) < 0 ||
+		(value.ts as number) > latestEventTimestamp(nowMs)
+	) {
+		throw new InvalidLedgerEventError("ts", "must be an accepted non-negative integer timestamp");
+	}
+	if (typeof value.block !== "string" || value.block.length === 0) {
+		throw new InvalidLedgerEventError("block", "must be a non-empty string");
+	}
+	if (!isObjectHash(value.hash)) throw new InvalidLedgerEventError("hash", "must be a valid object hash");
+	if (typeof value.target !== "string" || value.target.length === 0) {
+		throw new InvalidLedgerEventError("target", "must be a non-empty string");
+	}
+}
+
+function latestEventTimestamp(nowMs: number): number {
+	return Math.min(MAX_EVENT_TIMESTAMP_MS, Math.max(0, nowMs) + MAX_FUTURE_EVENT_SKEW_MS);
 }
 
 /** Exact UTF-8 size with constant auxiliary space (TextEncoder allocates an

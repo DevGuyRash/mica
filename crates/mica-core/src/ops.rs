@@ -14,6 +14,7 @@
 
 use crate::parser::{parse_block_impl, Cst, Node};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Result of parsing, reducing, and serializing one block in core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,145 @@ pub struct AppliedText {
     pub changed: bool,
     /// Serialized block content; exact input bytes when `changed` is false.
     pub text: String,
+}
+
+/// Purpose: report whether a block body was already one logical section or
+/// provide the byte-preserving wrapped body.
+///
+/// # Arguments
+/// Not applicable; values are returned by [`normalize_section_impl`].
+///
+/// # Returns
+/// `AlreadyNormalized` for one closed root `section`, otherwise `Wrapped`
+/// with the replacement source.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// use mica_core::{normalize_section_impl, SectionNormalization};
+/// let result = normalize_section_impl("hello\n")?;
+/// assert_eq!(result, SectionNormalization::Wrapped(":::section\nhello\n:::\n".into()));
+/// # Ok::<(), mica_core::SectionNormalizationError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SectionNormalization {
+    /// The input already consists of exactly one closed root `section`.
+    AlreadyNormalized,
+    /// The input wrapped in exactly one closed, collision-safe root `section`.
+    Wrapped(String),
+}
+
+/// Purpose: explain why a block body cannot be wrapped as one logical section
+/// without changing its authored bytes or content identity.
+///
+/// # Arguments
+/// Not applicable; values are returned by [`normalize_section_impl`].
+///
+/// # Returns
+/// A structured failure category suitable for CLI conflict reporting.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// use mica_core::{normalize_section_impl, SectionNormalizationError};
+/// assert_eq!(
+///     normalize_section_impl("unterminated"),
+///     Err(SectionNormalizationError::MissingTerminalNewline),
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionNormalizationError {
+    /// A nonempty payload lacks the line break required before the closer.
+    MissingTerminalNewline,
+    /// Re-parsing the candidate did not preserve bytes, shape, or signature.
+    ValidationFailed,
+}
+
+impl fmt::Display for SectionNormalizationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingTerminalNewline => f.write_str(
+                "section normalization failed: the body has no terminal newline; add one before normalizing",
+            ),
+            Self::ValidationFailed => f.write_str(
+                "section normalization failed: the wrapped body changed its parsed content; leave this body unchanged and inspect it manually",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SectionNormalizationError {}
+
+/// Wrap a block body in exactly one logical `section` without changing any
+/// authored payload byte.
+///
+/// Purpose: provide the structural normalization authority shared by CLI
+/// migrations and any future host that needs a single editor per block body.
+///
+/// # Arguments
+/// * `content` - exact source bytes from inside one Mica block
+///
+/// # Returns
+/// [`SectionNormalization::AlreadyNormalized`] for one closed root section,
+/// [`SectionNormalization::Wrapped`] for a validated replacement, or a
+/// [`SectionNormalizationError`] when exact wrapping is impossible.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// use mica_core::{normalize_section_impl, SectionNormalization};
+/// let normalized = normalize_section_impl("alpha\n\nbeta\n")?;
+/// assert!(matches!(normalized, SectionNormalization::Wrapped(_)));
+/// # Ok::<(), mica_core::SectionNormalizationError>(())
+/// ```
+pub fn normalize_section_impl(
+    content: &str,
+) -> Result<SectionNormalization, SectionNormalizationError> {
+    let cst = parse_block_impl(content);
+    if matches!(
+        cst.children.as_slice(),
+        [Node::Container {
+            name,
+            close_line,
+            ..
+        }] if name == "section" && !close_line.is_empty()
+    ) {
+        return Ok(SectionNormalization::AlreadyNormalized);
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        return Err(SectionNormalizationError::MissingTerminalNewline);
+    }
+    let mut style = line_style_at(&cst, &[]);
+    style.indent.clear();
+    let wrapped = Cst {
+        children: vec![new_section_styled(cst.children, &style)],
+    };
+    let text = crate::parser::serialize_impl(&wrapped);
+    let reparsed = parse_block_impl(&text);
+    let [Node::Container {
+        name,
+        children,
+        close_line,
+        ..
+    }] = reparsed.children.as_slice()
+    else {
+        return Err(SectionNormalizationError::ValidationFailed);
+    };
+    if name != "section"
+        || close_line.is_empty()
+        || crate::parser::serialize_nodes(children) != content
+        || crate::versions::content_signature_impl(content)
+            != crate::versions::content_signature_impl(&text)
+    {
+        return Err(SectionNormalizationError::ValidationFailed);
+    }
+    Ok(SectionNormalization::Wrapped(text))
 }
 
 /// Which kind of group an `InsertGroup` op creates.
@@ -2253,6 +2393,88 @@ fn title_attr(title: &str, key: &str) -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
+
+    #[test]
+    fn normalize_section_wraps_mixed_markdown_as_one_exact_payload() {
+        let source = "First paragraph.\n\n> [!note] Context\n> Keep this attached.\n\n````md\n:::\n``` nested\n````\n\nLast paragraph.\n";
+        let expected = "::::section\nFirst paragraph.\n\n> [!note] Context\n> Keep this attached.\n\n````md\n:::\n``` nested\n````\n\nLast paragraph.\n::::\n";
+
+        assert_eq!(
+            normalize_section_impl(source),
+            Ok(SectionNormalization::Wrapped(expected.to_string()))
+        );
+    }
+
+    #[test]
+    fn normalize_section_is_idempotent_for_one_closed_root_section() {
+        let source = "::::section\r\nalpha\r\n\r\nbeta\r\n::::\r\n";
+
+        assert_eq!(
+            normalize_section_impl(source),
+            Ok(SectionNormalization::AlreadyNormalized)
+        );
+    }
+
+    #[test]
+    fn normalize_section_rejects_nonempty_payload_without_terminal_newline() {
+        assert_eq!(
+            normalize_section_impl("alpha"),
+            Err(SectionNormalizationError::MissingTerminalNewline)
+        );
+    }
+
+    #[test]
+    fn normalize_section_rejects_a_wrapper_that_changes_content_signature() {
+        let mut source = String::new();
+        for _ in 0..128 {
+            source.push_str(":::box\n");
+        }
+        source.push_str("payload\n");
+        for _ in 0..128 {
+            source.push_str(":::\n");
+        }
+
+        assert_eq!(
+            normalize_section_impl(&source),
+            Err(SectionNormalizationError::ValidationFailed)
+        );
+    }
+
+    #[test]
+    fn normalize_section_preserves_crlf_and_whitespace_only_payloads() {
+        assert_eq!(
+            normalize_section_impl("\r\n \r\n"),
+            Ok(SectionNormalization::Wrapped(
+                ":::section\r\n\r\n \r\n:::\r\n".to_string()
+            ))
+        );
+        assert_eq!(
+            normalize_section_impl(""),
+            Ok(SectionNormalization::Wrapped(
+                ":::section\n:::\n".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn normalize_section_sizes_fence_above_literal_root_closers() {
+        let source = "alpha\n:::::\nomega\n";
+
+        assert_eq!(
+            normalize_section_impl(source),
+            Ok(SectionNormalization::Wrapped(
+                "::::::section\nalpha\n:::::\nomega\n::::::\n".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn normalize_section_rejects_an_unclosed_root_section() {
+        assert_eq!(
+            normalize_section_impl(":::section\nalpha\n"),
+            Err(SectionNormalizationError::ValidationFailed)
+        );
+    }
 
     #[test]
     fn combine_plain_regions_wraps_without_changing_paragraphs() {

@@ -28,15 +28,16 @@ pub use edit::{
 };
 pub use migrate::{migrate_tabs_impl, MigratedBlock, MigratedVersion, MigrationResult};
 pub use ops::{
-    apply_op_impl, apply_op_text_impl, apply_ops_impl, apply_ops_text_impl, AppliedText, GroupKind,
-    StructOp,
+    apply_op_impl, apply_op_text_impl, apply_ops_impl, apply_ops_text_impl, normalize_section_impl,
+    AppliedText, GroupKind, SectionNormalization, SectionNormalizationError, StructOp,
 };
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
 pub use versions::{
-    content_signature_impl, fold_ledger_impl, has_content_impl, should_snapshot_impl, BlockState,
-    Event, HeadRef, VersionMeta,
+    content_signature_impl, fold_ledger_impl, has_content_impl, resolve_ledger_impl,
+    should_snapshot_impl, BlockState, Event, HeadRef, LedgerError, LedgerResolution,
+    ResolvedReplacement, VersionMeta,
 };
 
 // --- Pure core (unit-tested natively) ------------------------------------
@@ -197,6 +198,7 @@ pub fn fold_ledger(events: JsValue) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::from_value(events).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
     fold_ledger_impl(&events)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
         .serialize(&ser)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

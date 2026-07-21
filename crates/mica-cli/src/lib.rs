@@ -15,6 +15,7 @@ pub mod commands;
 pub mod engine;
 pub mod error;
 mod fsutil;
+pub mod normalize;
 pub mod output;
 pub mod sidecar;
 pub mod vault;

@@ -28,13 +28,15 @@ export interface MigrateFileReport {
 	dryRun: boolean;
 }
 
+type MigrationLedgerEvent = Exclude<LedgerEvent, { type: "replace-version" }>;
+
 interface MigrationJournal {
 	readonly format: 1;
 	readonly status: "pending" | "complete";
 	readonly note: string;
 	readonly original: string;
 	readonly migrated: string;
-	readonly events: readonly LedgerEvent[];
+	readonly events: readonly MigrationLedgerEvent[];
 }
 
 /**
@@ -74,7 +76,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 		await writeObject(vault, file, originalHash, original);
 		await writeObject(vault, file, migratedHash, finalized.doc);
 
-		const importedEvents: LedgerEvent[] = [];
+		const importedEvents: MigrationLedgerEvent[] = [];
 		const now = Date.now();
 		for (const block of staged.blocks) {
 			const n = block.versions.length;
@@ -198,7 +200,7 @@ async function ensureHeadEventsInJournal(
 		journal.events.filter((event) => event.type === "set-head").map((event) => `${event.block}\0${event.hash}`),
 	);
 	const staged = await stageHeadEvents(plugin, file, migrated);
-	const missing: LedgerEvent[] = [];
+	const missing: MigrationLedgerEvent[] = [];
 	for (let index = 0; index < staged.length; index += 2) {
 		const add = staged[index];
 		const head = staged[index + 1];
@@ -211,8 +213,8 @@ async function ensureHeadEventsInJournal(
 	return updated;
 }
 
-async function stageHeadEvents(plugin: MicaPlugin, file: TFile, doc: string): Promise<LedgerEvent[]> {
-	const events: LedgerEvent[] = [];
+async function stageHeadEvents(plugin: MicaPlugin, file: TFile, doc: string): Promise<MigrationLedgerEvent[]> {
+	const events: MigrationLedgerEvent[] = [];
 	const ts = Date.now();
 	for (const block of scanBlocksView(doc)) {
 		if (!block.closed || !block.id) continue;
@@ -271,7 +273,7 @@ async function createPendingMigrationJournal(
 	await verifyMigrationJournal(plugin, file, journal);
 }
 
-function validateJournalEvents(events: readonly LedgerEvent[]): void {
+function validateJournalEvents(events: readonly MigrationLedgerEvent[]): void {
 	for (const event of events) {
 		if (utf8ByteLength(JSON.stringify(event)) > MAX_LEDGER_LINE_BYTES) {
 			throw new Error(`Mica: migration event exceeds ${MAX_LEDGER_LINE_BYTES} bytes`);
@@ -294,8 +296,12 @@ function isMigrationJournal(value: unknown): value is MigrationJournal {
 		isObjectHash(journal.original) &&
 		isObjectHash(journal.migrated) &&
 		Array.isArray(journal.events) &&
-		journal.events.every(isLedgerEvent)
+		journal.events.every(isMigrationLedgerEvent)
 	);
+}
+
+function isMigrationLedgerEvent(value: unknown): value is MigrationLedgerEvent {
+	return isLedgerEvent(value) && value.type !== "replace-version";
 }
 
 function parseMigrationJournal(text: string, path: string): MigrationJournal {

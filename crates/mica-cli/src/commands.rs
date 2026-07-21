@@ -13,9 +13,9 @@ use crate::output::{rel_time, Style};
 use crate::sidecar;
 use crate::vault::{self, NoteRef};
 use mica_core::{
-    apply_ops_impl, diff_impl, ensure_ids_impl, hash_content_impl, make_patch_impl,
-    migrate_tabs_impl, new_id_impl, parse_block_impl, reconcile_impl, scan_impl, serialize_impl,
-    ContentRef, Cst, Event, GroupKind, Node, SidecarRef, StructOp, VersionMeta,
+    apply_ops_impl, content_signature_impl, diff_impl, ensure_ids_impl, hash_content_impl,
+    make_patch_impl, migrate_tabs_impl, new_id_impl, parse_block_impl, reconcile_impl, scan_impl,
+    serialize_impl, ContentRef, Cst, Event, GroupKind, Node, SidecarRef, StructOp, VersionMeta,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -92,6 +92,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             dry_run,
             callouts,
         } => migrate(&ctx, note.as_deref(), dry_run, callouts.as_deref()),
+        Cmd::NormalizeSections {
+            path,
+            history,
+            dry_run,
+        } => crate::normalize::run(&ctx, &path, history, dry_run),
         Cmd::Prepare { note } => prepare(&ctx, &note),
         Cmd::Repair => repair(&ctx),
         Cmd::Doctor => doctor(&ctx),
@@ -916,7 +921,9 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                             origin: Some(origin),
                             ..
                         } if origin.starts_with("migrated:") => Some(block.as_str()),
-                        Event::SetHead { .. } | Event::Label { .. } => None,
+                        Event::ReplaceVersion { .. }
+                        | Event::SetHead { .. }
+                        | Event::Label { .. } => None,
                         Event::AddVersion { .. } => None,
                     })
                     .collect();
@@ -1059,6 +1066,7 @@ fn finish_migration(
         .iter()
         .map(|event| match event {
             Event::AddVersion { eid, .. }
+            | Event::ReplaceVersion { eid, .. }
             | Event::SetHead { eid, .. }
             | Event::Label { eid, .. } => eid.as_str(),
         })
@@ -1069,6 +1077,7 @@ fn finish_migration(
         .filter(|event| {
             let eid = match event {
                 Event::AddVersion { eid, .. }
+                | Event::ReplaceVersion { eid, .. }
                 | Event::SetHead { eid, .. }
                 | Event::Label { eid, .. } => eid.as_str(),
             };
@@ -1176,6 +1185,7 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
         for e in &events {
             let block = match e {
                 Event::AddVersion { block, .. }
+                | Event::ReplaceVersion { block, .. }
                 | Event::SetHead { block, .. }
                 | Event::Label { block, .. } => block,
             };
@@ -1248,6 +1258,7 @@ fn unambiguous_rehome_target(
     for event in events {
         let block = match event {
             Event::AddVersion { block, .. }
+            | Event::ReplaceVersion { block, .. }
             | Event::SetHead { block, .. }
             | Event::Label { block, .. } => block,
         };
@@ -1276,13 +1287,25 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
     let mut findings: Vec<serde_json::Value> = Vec::new();
     for sc in vault::vault_sidecars(&root)? {
         let ledger = sc.join("ledger.jsonl");
-        let bad = sidecar::ledger_bad_lines(&ledger)?;
-        if bad > 0 {
-            problems += bad;
-            findings.push(serde_json::json!({
-                "sidecar": sc.display().to_string(), "kind": "bad-ledger-lines", "count": bad
-            }));
-        }
+        let ledger_header_valid = match sidecar::ledger_bad_lines(&ledger) {
+            Ok(bad) => {
+                if bad > 0 {
+                    problems += bad;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(), "kind": "bad-ledger-lines", "count": bad
+                    }));
+                }
+                true
+            }
+            Err(error) => {
+                problems += 1;
+                findings.push(serde_json::json!({
+                    "sidecar": sc.display().to_string(), "kind": "corrupt-ledger",
+                    "detail": error.to_string()
+                }));
+                false
+            }
+        };
         // Note gone but sidecar remains?
         let note = sc.with_extension("md");
         if !note.is_file() {
@@ -1331,10 +1354,169 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 }));
             }
         }
-        // Every recorded version must have its object.
-        let events = sidecar::read_ledger_at(&ledger)?;
-        let st = mica_core::fold_ledger_impl(&events);
-        for (block, bs) in &st {
+        match sidecar::read_section_normalization_journal(&note) {
+            Ok(Some(journal)) => {
+                if journal.status == "pending" {
+                    problems += 1;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(), "kind": "pending-normalization"
+                    }));
+                }
+                let note_ref = NoteRef {
+                    abs: note.clone(),
+                    vault: root.clone(),
+                };
+                let current = if journal.status == "pending" && note.is_file() {
+                    match engine::read_doc(&note) {
+                        Ok(current) => Some(current),
+                        Err(error) => {
+                            problems += 1;
+                            findings.push(serde_json::json!({
+                                "sidecar": sc.display().to_string(), "kind": "normalization-live-note-unreadable",
+                                "detail": error.to_string()
+                            }));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                match crate::normalize::inspect_normalization_journal(
+                    &note_ref,
+                    current.as_deref(),
+                    &journal,
+                ) {
+                    Ok(inspection) => {
+                        problems += inspection.conflicts.len();
+                        findings.extend(inspection.conflicts.into_iter().map(|conflict| {
+                            serde_json::json!({
+                                "sidecar": sc.display().to_string(),
+                                "kind": conflict.kind,
+                                "detail": conflict.detail,
+                                "block": conflict.block,
+                                "target": conflict.target,
+                            })
+                        }));
+                    }
+                    Err(error) => {
+                        problems += 1;
+                        findings.push(serde_json::json!({
+                            "sidecar": sc.display().to_string(), "kind": "normalization-journal-validation-error",
+                            "detail": error.to_string()
+                        }));
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                problems += 1;
+                findings.push(serde_json::json!({
+                    "sidecar": sc.display().to_string(), "kind": "corrupt-normalization-journal",
+                    "detail": error.to_string()
+                }));
+            }
+        }
+
+        // Validate both the append-only source record and its checked effective view.
+        let events = if ledger_header_valid {
+            match sidecar::read_ledger_at(&ledger) {
+                Ok(events) => events,
+                Err(error) => {
+                    problems += 1;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(), "kind": "corrupt-ledger",
+                        "detail": error.to_string()
+                    }));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let resolution = match mica_core::resolve_ledger_impl(&events) {
+            Ok(resolution) => Some(resolution),
+            Err(error) => {
+                problems += 1;
+                findings.push(serde_json::json!({
+                    "sidecar": sc.display().to_string(), "kind": "invalid-ledger-resolution",
+                    "detail": error.to_string()
+                }));
+                None
+            }
+        };
+
+        let raw_versions: BTreeSet<(&str, &str)> = events
+            .iter()
+            .filter_map(|event| {
+                if let Event::AddVersion { block, hash, .. } = event {
+                    Some((block.as_str(), hash.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (block, hash) in raw_versions {
+            match sidecar::read_object(&note, hash) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    problems += 1;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(), "kind": "missing-raw-object",
+                        "block": block, "hash": hash
+                    }));
+                }
+                Err(error) => {
+                    problems += 1;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(), "kind": "corrupt-raw-object",
+                        "block": block, "hash": hash, "detail": error.to_string()
+                    }));
+                }
+            }
+        }
+
+        if let Some(resolution) = &resolution {
+            for replacement in &resolution.replacements {
+                let raw = sidecar::read_object(&note, &replacement.original);
+                let replaced = sidecar::read_object(&note, &replacement.replacement);
+                match &replaced {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        problems += 1;
+                        findings.push(serde_json::json!({
+                            "sidecar": sc.display().to_string(), "kind": "missing-replacement-object",
+                            "block": replacement.block, "target": replacement.target,
+                            "hash": replacement.replacement
+                        }));
+                    }
+                    Err(error) => {
+                        problems += 1;
+                        findings.push(serde_json::json!({
+                            "sidecar": sc.display().to_string(), "kind": "corrupt-replacement-object",
+                            "block": replacement.block, "target": replacement.target,
+                            "hash": replacement.replacement, "detail": error.to_string()
+                        }));
+                    }
+                }
+                if let (Ok(Some(raw)), Ok(Some(replaced))) = (raw, replaced) {
+                    if content_signature_impl(&raw) != content_signature_impl(&replaced) {
+                        problems += 1;
+                        findings.push(serde_json::json!({
+                            "sidecar": sc.display().to_string(), "kind": "replacement-signature-mismatch",
+                            "block": replacement.block, "target": replacement.target,
+                            "original": replacement.original, "replacement": replacement.replacement
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Every version and head in the checked effective view must have its object.
+        for (block, bs) in resolution
+            .as_ref()
+            .into_iter()
+            .flat_map(|resolution| &resolution.blocks)
+        {
             let hashes: BTreeSet<&str> = bs
                 .versions
                 .iter()

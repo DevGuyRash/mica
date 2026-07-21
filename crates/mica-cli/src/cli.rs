@@ -175,6 +175,17 @@ pub enum Cmd {
         #[arg(long)]
         callouts: Option<String>,
     },
+    /// Normalize Mica bodies into one logical section
+    NormalizeSections {
+        /// Note or directory path (cwd-relative or vault-relative)
+        path: String,
+        /// Normalize stored version history as well as live block bodies
+        #[arg(long)]
+        history: bool,
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Stamp ids: frontmatter `mica-id` + block ids
     Prepare {
         /// Note path

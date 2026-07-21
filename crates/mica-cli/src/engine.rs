@@ -48,7 +48,8 @@ pub struct SnapshotAction {
 /// let st = mica_cli::engine::state(std::path::Path::new("Note.md")).unwrap();
 /// ```
 pub fn state(note: &Path) -> Result<BTreeMap<String, BlockState>> {
-    Ok(fold_ledger_impl(&sidecar::read_ledger(note)?))
+    fold_ledger_impl(&sidecar::read_ledger(note)?)
+        .map_err(|error| CliError::Corrupt(error.to_string()))
 }
 
 /// Snapshot every id-carrying block in the note (change-gated unless `force`).

@@ -377,6 +377,242 @@ fn doctor_reports_corrupt_objects() {
 }
 
 #[test]
+fn doctor_reports_missing_raw_objects_and_pending_normalization() {
+    let f = fixture("plain note\n");
+    let raw = "alpha\n\nbeta\n";
+    let replacement = ":::section\nalpha\n\nbeta\n:::\n";
+    let raw_hash = mica_core::hash_content_impl(raw);
+    let replacement_hash = mica_core::hash_content_impl(replacement);
+    mica_cli::sidecar::write_object(&f.note, &replacement_hash, replacement)
+        .expect("replacement object");
+    let add = mica_core::Event::AddVersion {
+        eid: "add-raw".to_string(),
+        ts: 1,
+        block: "demo".to_string(),
+        hash: raw_hash.clone(),
+        label: None,
+        origin: None,
+        parent: None,
+    };
+    let replace = mica_core::Event::ReplaceVersion {
+        eid: "replace-raw".to_string(),
+        ts: 2,
+        block: "demo".to_string(),
+        target: "add-raw".to_string(),
+        hash: replacement_hash,
+    };
+    mica_cli::sidecar::append_events(&f.note, &[add, replace.clone()]).expect("seed ledger");
+    let note_body = fs::read_to_string(&f.note).expect("note body");
+    let note_hash = mica_core::hash_content_impl(&note_body);
+    mica_cli::sidecar::write_object(&f.note, &note_hash, &note_body).expect("whole note object");
+    mica_cli::sidecar::write_section_normalization_journal(
+        &f.note,
+        &mica_cli::sidecar::SectionNormalizationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Test note.md".to_string(),
+            original: note_hash.clone(),
+            normalized: note_hash,
+            history: true,
+            events: vec![replace],
+        },
+    )
+    .expect("pending journal");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    let kinds: Vec<_> = parsed["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter_map(|finding| finding["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"missing-raw-object"), "{report}");
+    assert!(kinds.contains(&"pending-normalization"), "{report}");
+}
+
+#[test]
+fn doctor_reports_replacement_signature_mismatch() {
+    let f = fixture("plain note\n");
+    let raw = "alpha\n";
+    let replacement = ":::section\nDIFFERENT\n:::\n";
+    let raw_hash = mica_core::hash_content_impl(raw);
+    let replacement_hash = mica_core::hash_content_impl(replacement);
+    mica_cli::sidecar::write_object(&f.note, &raw_hash, raw).expect("raw object");
+    mica_cli::sidecar::write_object(&f.note, &replacement_hash, replacement)
+        .expect("replacement object");
+    mica_cli::sidecar::append_events(
+        &f.note,
+        &[
+            mica_core::Event::AddVersion {
+                eid: "add-source".to_string(),
+                ts: 1,
+                block: "demo".to_string(),
+                hash: raw_hash,
+                label: None,
+                origin: None,
+                parent: None,
+            },
+            mica_core::Event::ReplaceVersion {
+                eid: "replace-source".to_string(),
+                ts: 2,
+                block: "demo".to_string(),
+                target: "add-source".to_string(),
+                hash: replacement_hash,
+            },
+        ],
+    )
+    .expect("seed ledger");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    assert!(
+        parsed["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["kind"] == "replacement-signature-mismatch"),
+        "{report}"
+    );
+}
+
+#[test]
+fn doctor_reports_corrupt_typed_ledger_and_continues_the_sweep() {
+    let f = fixture("plain note\n");
+    fs::create_dir_all(f.vault.join("Test note.mica")).expect("sidecar");
+    fs::write(
+        f.vault.join("Test note.mica/ledger.jsonl"),
+        r#"{"type":"future-event","eid":"future"}
+"#,
+    )
+    .expect("corrupt typed ledger");
+    fs::write(f.vault.join("Other.md"), "other\n").expect("second note");
+    fs::create_dir_all(f.vault.join("Other.mica")).expect("second sidecar");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    assert!(
+        parsed["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["kind"] == "corrupt-ledger"),
+        "{report}"
+    );
+}
+
+#[test]
+fn doctor_reports_pending_normalization_note_divergence() {
+    let original = "```mica id=demo\nalpha\n```\n";
+    let normalized = "```mica id=demo\n:::section\nalpha\n:::\n```\n";
+    let f = fixture("later unrelated edit\n");
+    let original_hash = mica_core::hash_content_impl(original);
+    let normalized_hash = mica_core::hash_content_impl(normalized);
+    mica_cli::sidecar::write_object(&f.note, &original_hash, original).expect("original object");
+    mica_cli::sidecar::write_object(&f.note, &normalized_hash, normalized)
+        .expect("normalized object");
+    mica_cli::sidecar::write_section_normalization_journal(
+        &f.note,
+        &mica_cli::sidecar::SectionNormalizationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Test note.md".to_string(),
+            original: original_hash,
+            normalized: normalized_hash,
+            history: false,
+            events: Vec::new(),
+        },
+    )
+    .expect("pending journal");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    assert!(
+        parsed["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["kind"] == "pending-note-diverged"),
+        "{report}"
+    );
+}
+
+#[test]
+fn doctor_allows_later_live_edits_after_completed_normalization() {
+    let original = "```mica id=demo\nalpha\n```\n";
+    let normalized = "```mica id=demo\n:::section\nalpha\n:::\n```\n";
+    let f = fixture("later unrelated edit\n");
+    let original_hash = mica_core::hash_content_impl(original);
+    let normalized_hash = mica_core::hash_content_impl(normalized);
+    mica_cli::sidecar::write_object(&f.note, &original_hash, original).expect("original object");
+    mica_cli::sidecar::write_object(&f.note, &normalized_hash, normalized)
+        .expect("normalized object");
+    mica_cli::sidecar::write_section_normalization_journal(
+        &f.note,
+        &mica_cli::sidecar::SectionNormalizationJournal {
+            format: 1,
+            status: "complete".to_string(),
+            note: "Test note.md".to_string(),
+            original: original_hash,
+            normalized: normalized_hash,
+            history: false,
+            events: Vec::new(),
+        },
+    )
+    .expect("complete journal");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    let semantic_conflicts: Vec<_> = parsed["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|finding| {
+            matches!(
+                finding["kind"].as_str(),
+                Some("pending-note-diverged" | "journal-postimage-invalid")
+            )
+        })
+        .collect();
+    assert!(semantic_conflicts.is_empty(), "{report}");
+}
+
+#[test]
+fn doctor_reports_forged_completed_normalization_postimage() {
+    let original = "```mica id=demo\nalpha\n```\n";
+    let forged = "```mica id=demo\n:::section\nforged\n:::\n```\n";
+    let f = fixture(forged);
+    let original_hash = mica_core::hash_content_impl(original);
+    let forged_hash = mica_core::hash_content_impl(forged);
+    mica_cli::sidecar::write_object(&f.note, &original_hash, original).expect("original object");
+    mica_cli::sidecar::write_object(&f.note, &forged_hash, forged).expect("forged object");
+    mica_cli::sidecar::write_section_normalization_journal(
+        &f.note,
+        &mica_cli::sidecar::SectionNormalizationJournal {
+            format: 1,
+            status: "complete".to_string(),
+            note: "Test note.md".to_string(),
+            original: original_hash,
+            normalized: forged_hash,
+            history: false,
+            events: Vec::new(),
+        },
+    )
+    .expect("complete journal");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    assert!(
+        parsed["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["kind"] == "journal-postimage-invalid"),
+        "{report}"
+    );
+}
+
+#[test]
 fn corrupt_object_cannot_be_restored() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);

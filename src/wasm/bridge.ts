@@ -252,6 +252,16 @@ export type LedgerEvent =
 			/** Lineage: hash this version was derived from (branch/edit-previous). */
 			parent?: string | null;
 	  }
+	| {
+			type: "replace-version";
+			eid: string;
+			ts: number;
+			block: string;
+			/** Event id of the original add-version event. */
+			target: string;
+			/** Content hash of the replacement object. */
+			hash: string;
+	  }
 	| { type: "set-head"; eid: string; ts: number; block: string; hash: string }
 	| { type: "label"; eid: string; ts: number; block: string; hash: string; label?: string | null };
 
@@ -259,6 +269,7 @@ export interface VersionMeta {
 	hash: string;
 	ts: number;
 	label: string | null;
+	parent: string | null;
 }
 
 export interface BlockState {

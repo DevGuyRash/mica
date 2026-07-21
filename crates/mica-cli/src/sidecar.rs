@@ -54,6 +54,180 @@ pub struct MigrationJournal {
     pub events: Vec<Event>,
 }
 
+/// Recoverable transaction record for one logical-section normalization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionNormalizationJournal {
+    /// Journal schema version.
+    pub format: u8,
+    /// `pending` until note publication, replacement append, and verification finish.
+    pub status: String,
+    /// Vault-relative note path at the time of normalization.
+    pub note: String,
+    /// Object hash of the exact whole-note preimage.
+    pub original: String,
+    /// Object hash of the exact normalized whole-note result.
+    pub normalized: String,
+    /// Whether this transaction includes historical version bodies.
+    pub history: bool,
+    /// Stable ReplaceVersion events to replay after an interrupted publication.
+    pub events: Vec<Event>,
+}
+
+/// Return the co-located logical-section normalization journal path.
+///
+/// # Arguments
+/// * `note` - Markdown note path
+///
+/// # Returns
+/// `<Note>.mica/section-normalization.json`.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```no_run
+/// let path = mica_cli::sidecar::section_normalization_journal_path(
+///     std::path::Path::new("Note.md"),
+/// );
+/// assert!(path.ends_with("Note.mica/section-normalization.json"));
+/// ```
+pub fn section_normalization_journal_path(note: &Path) -> PathBuf {
+    sidecar_dir(note).join("section-normalization.json")
+}
+
+/// Read and validate a bounded logical-section normalization journal.
+///
+/// # Arguments
+/// * `note` - Markdown note whose sidecar contains the journal
+///
+/// # Returns
+/// The journal, or `None` when no transaction has started.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```no_run
+/// let journal = mica_cli::sidecar::read_section_normalization_journal(
+///     std::path::Path::new("Note.md"),
+/// )?;
+/// # Ok::<(), mica_cli::CliError>(())
+/// ```
+pub fn read_section_normalization_journal(
+    note: &Path,
+) -> Result<Option<SectionNormalizationJournal>> {
+    let path = section_normalization_journal_path(note);
+    let Some(file) = open_regular_for_read(&path, "section-normalization journal")? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take((MAX_LEDGER_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_ctx(path.display().to_string()))?;
+    if bytes.len() > MAX_LEDGER_BYTES {
+        return Err(CliError::Corrupt(format!(
+            "section-normalization journal exceeds the {MAX_LEDGER_BYTES} byte safety limit: {}",
+            path.display()
+        )));
+    }
+    let journal: SectionNormalizationJournal = serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::Corrupt(format!(
+            "section-normalization journal is invalid at {}: {error}",
+            path.display()
+        ))
+    })?;
+    validate_section_normalization_journal(&journal)?;
+    Ok(Some(journal))
+}
+
+/// Atomically write a validated logical-section normalization journal.
+///
+/// # Arguments
+/// * `note` - Markdown note whose sidecar owns the journal
+/// * `journal` - pending or complete transaction record
+///
+/// # Returns
+/// `()` after durable publication.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```no_run
+/// # let journal: mica_cli::sidecar::SectionNormalizationJournal = todo!();
+/// mica_cli::sidecar::write_section_normalization_journal(
+///     std::path::Path::new("Note.md"),
+///     &journal,
+/// )?;
+/// # Ok::<(), mica_cli::CliError>(())
+/// ```
+pub fn write_section_normalization_journal(
+    note: &Path,
+    journal: &SectionNormalizationJournal,
+) -> Result<()> {
+    validate_section_normalization_journal_encoding(journal, MAX_LEDGER_BYTES)?;
+    let mut bytes =
+        serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    bytes.push(b'\n');
+    ensure_sidecar(note)?;
+    let path = section_normalization_journal_path(note);
+    validate_regular_file_or_missing(&path, "section-normalization journal")?;
+    fsutil::atomic_write(&path, &bytes)
+}
+
+fn validate_section_normalization_journal(journal: &SectionNormalizationJournal) -> Result<()> {
+    if journal.format != 1 || !matches!(journal.status.as_str(), "pending" | "complete") {
+        return Err(CliError::Corrupt(
+            "unsupported section-normalization journal format or status".to_string(),
+        ));
+    }
+    validate_hash(&journal.original)?;
+    validate_hash(&journal.normalized)?;
+    if !journal.history && !journal.events.is_empty() {
+        return Err(CliError::Corrupt(
+            "section-normalization journal contains replacement events without history".to_string(),
+        ));
+    }
+    if journal.events.len() > MAX_LEDGER_EVENTS {
+        return Err(CliError::Corrupt(format!(
+            "section-normalization journal has more than {MAX_LEDGER_EVENTS} events"
+        )));
+    }
+    let mut eids = HashMap::with_capacity(journal.events.len());
+    for event in &journal.events {
+        let Event::ReplaceVersion {
+            eid, block, target, ..
+        } = event
+        else {
+            return Err(CliError::Corrupt(
+                "section-normalization journal contains a non-replacement event".to_string(),
+            ));
+        };
+        if eid.is_empty() || block.is_empty() || target.is_empty() {
+            return Err(CliError::Corrupt(
+                "section-normalization journal replacement identities must not be empty"
+                    .to_string(),
+            ));
+        }
+        if eids.insert(eid.as_str(), ()).is_some() {
+            return Err(CliError::Corrupt(format!(
+                "section-normalization journal reuses event id {eid:?}"
+            )));
+        }
+        validate_event(event)?;
+        let encoded =
+            serde_json::to_vec(event).map_err(|error| CliError::Corrupt(error.to_string()))?;
+        if encoded.len() > MAX_LEDGER_LINE_BYTES {
+            return Err(CliError::Corrupt(format!(
+                "section-normalization journal event is {} bytes (limit {MAX_LEDGER_LINE_BYTES})",
+                encoded.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Compressed-object variant path (large objects). Hash is over PLAINTEXT.
 pub fn object_path_gz(note: &Path, hash: &str) -> PathBuf {
     objects_dir(note).join(format!("{}.mica.gz", object_stem(hash)))
@@ -88,8 +262,9 @@ fn object_stem(hash: &str) -> String {
     hash.replace([':', '/', '\\'], "-")
 }
 
-/// Read the ledger; malformed lines are skipped (never lose the whole history
-/// to one bad line). Missing ledger = empty.
+/// Read the ledger; malformed or untyped lines are skipped (never lose the
+/// whole history to one torn line), while unknown typed events fail closed.
+/// Missing ledger = empty.
 ///
 /// Purpose: every versions command starts here.
 ///
@@ -183,6 +358,11 @@ fn validate_migration_journal(journal: &MigrationJournal) -> Result<()> {
         )));
     }
     for event in &journal.events {
+        if matches!(event, Event::ReplaceVersion { .. }) {
+            return Err(CliError::Corrupt(
+                "migration journal contains a section-normalization replacement event".to_string(),
+            ));
+        }
         validate_event(event)?;
         let encoded =
             serde_json::to_vec(event).map_err(|error| CliError::Corrupt(error.to_string()))?;
@@ -218,6 +398,11 @@ pub fn append_events(note: &Path, events: &[Event]) -> Result<()> {
     if events.is_empty() {
         return Ok(());
     }
+    let lines = encode_event_batch(events)?;
+    append_encoded_events(note, &lines)
+}
+
+fn encode_event_batch(events: &[Event]) -> Result<String> {
     if events.len() > MAX_LEDGER_EVENTS {
         return Err(CliError::Corrupt(format!(
             "refusing to append {} ledger events at once (limit {MAX_LEDGER_EVENTS})",
@@ -255,6 +440,10 @@ pub fn append_events(note: &Path, events: &[Event]) -> Result<()> {
             )));
         }
     }
+    Ok(lines)
+}
+
+fn append_encoded_events(note: &Path, lines: &str) -> Result<()> {
     ensure_sidecar(note)?;
     let path = ledger_path(note);
     validate_regular_file_or_missing(&path, "ledger")?;
@@ -327,6 +516,104 @@ pub fn append_events(note: &Path, events: &[Event]) -> Result<()> {
     })();
     let unlock_result = file.unlock().map_err(io_ctx(path.display().to_string()));
     write_result.and(unlock_result)
+}
+
+pub(crate) fn preflight_object_write(note: &Path, hash: &str, content: &str) -> Result<bool> {
+    preflight_object_write_with_limit(note, hash, content, MAX_OBJECT_BYTES)
+}
+
+fn preflight_object_write_with_limit(
+    note: &Path,
+    hash: &str,
+    content: &str,
+    max_bytes: usize,
+) -> Result<bool> {
+    validate_hash(hash)?;
+    verify_hash(hash, content)?;
+    if content.len() > max_bytes {
+        return Err(object_too_large(hash, max_bytes));
+    }
+    validate_sidecar_layout_for_write(note)?;
+    match read_object(note, hash)? {
+        Some(existing) if existing == content => Ok(false),
+        Some(_) => Err(CliError::Corrupt(format!(
+            "existing object {hash} differs from the planned content"
+        ))),
+        None => Ok(true),
+    }
+}
+
+pub(crate) fn preflight_section_normalization_journal(
+    note: &Path,
+    journal: &SectionNormalizationJournal,
+) -> Result<()> {
+    validate_section_normalization_journal_encoding(journal, MAX_LEDGER_BYTES)?;
+    validate_sidecar_layout_for_write(note)?;
+    validate_regular_file_or_missing(
+        &section_normalization_journal_path(note),
+        "section-normalization journal",
+    )?;
+    Ok(())
+}
+
+fn validate_section_normalization_journal_encoding(
+    journal: &SectionNormalizationJournal,
+    max_bytes: usize,
+) -> Result<()> {
+    validate_section_normalization_journal(journal)?;
+    let mut bytes =
+        serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() > max_bytes {
+        return Err(CliError::Corrupt(format!(
+            "section-normalization journal exceeds the {max_bytes} byte safety limit"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn preflight_event_append(note: &Path, events: &[Event]) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let lines = encode_event_batch(events)?;
+    preflight_encoded_event_append(note, &lines, MAX_LEDGER_BYTES)
+}
+
+fn preflight_encoded_event_append(note: &Path, lines: &str, max_bytes: usize) -> Result<()> {
+    validate_sidecar_layout_for_write(note)?;
+    let path = ledger_path(note);
+    validate_regular_file_or_missing(&path, "ledger")?;
+    let existing = read_ledger_text(&path)?.unwrap_or_default();
+    let separator = !existing.is_empty() && !existing.ends_with('\n');
+    if existing
+        .len()
+        .checked_add(lines.len() + usize::from(separator))
+        .is_none_or(|total| total > max_bytes)
+    {
+        return Err(CliError::Corrupt(format!(
+            "ledger would exceed the {max_bytes} byte safety limit: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sidecar_layout_for_write(note: &Path) -> Result<()> {
+    validate_directory_or_missing(&sidecar_dir(note), "sidecar")?;
+    validate_directory_or_missing(&objects_dir(note), "objects directory")
+}
+
+fn validate_directory_or_missing(path: &Path, kind: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(CliError::Corrupt(format!(
+            "{kind} path is not a real directory: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_ctx(path.display().to_string())(error)),
+    }
 }
 
 /// Verified logical status of an append batch after an adapter/filesystem
@@ -495,6 +782,7 @@ fn parse_ledger(text: &str) -> Result<(Vec<Event>, usize)> {
                 line.len()
             )));
         }
+        validate_known_replacement_record(line, now)?;
         match serde_json::from_str::<Event>(line) {
             Ok(event) if validate_event_at(&event, now).is_ok() => {
                 let eid = event_eid(&event);
@@ -509,17 +797,88 @@ fn parse_ledger(text: &str) -> Result<(Vec<Event>, usize)> {
                 by_eid.insert(eid.to_string(), events.len());
                 events.push(event);
             }
-            Ok(_) | Err(_) => bad += 1,
+            Ok(_) => bad += 1,
+            Err(_) => {
+                if let Some(kind) = unknown_ledger_event_type(line) {
+                    return Err(CliError::Corrupt(format!(
+                        "ledger contains unknown event type {kind:?} — upgrade Mica or repair the ledger before retrying"
+                    )));
+                }
+                bad += 1;
+            }
         }
     }
     Ok((events, bad))
 }
 
+fn unknown_ledger_event_type(line: &str) -> Option<String> {
+    let serde_json::Value::Object(object) = serde_json::from_str(line).ok()? else {
+        return None;
+    };
+    let serde_json::Value::String(kind) = object.get("type")? else {
+        return None;
+    };
+    if matches!(
+        kind.as_str(),
+        "add-version" | "replace-version" | "set-head" | "label"
+    ) {
+        None
+    } else {
+        Some(kind.clone())
+    }
+}
+
+fn validate_known_replacement_record(line: &str, now: u64) -> Result<()> {
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_str(line) else {
+        return Ok(());
+    };
+    if object.get("type").and_then(serde_json::Value::as_str) != Some("replace-version") {
+        return Ok(());
+    }
+    let valid_nonempty = |field: &str| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    let valid_timestamp = object
+        .get("ts")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|timestamp| {
+            timestamp <= MAX_EVENT_TIMESTAMP_MS
+                && timestamp <= now.saturating_add(MAX_FUTURE_EVENT_SKEW_MS)
+        });
+    let valid_hash = object
+        .get("hash")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|hash| validate_hash(hash).is_ok());
+    let invalid = if !valid_nonempty("eid") {
+        Some("eid must be a non-empty string")
+    } else if !valid_timestamp {
+        Some("ts must be an accepted non-negative integer timestamp")
+    } else if !valid_nonempty("block") {
+        Some("block must be a non-empty string")
+    } else if !valid_hash {
+        Some("hash must be a valid object hash")
+    } else if !valid_nonempty("target") {
+        Some("target must be a non-empty string")
+    } else {
+        None
+    };
+    if let Some(detail) = invalid {
+        return Err(CliError::Corrupt(format!(
+            "invalid replace-version event: {detail} — repair the ledger before retrying"
+        )));
+    }
+    Ok(())
+}
+
 fn event_eid(event: &Event) -> &str {
     match event {
-        Event::AddVersion { eid, .. } | Event::SetHead { eid, .. } | Event::Label { eid, .. } => {
-            eid
-        }
+        Event::AddVersion { eid, .. }
+        | Event::ReplaceVersion { eid, .. }
+        | Event::SetHead { eid, .. }
+        | Event::Label { eid, .. } => eid,
     }
 }
 
@@ -528,13 +887,24 @@ fn validate_event(event: &Event) -> Result<()> {
 }
 
 fn validate_event_at(event: &Event, now: u64) -> Result<()> {
+    if let Event::ReplaceVersion {
+        eid, block, target, ..
+    } = event
+    {
+        if eid.is_empty() || block.is_empty() || target.is_empty() {
+            return Err(CliError::Corrupt(
+                "invalid replace-version event: eid, block, and target must be non-empty strings"
+                    .to_string(),
+            ));
+        }
+    }
     let (ts, hash, parent) = match event {
         Event::AddVersion {
             ts, hash, parent, ..
         } => (*ts, hash.as_str(), parent.as_deref()),
-        Event::SetHead { ts, hash, .. } | Event::Label { ts, hash, .. } => {
-            (*ts, hash.as_str(), None)
-        }
+        Event::ReplaceVersion { ts, hash, .. }
+        | Event::SetHead { ts, hash, .. }
+        | Event::Label { ts, hash, .. } => (*ts, hash.as_str(), None),
     };
     if ts > MAX_EVENT_TIMESTAMP_MS {
         return Err(CliError::Corrupt(format!(
@@ -837,6 +1207,197 @@ mod tests {
     }
 
     #[test]
+    fn section_normalization_journal_roundtrips() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "note").expect("seed note");
+        let original = mica_core::hash_content_impl("before");
+        let normalized = mica_core::hash_content_impl("after");
+        let journal = SectionNormalizationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original,
+            normalized,
+            history: true,
+            events: vec![Event::ReplaceVersion {
+                eid: "replacement-event".to_string(),
+                ts: 0,
+                block: "block".to_string(),
+                target: "add-event".to_string(),
+                hash: mica_core::hash_content_impl("replacement"),
+            }],
+        };
+
+        write_section_normalization_journal(&note, &journal).expect("write journal");
+
+        assert_eq!(
+            read_section_normalization_journal(&note).expect("read journal"),
+            Some(journal)
+        );
+        assert!(section_normalization_journal_path(&note).is_file());
+    }
+
+    #[test]
+    fn journals_reject_wrong_event_kinds_before_writes() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "note").expect("seed note");
+        let hash = mica_core::hash_content_impl("body");
+        let add = Event::AddVersion {
+            eid: "add-event".to_string(),
+            ts: 0,
+            block: "block".to_string(),
+            hash: hash.clone(),
+            label: None,
+            origin: None,
+            parent: None,
+        };
+        let replacement = Event::ReplaceVersion {
+            eid: "replacement-event".to_string(),
+            ts: 0,
+            block: "block".to_string(),
+            target: "add-event".to_string(),
+            hash: hash.clone(),
+        };
+        let normalization = SectionNormalizationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original: hash.clone(),
+            normalized: hash.clone(),
+            history: true,
+            events: vec![add],
+        };
+        let migration = MigrationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original: hash.clone(),
+            migrated: hash,
+            events: vec![replacement],
+        };
+
+        assert!(matches!(
+            write_section_normalization_journal(&note, &normalization),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(matches!(
+            write_migration_journal(&note, &migration),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[test]
+    fn section_normalization_journal_rejects_empty_event_identity() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "note").expect("seed note");
+        let hash = mica_core::hash_content_impl("body");
+
+        for (eid, block, target) in [
+            ("", "block", "add-event"),
+            ("replacement-event", "", "add-event"),
+            ("replacement-event", "block", ""),
+        ] {
+            let journal = SectionNormalizationJournal {
+                format: 1,
+                status: "pending".to_string(),
+                note: "Note.md".to_string(),
+                original: hash.clone(),
+                normalized: hash.clone(),
+                history: true,
+                events: vec![Event::ReplaceVersion {
+                    eid: eid.to_string(),
+                    ts: 0,
+                    block: block.to_string(),
+                    target: target.to_string(),
+                    hash: hash.clone(),
+                }],
+            };
+            assert!(matches!(
+                write_section_normalization_journal(&note, &journal),
+                Err(CliError::Corrupt(_))
+            ));
+        }
+        assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[test]
+    fn section_normalization_journal_rejects_invalid_state_and_duplicate_eids() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "note").expect("seed note");
+        let hash = mica_core::hash_content_impl("body");
+        let event = Event::ReplaceVersion {
+            eid: "replacement-event".to_string(),
+            ts: 0,
+            block: "block".to_string(),
+            target: "add-event".to_string(),
+            hash: hash.clone(),
+        };
+        let mut journal = SectionNormalizationJournal {
+            format: 1,
+            status: "unknown".to_string(),
+            note: "Note.md".to_string(),
+            original: hash.clone(),
+            normalized: hash,
+            history: true,
+            events: vec![event.clone()],
+        };
+
+        assert!(matches!(
+            write_section_normalization_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+        journal.status = "pending".to_string();
+        journal.events.push(event);
+        assert!(matches!(
+            write_section_normalization_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn section_normalization_journal_rejects_symlink_files() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        let outside = tmp.path().join("outside.json");
+        std::fs::write(&note, "note").expect("seed note");
+        std::fs::write(&outside, "outside").expect("seed outside file");
+        std::fs::create_dir(sidecar_dir(&note)).expect("sidecar directory");
+        symlink(&outside, section_normalization_journal_path(&note)).expect("journal symlink");
+        let hash = mica_core::hash_content_impl("body");
+        let journal = SectionNormalizationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original: hash.clone(),
+            normalized: hash.clone(),
+            history: false,
+            events: Vec::new(),
+        };
+
+        assert!(matches!(
+            read_section_normalization_journal(&note),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(matches!(
+            write_section_normalization_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("outside unchanged"),
+            "outside"
+        );
+    }
+
+    #[test]
     fn manifest_matches_plugin_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let note = tmp.path().join("N.md");
@@ -882,6 +1443,46 @@ mod tests {
             "exact eid replays are logically deduplicated"
         );
         assert_eq!(ledger_bad_lines(&ledger_path(&note)).unwrap(), 1);
+    }
+
+    #[test]
+    fn unknown_typed_ledger_events_fail_closed_while_untyped_json_is_skipped() {
+        assert!(matches!(
+            parse_ledger(r#"{"type":"future-event","eid":"e1"}"#),
+            Err(CliError::Corrupt(message)) if message.contains("future-event")
+        ));
+
+        let (events, bad) = parse_ledger("{\"unexpected\":true}\n{torn").expect("recover lines");
+        assert!(events.is_empty());
+        assert_eq!(bad, 2);
+    }
+
+    #[test]
+    fn known_typed_invalid_replacements_fail_closed_like_typescript() {
+        let hash = mica_core::hash_content_impl("replacement");
+        let empty_target = serde_json::json!({
+            "type": "replace-version",
+            "eid": "replace",
+            "ts": 1,
+            "block": "demo",
+            "target": "",
+            "hash": hash,
+        });
+        let typed_target = serde_json::json!({
+            "type": "replace-version",
+            "eid": "replace",
+            "ts": 1,
+            "block": "demo",
+            "target": 7,
+            "hash": mica_core::hash_content_impl("replacement"),
+        });
+
+        for line in [empty_target.to_string(), typed_target.to_string()] {
+            assert!(matches!(
+                parse_ledger(&line),
+                Err(CliError::Corrupt(message)) if message.contains("invalid replace-version")
+            ));
+        }
     }
 
     #[test]
@@ -1201,6 +1802,57 @@ mod tests {
             Err(CliError::Corrupt(_))
         ));
         assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[test]
+    fn object_preflight_rejects_capacity_without_persistence() {
+        const TEST_LIMIT: usize = 8;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let note = dir.path().join("n.md");
+        let content = "too many bytes";
+        let hash = mica_core::hash_content_impl(content);
+
+        assert!(matches!(
+            preflight_object_write_with_limit(&note, &hash, content, TEST_LIMIT),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[test]
+    fn normalization_journal_preflight_rejects_capacity() {
+        let hash = mica_core::hash_content_impl("body");
+        let journal = SectionNormalizationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "n.md".to_string(),
+            original: hash.clone(),
+            normalized: hash,
+            history: false,
+            events: Vec::new(),
+        };
+
+        assert!(matches!(
+            validate_section_normalization_journal_encoding(&journal, 8),
+            Err(CliError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn event_preflight_rejects_capacity_without_mutating_ledger() {
+        const TEST_LIMIT: usize = 16;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let note = dir.path().join("n.md");
+        let ledger = ledger_path(&note);
+        std::fs::create_dir_all(sidecar_dir(&note)).expect("sidecar directory");
+        std::fs::write(&ledger, "existing-ledger").expect("seed ledger");
+        let before = std::fs::read(&ledger).expect("read preimage");
+
+        assert!(matches!(
+            preflight_encoded_event_append(&note, "new-event\n", TEST_LIMIT),
+            Err(CliError::Corrupt(_))
+        ));
+        assert_eq!(std::fs::read(&ledger).expect("read postimage"), before);
     }
 
     #[cfg(unix)]

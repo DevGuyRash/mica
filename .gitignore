@@ -2,30 +2,32 @@
 node_modules/
 
 # Build output
-main.js
-main.js.map
-*.js.map
-dist/
+/main.js
+/main.js.map
 *.tsbuildinfo
 
 # Rust / WASM
-target/
-src/wasm/pkg/
+/target/
+/src/wasm/pkg/
 
 # E2E (downloaded Obsidian binaries + runner logs)
-.obsidian-cache/
-logs/
+/.obsidian-cache/
+/logs/
 
 # Agent / local (house convention)
-.local/
-.claude/
-.codex/
-/AGENTS.md
+/.local/
+/.claude/
+/.codex/
 /CLAUDE.md
-*repomix*.xml
+/*repomix*.xml
+
+# Local environment and credentials
+/.env
+/.env.*
+!/.env.example
 
 # OS
 .DS_Store
 
 # Plugin runtime settings (written by saveData)
-data.json
+/data.json

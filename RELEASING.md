@@ -20,6 +20,15 @@ WHEN you change the sidecar or ledger format THEN you SHALL document backward
 compatibility and test the plugin and CLI from the same candidate against
 existing sidecars before tagging.
 
+WHEN the candidate can write `replace-version` events THEN you SHALL upgrade
+every plugin and CLI participant in the compatibility test before the first
+history normalization, because pre-upgrade readers cannot interpret that event.
+
+WHEN testing `replace-version` compatibility THEN you SHALL verify that an
+unknown typed ledger event fails closed, original event lines and objects remain
+readable, stale line-union inputs do not expose the unwrapped version, and the
+plugin and CLI agree on version order, labels, parents, heads, and counts.
+
 ## 2. Prove the automated gates
 
 WHEN the candidate is ready for verification THEN you SHALL run:
