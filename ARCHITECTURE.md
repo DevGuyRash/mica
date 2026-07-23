@@ -80,7 +80,7 @@ font size inherit documented `--mica-gutter-*` theme tokens. Incremental Lezer
 highlighting styles markers and semantic Markdown without removing source or
 changing heading line geometry; empty/unknown code stays plain, while `md` and
 `markdown` deliberately opt into the Markdown projection. Full lightboxes own
-one Blob worker for exact find ranges and ECMAScript replacement semantics.
+one Blob worker for exact find ranges, Global/first-match scope, and ECMAScript replacement semantics. The worker also returns replacement projections for viewport-bounded Original/Changes/Result decorations; previews never mutate the editor document.
 Generations discard stale replies, a 500 ms watchdog terminates pathological
 regex, typed arrays retain O(matches) offsets, and CodeMirror creates
 decorations only for visible matches. One shared `Intl.Segmenter`-backed service
@@ -150,13 +150,16 @@ Every rendered structural unit exposes the same CST-backed copy path in Reading 
 
 ## UI actions and settings
 
-`ActionSpec` is the one typed definition used by entity ellipsis menus,
-context menus, and keyboard-reachable paths. Rendered entities construct only
-their local action list, mount no document-wide listener, and dispose native
-menus/timers with their render child. Optional hover-open has a short delay and
-leave grace, checks fine-pointer capability at use time, and never replaces
-click/keyboard behavior. Tabs keep activation/add/overflow direct; drag remains
-direct where spatial manipulation matters.
+`ActionSpec` is the one typed definition used by responsive direct controls,
+entity ellipsis menus, context menus, and keyboard-reachable paths. One shared
+`ResizeObserver` fans width changes into local O(actions) packers; cached control
+measurements are invalidated by theme, density, and toolbar changes. Direct
+actions promote by bounded priority and retain source order, while drag and
+editor line numbers stay pinned. Rendered entities construct only their local
+action list, mount no document-wide listener, and dispose native menus/timers
+with their render child. Optional hover-open has a short delay and leave grace,
+checks fine-pointer capability at use time, and never replaces click/keyboard
+behavior. Tabs keep activation/add/overflow direct.
 
 `SETTING_LIFECYCLES` exhaustively maps every persisted setting to immediate
 runtime application, open-widget rerender, live toolbar repaint, click-time

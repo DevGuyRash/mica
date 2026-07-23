@@ -123,12 +123,12 @@ tab: Kernel
 - Per-block overrides (accent / density / tab style / radius / name) live as
   fence-header attrs, edited from the block's ⋮ menu — they travel with the note.
 - Settings: snapshot debounce, diff defaults, version chip, block-header mode
-  (hover/always/never), density, radius, tab style, animations, copy syntax /
-  outer-container modes, editor sizing.
+  (hover/always/never), responsive or menu-only rendered actions, density,
+  radius, tab style, animations, copy syntax / outer-container modes, editor sizing.
 - Section-combine feedback is theme-owned through `--mica-combine-*` custom
   properties (ring, fill, glow, plus, timing), with a static reduced-motion
   presentation.
 
 ## Accessibility
 
-- Primary tab, navigator, version, and diff controls have keyboard paths and labelled controls; status is not color-only and reduced-motion is respected. **Planned:** keyboard access to every editor-toolbar affordance.
+- Tab, navigator, version, diff, responsive entity, and editor-toolbar controls have keyboard paths and labelled controls; status is not color-only and reduced-motion is respected.
