@@ -1,6 +1,7 @@
 import { setIcon } from "obsidian";
-import type { MdEditor } from "./mdEditor";
+import type { MdEditor, SearchPreviewMode } from "./mdEditor";
 import { SEARCH_WORKER_SOURCE } from "./searchWorker";
+import { buildSearchFlags } from "./searchFlags";
 
 interface SearchRequest {
 	id: number;
@@ -10,12 +11,13 @@ interface SearchRequest {
 	regex: boolean;
 	flags: string;
 	matchCase: boolean;
+	global: boolean;
 	replacement?: string;
 	target?: number;
 }
 
 type SearchResponse =
-	| { id: number; ok: true; type: "scan"; ranges: ArrayBuffer }
+	| { id: number; ok: true; type: "scan"; ranges: ArrayBuffer; replacements: string[] }
 	| { id: number; ok: true; type: "replace"; text: string }
 	| { id: number; ok: false; error: string };
 
@@ -26,17 +28,24 @@ export class LightboxSearch {
 	private readonly replacement: HTMLInputElement;
 	private readonly regex: HTMLInputElement;
 	private readonly matchCase: HTMLInputElement;
+	private readonly global: HTMLInputElement;
+	private readonly multiline: HTMLInputElement;
+	private readonly dotAll: HTMLInputElement;
 	private readonly flags: HTMLInputElement;
 	private readonly flagsWrap: HTMLElement;
 	private readonly status: HTMLElement;
 	private readonly replaceRow: HTMLElement;
+	private readonly replaceAll: HTMLButtonElement;
+	private readonly previewButtons = new Map<SearchPreviewMode, HTMLButtonElement>();
 	private worker: Worker;
 	private workerUrl: string;
 	private generation = 0;
 	private resultsGeneration = -1;
 	private activeRequest = -1;
 	private ranges = new Uint32Array();
+	private replacements: string[] = [];
 	private current = -1;
+	private previewMode: SearchPreviewMode = "original";
 	private debounce: number | null = null;
 	private timeout: number | null = null;
 	private destroyed = false;
@@ -56,26 +65,46 @@ export class LightboxSearch {
 		this.status = findRow.createSpan({ cls: "mica-find-status", attr: { "aria-live": "polite" } });
 		this.iconButton(findRow, "chevron-up", "Previous match", () => this.move(-1));
 		this.iconButton(findRow, "chevron-down", "Next match", () => this.move(1));
-		const regexLabel = findRow.createEl("label", { cls: "mica-find-option" });
+		const optionsRow = host.createDiv({ cls: "mica-find-row mica-find-options" });
+		const regexLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
 		this.regex = regexLabel.createEl("input", { attr: { type: "checkbox" } });
 		regexLabel.createSpan({ text: "Regex" });
-		this.flagsWrap = findRow.createEl("label", { cls: "mica-find-flags" });
-		this.flagsWrap.createSpan({ text: "Flags" });
+		const caseLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
+		this.matchCase = caseLabel.createEl("input", { attr: { type: "checkbox" } });
+		caseLabel.createSpan({ text: "Match case" });
+		const globalLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
+		this.global = globalLabel.createEl("input", { attr: { type: "checkbox" } });
+		this.global.checked = true;
+		globalLabel.createSpan({ text: "Global" });
+		const multilineLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
+		this.multiline = multilineLabel.createEl("input", { attr: { type: "checkbox" } });
+		this.multiline.checked = true;
+		multilineLabel.createSpan({ text: "Multiline" });
+		const dotAllLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
+		this.dotAll = dotAllLabel.createEl("input", { attr: { type: "checkbox" } });
+		dotAllLabel.createSpan({ text: "Dot matches newline" });
+		this.flagsWrap = optionsRow.createEl("label", { cls: "mica-find-flags" });
+		this.flagsWrap.createSpan({ text: "Other flags" });
 		this.flags = this.flagsWrap.createEl("input", {
 			attr: {
 				type: "text",
-				value: "i",
+				value: "",
+				placeholder: "uvdy",
 				spellcheck: "false",
-				"aria-label": "JavaScript regular expression flags",
+				"aria-label": "Other JavaScript regular expression flags",
 			},
 		});
 		this.flagsWrap.hidden = true;
-		const caseLabel = findRow.createEl("label", { cls: "mica-find-option" });
-		this.matchCase = caseLabel.createEl("input", { attr: { type: "checkbox" } });
-		caseLabel.createSpan({ text: "Match case" });
-		this.iconButton(findRow, "replace", "Show or hide replacement", () => {
+		multilineLabel.hidden = true;
+		dotAllLabel.hidden = true;
+		this.iconButton(findRow, "replace", "Toggle replacement controls", () => {
 			this.replaceRow.hidden = !this.replaceRow.hidden;
-			if (!this.replaceRow.hidden) this.replacement.focus();
+			if (!this.replaceRow.hidden) {
+				this.replacement.focus();
+				this.invalidateAndSchedule(0);
+			} else {
+				this.setPreviewMode("original");
+			}
 		});
 		this.iconButton(findRow, "x", "Close search", () => this.close());
 
@@ -85,20 +114,39 @@ export class LightboxSearch {
 			cls: "mica-find-input",
 			attr: { type: "text", placeholder: "Replace", "aria-label": "Replace" },
 		});
+		const previewControls = this.replaceRow.createDiv({
+			cls: "mica-replace-preview-controls",
+			attr: { role: "group", "aria-label": "Replacement preview" },
+		});
+		for (const [mode, label] of [
+			["original", "Original"],
+			["changes", "Changes"],
+			["result", "Result"],
+		] as const) {
+			const button = previewControls.createEl("button", {
+				text: label,
+				attr: { type: "button", "aria-pressed": mode === "original" ? "true" : "false" },
+			});
+			button.addEventListener("click", () => this.setPreviewMode(mode));
+			this.previewButtons.set(mode, button);
+		}
 		const replaceOne = this.replaceRow.createEl("button", { text: "Replace", attr: { type: "button" } });
 		replaceOne.addEventListener("click", () => this.runReplace(false));
-		const replaceAll = this.replaceRow.createEl("button", { text: "Replace all", attr: { type: "button" } });
-		replaceAll.addEventListener("click", () => this.runReplace(true));
+		this.replaceAll = this.replaceRow.createEl("button", { text: "Replace all", attr: { type: "button" } });
+		this.replaceAll.addEventListener("click", () => this.runReplace(true));
+		this.updateReplaceAllState();
 
 		this.workerUrl = URL.createObjectURL(new Blob([SEARCH_WORKER_SOURCE], { type: "text/javascript" }));
 		this.worker = this.createWorker();
-		for (const control of [this.input, this.flags])
+		for (const control of [this.input, this.replacement, this.flags])
 			control.addEventListener("input", () => this.invalidateAndSchedule());
-		for (const control of [this.matchCase, this.regex])
+		for (const control of [this.matchCase, this.global, this.regex, this.multiline, this.dotAll])
 			control.addEventListener("change", () => this.invalidateAndSchedule());
+		this.global.addEventListener("change", () => this.updateReplaceAllState());
 		this.regex.addEventListener("change", () => {
 			this.flagsWrap.hidden = !this.regex.checked;
-			caseLabel.hidden = this.regex.checked;
+			multilineLabel.hidden = !this.regex.checked;
+			dotAllLabel.hidden = !this.regex.checked;
 		});
 		host.addEventListener("keydown", (event) => {
 			if (event.key === "Escape") {
@@ -139,7 +187,9 @@ export class LightboxSearch {
 	}
 
 	onDocumentChanged(): void {
-		if (this.isOpen) this.invalidateAndSchedule();
+		if (!this.isOpen) return;
+		if (this.previewMode !== "original") this.setPreviewMode("original", false);
+		this.invalidateAndSchedule();
 	}
 
 	destroy(): void {
@@ -176,6 +226,7 @@ export class LightboxSearch {
 		this.generation++;
 		this.resultsGeneration = -1;
 		this.clearHighlights();
+		this.updateReplaceAllState();
 	}
 
 	private scan(): void {
@@ -183,20 +234,27 @@ export class LightboxSearch {
 			this.clearResults();
 			return;
 		}
+		const flags = this.flagsForRequest();
+		if (flags === null) return;
 		this.post({
 			id: ++this.generation,
 			type: "scan",
 			doc: this.editor.getValue(),
 			needle: this.input.value,
 			regex: this.regex.checked,
-			flags: this.flags.value,
+			flags,
 			matchCase: this.matchCase.checked,
+			global: this.global.checked,
+			replacement: this.replacement.value,
 		});
 		this.status.setText("Searching…");
 	}
 
 	private runReplace(all: boolean): void {
+		if (all && !this.global.checked) return;
 		if (this.resultsGeneration !== this.generation || !this.ranges.length || (!all && this.current < 0)) return;
+		const flags = this.flagsForRequest();
+		if (flags === null) return;
 		const target = all ? -1 : this.current;
 		const request: SearchRequest = {
 			id: ++this.generation,
@@ -204,15 +262,31 @@ export class LightboxSearch {
 			doc: this.editor.getValue(),
 			needle: this.input.value,
 			regex: this.regex.checked,
-			flags: this.flags.value,
+			flags,
 			matchCase: this.matchCase.checked,
+			global: this.global.checked,
 			replacement: this.replacement.value,
 			target,
 		};
 		this.resultsGeneration = -1;
 		this.clearHighlights();
+		this.setPreviewMode("original", false);
 		this.post(request);
 		this.status.setText("Replacing…");
+	}
+
+	private flagsForRequest(): string | null {
+		if (!this.regex.checked) return "";
+		const result = buildSearchFlags({
+			matchCase: this.matchCase.checked,
+			multiline: this.multiline.checked,
+			dotAll: this.dotAll.checked,
+			otherFlags: this.flags.value,
+		});
+		if (result.ok) return result.flags;
+		this.status.setText(result.error);
+		this.clearHighlights();
+		return null;
 	}
 
 	private post(request: SearchRequest): void {
@@ -251,17 +325,20 @@ export class LightboxSearch {
 			return;
 		}
 		this.ranges = new Uint32Array(response.ranges);
+		this.replacements = response.replacements;
 		this.resultsGeneration = response.id;
 		const count = this.ranges.length / 2;
 		if (!count) {
 			this.current = -1;
 			this.status.setText("0 matches");
 			this.editor.setSearchHighlights(this.ranges, -1);
+			this.updateReplaceAllState();
 			return;
 		}
 		const caret = this.editor.view.state.selection.main.head;
 		this.current = this.firstAtOrAfter(caret);
 		this.paintCurrent(false);
+		this.updateReplaceAllState();
 	}
 
 	private move(delta: number): void {
@@ -274,8 +351,21 @@ export class LightboxSearch {
 
 	private paintCurrent(reveal: boolean, wrapped = false): void {
 		const count = this.ranges.length / 2;
-		this.status.setText(`${this.current + 1} of ${count}${wrapped ? " · wrapped" : ""}`);
-		this.editor.setSearchHighlights(this.ranges, this.current);
+		const preview =
+			this.previewMode === "original"
+				? "Original"
+				: `${this.previewMode === "changes" ? "Changes" : "Result"} preview`;
+		const position = `${this.current + 1} of ${count}${wrapped ? " · wrapped" : ""}`;
+		this.status.setText(
+			this.replaceRow.hidden
+				? position
+				: `${position} · ${preview} · ${count} ${count === 1 ? "replacement" : "replacements"}`,
+		);
+		this.editor.setSearchHighlights(
+			this.ranges,
+			this.current,
+			this.previewMode === "original" ? undefined : { mode: this.previewMode, replacements: this.replacements },
+		);
 		if (reveal) this.editor.revealRange(this.ranges[this.current * 2], this.ranges[this.current * 2 + 1]);
 	}
 
@@ -298,8 +388,25 @@ export class LightboxSearch {
 
 	private clearHighlights(): void {
 		this.ranges = new Uint32Array();
+		this.replacements = [];
 		this.current = -1;
 		this.editor.setSearchHighlights(this.ranges, -1);
+	}
+
+	private setPreviewMode(mode: SearchPreviewMode, repaint = true): void {
+		this.previewMode = mode;
+		for (const [candidate, button] of this.previewButtons)
+			button.setAttribute("aria-pressed", candidate === mode ? "true" : "false");
+		if (repaint && this.resultsGeneration === this.generation && this.ranges.length) this.paintCurrent(false);
+	}
+
+	private updateReplaceAllState(): void {
+		this.replaceAll.disabled =
+			!this.global.checked || this.resultsGeneration !== this.generation || this.ranges.length === 0;
+		this.replaceAll.setAttribute(
+			"aria-description",
+			this.global.checked ? "Replace every match" : "Enable Global to replace every match",
+		);
 	}
 
 	private iconButton(parent: HTMLElement, icon: string, label: string, run: () => void): void {

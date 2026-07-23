@@ -482,9 +482,9 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				browser.executeObsidian(({ app, obsidian }) => {
 					const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
 					return Boolean(
-						view?.containerEl.querySelector('[data-mica-actions~="copy-grid"]') &&
-						view.containerEl.querySelector('[data-mica-actions~="copy-nested-callout"]') &&
-						view.containerEl.querySelector('[data-mica-actions~="copy-code"]'),
+						view?.containerEl.querySelector('[data-mica-action-strip~="copy-grid"]') &&
+						view.containerEl.querySelector('[data-mica-action-strip~="copy-nested-callout"]') &&
+						view.containerEl.querySelector('[data-mica-action-strip~="copy-code"]'),
 					);
 				}),
 			{ timeout: 8000, timeoutMsg: "section copy controls never rendered" },
@@ -505,14 +505,29 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 			const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
 			if (!plugin || !view) throw new Error("Mica or the active Markdown view is unavailable");
 			const root = view.containerEl;
-			const kinds = Array.from(root.querySelectorAll<HTMLElement>("[data-mica-actions]")).flatMap((button) =>
-				(button.dataset.micaActions ?? "")
+			const kinds = Array.from(root.querySelectorAll<HTMLElement>("[data-mica-action-strip]")).flatMap((strip) =>
+				(strip.dataset.micaActionStrip ?? "")
 					.split(" ")
 					.filter((action) => action.startsWith("copy-"))
 					.map((action) => action.slice(5)),
 			);
-			const button = root.querySelector<HTMLElement>('[data-mica-actions~="copy-grid"]');
-			if (!button) throw new Error("grid copy control is unavailable");
+			const strip = root.querySelector<HTMLElement>('[data-mica-action-strip~="copy-grid"]');
+			if (!strip) throw new Error("grid copy control is unavailable");
+			const copyGrid = async (): Promise<void> => {
+				const direct = strip?.querySelector<HTMLButtonElement>('[data-mica-action="copy-grid"]');
+				if (direct && getComputedStyle(direct).display !== "none") direct.click();
+				else {
+					strip.querySelector<HTMLButtonElement>('[data-mica-responsive-role="overflow"]')?.click();
+					const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+					Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? [])
+						.find(
+							(item) =>
+								item.querySelector(".menu-item-title")?.textContent?.trim() === "Copy grid contents",
+						)
+						?.click();
+				}
+				await Promise.resolve();
+			};
 
 			const clipboard = navigator.clipboard;
 			const originalWrite = clipboard.writeText;
@@ -544,13 +559,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 					plugin.settings.copyIncludeOuterContainer = outer;
 					plugin.settings.copyIncludeLineNumbers = false;
 					copied = "";
-					button.click();
-					const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-					const copy = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-						(item) => item.querySelector(".menu-item-title")?.textContent?.trim() === "Copy grid contents",
-					);
-					copy?.click();
-					await Promise.resolve();
+					await copyGrid();
 					outputs.push(copied);
 				}
 				plugin.settings.copyIncludeMicaSyntax = true;
@@ -559,13 +568,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				for (const scope of ["content", "output"] as const) {
 					plugin.settings.copyLineNumberScope = scope;
 					copied = "";
-					button.click();
-					const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-					const copy = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-						(item) => item.querySelector(".menu-item-title")?.textContent?.trim() === "Copy grid contents",
-					);
-					copy?.click();
-					await Promise.resolve();
+					await copyGrid();
 					numbered.push(copied);
 				}
 			} finally {
@@ -575,7 +578,7 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				plugin.settings.copyLineNumberScope = previous.lineScope;
 				Object.defineProperty(clipboard, "writeText", { configurable: true, value: originalWrite });
 			}
-			const keyboardCopy = root.querySelector<HTMLElement>('[data-mica-actions~="copy-text"]');
+			const keyboardCopy = root.querySelector<HTMLElement>('[data-mica-action="copy-text"]');
 			keyboardCopy?.focus();
 			// The toolbar intentionally fades in; wait past that visual transition
 			// before asserting the keyboard-revealed state.

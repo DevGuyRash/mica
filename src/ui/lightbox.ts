@@ -3,7 +3,8 @@ import { editorViewPrefs, type EditorLanguage, MdEditor, toggleViewPref, saveSho
 import { buildToolbar } from "./toolbarView";
 import { LightboxSearch } from "./lightboxSearch";
 import { sourceTextDetails, visibleTextStats, type VisibleTextStats } from "./textStats";
-import { mountActionMenu, type ActionSpec } from "./actionMenu";
+import type { ActionSpec } from "./actionMenu";
+import { mountResponsiveActionStrip } from "./responsiveActionStrip";
 
 export interface LightboxOpts {
 	app: App;
@@ -130,6 +131,7 @@ export class EditorLightbox extends Modal {
 		});
 		this.popSearchScope = () => setFindScope(false);
 		this.search = new LightboxSearch(searchHost, this.editor, setFindScope);
+		let refreshEditorActions = (): void => undefined;
 		if (head && this.opts.header) {
 			this.destroyHeader =
 				this.opts.header(
@@ -141,6 +143,7 @@ export class EditorLightbox extends Modal {
 					(language) => {
 						this.currentLanguage = language;
 						this.editor?.setLanguage(language);
+						refreshEditorActions();
 					},
 				) ?? null;
 		}
@@ -169,6 +172,7 @@ export class EditorLightbox extends Modal {
 			const on = editorViewPrefs().lineNumbers;
 			lineBtn.toggleClass("is-on", on);
 			lineBtn.setAttribute("aria-pressed", String(on));
+			refreshEditorActions();
 		};
 		lineBtn.addEventListener("click", () => {
 			toggleViewPref("lineNumbers");
@@ -177,16 +181,24 @@ export class EditorLightbox extends Modal {
 		document.addEventListener("mica-editor-prefs-change", paintLineButton);
 		this.removePrefsListener = () => document.removeEventListener("mica-editor-prefs-change", paintLineButton);
 
-		const actionMenu = mountActionMenu(
+		const toolbarMount = toolbarRow.querySelector<HTMLElement>(".mica-toolbar-mount");
+		const actionMenu = mountResponsiveActionStrip(
 			toolbarRow,
 			() =>
 				[
-					{ id: "find", label: "Find and replace", icon: "search", run: () => this.search?.open() },
+					{
+						id: "find",
+						label: "Find and replace",
+						icon: "search",
+						directPriority: 0,
+						run: () => this.search?.open(),
+					},
 					{
 						id: "whitespace",
 						label: "Show whitespace",
 						icon: "pilcrow",
 						checked: editorViewPrefs().whitespace,
+						directPriority: 1,
 						run: () => toggleViewPref("whitespace"),
 					},
 					{
@@ -194,6 +206,7 @@ export class EditorLightbox extends Modal {
 						label: "Style Markdown source",
 						icon: "wand-sparkles",
 						checked: editorViewPrefs().liveSyntax,
+						directPriority: 3,
 						disabled:
 							this.currentLanguage.kind === "code" &&
 							!["md", "markdown"].includes(
@@ -209,17 +222,27 @@ export class EditorLightbox extends Modal {
 						label: "Live preview",
 						icon: "eye",
 						checked: this.previewOn,
+						directPriority: 2,
 						run: () => {
 							this.previewOn = !this.previewOn;
 							split.toggleClass("is-split", this.previewOn);
 							if (this.previewOn) this.renderPreview();
+							refreshEditorActions();
 						},
 					},
 				] satisfies ActionSpec[],
-			"mica-tool mica-editor-menu",
-			"Editor actions",
-			this.opts.app,
+			{
+				app: this.opts.app,
+				source: toolbarRow,
+				label: "Editor actions",
+				className: "mica-editor-actions",
+				buttonClass: "mica-tool",
+				menuClass: "mica-tool mica-editor-menu",
+				preserveFocus: true,
+				reservedWidth: () => lineBtn.offsetWidth + (toolbarMount?.childElementCount ? 70 : 0) + 16,
+			},
 		);
+		refreshEditorActions = actionMenu.refresh;
 		this.destroyActionMenu = actionMenu.destroy;
 		this.actionMenuIsOpen = actionMenu.isOpen;
 		this.closeActionMenu = actionMenu.close;

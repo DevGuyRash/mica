@@ -65,6 +65,9 @@ export interface MicaSettings {
 	dragHandlePosition: "left" | "right";
 	/** How vertical-ellipsis entity menus normally open. Click always remains available. */
 	actionMenuTrigger: "click" | "hover";
+	/** Promote rendered-entity actions while they fit, or keep them in the ellipsis. */
+	entityActionLayout: "responsive" | "menu-only";
+	showTabActionMenuOnHover: boolean;
 	/** What clicking outside an inline editor does. */
 	editorClickOutside: "nothing" | "cancel" | "save";
 	/** Draw structural outlines (tabs, sections, cells) by default; per-block
@@ -123,6 +126,8 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	blockHeaderMode: "hover",
 	dragHandlePosition: "right",
 	actionMenuTrigger: "click",
+	entityActionLayout: "responsive",
+	showTabActionMenuOnHover: true,
 	editorClickOutside: "nothing",
 	showOutlines: false,
 	saveShortcut: "mod-enter",
@@ -177,6 +182,8 @@ export const SETTING_LIFECYCLES = {
 	blockHeaderMode: "open-widget-rerender",
 	dragHandlePosition: "immediate-runtime",
 	actionMenuTrigger: "immediate-runtime",
+	entityActionLayout: "open-widget-rerender",
+	showTabActionMenuOnHover: "open-widget-rerender",
 	editorClickOutside: "immediate-runtime",
 	showOutlines: "immediate-runtime",
 	saveShortcut: "next-open",
@@ -492,7 +499,9 @@ export class MicaSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Action menus")
-			.setDesc("Open section, tab, grid, and cell menus on click or after a short hover. Click always works.")
+			.setDesc(
+				"Open section, grid, cell, and tab ellipsis menus on click or after a short hover. Click always works.",
+			)
 			.addDropdown((d) =>
 				d
 					.addOption("click", "Click")
@@ -502,6 +511,34 @@ export class MicaSettingTab extends PluginSettingTab {
 						s.actionMenuTrigger = v as MicaSettings["actionMenuTrigger"];
 						await commit("actionMenuTrigger");
 					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Rendered action layout")
+			.setDesc(
+				"Show copy, edit, fold, and other actions directly when they fit, or always keep secondary actions in the three-dot menu. Tabs are always menu-only; drag stays direct.",
+			)
+			.addDropdown((d) =>
+				d
+					.addOption("responsive", "Responsive")
+					.addOption("menu-only", "Always use three-dot menu")
+					.setValue(s.entityActionLayout)
+					.onChange(async (v) => {
+						s.entityActionLayout = v as MicaSettings["entityActionLayout"];
+						await commit("entityActionLayout");
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Show tab action dots on hover")
+			.setDesc(
+				"Reveal each tab’s three-dot action menu on hover or keyboard focus. Right-click and keyboard context-menu access remain available when disabled.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(s.showTabActionMenuOnHover).onChange(async (value) => {
+					s.showTabActionMenuOnHover = value;
+					await commit("showTabActionMenuOnHover");
+				}),
 			);
 
 		new Setting(containerEl)

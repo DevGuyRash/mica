@@ -8,6 +8,7 @@ import {
 	lineNumbers,
 	placeholder as cmPlaceholder,
 	ViewPlugin,
+	WidgetType,
 	type DecorationSet,
 	type ViewUpdate,
 } from "@codemirror/view";
@@ -141,6 +142,14 @@ const MARKDOWN_LANGUAGE: EditorLanguage = { kind: "markdown" };
 interface SearchHighlights {
 	ranges: Uint32Array;
 	current: number;
+	preview?: SearchReplacementPreview;
+}
+
+export type SearchPreviewMode = "original" | "changes" | "result";
+
+export interface SearchReplacementPreview {
+	mode: Exclude<SearchPreviewMode, "original">;
+	replacements: readonly string[];
 }
 
 const setSearchHighlightsEffect = StateEffect.define<SearchHighlights>();
@@ -151,6 +160,7 @@ class SearchHighlightPlugin {
 	decorations: DecorationSet = Decoration.none;
 	private ranges: Uint32Array<ArrayBufferLike> = new Uint32Array();
 	private current = -1;
+	private preview: SearchReplacementPreview | undefined;
 
 	constructor(view: EditorView) {
 		this.rebuild(view);
@@ -161,19 +171,21 @@ class SearchHighlightPlugin {
 		if (update.docChanged) {
 			this.ranges = new Uint32Array();
 			this.current = -1;
+			this.preview = undefined;
 			changed = true;
 		}
 		for (const effect of update.transactions.flatMap((transaction) => transaction.effects)) {
 			if (!effect.is(setSearchHighlightsEffect)) continue;
 			this.ranges = effect.value.ranges;
 			this.current = effect.value.current;
+			this.preview = effect.value.preview;
 			changed = true;
 		}
 		if (changed) this.rebuild(update.view);
 	}
 
 	private rebuild(view: EditorView): void {
-		const marks: { from: number; to: number; decoration: Decoration }[] = [];
+		const marks: Range<Decoration>[] = [];
 		for (const visible of view.visibleRanges) {
 			let pair = lowerBoundPair(this.ranges, visible.from);
 			if (pair > 0 && this.ranges[pair * 2 - 1] >= visible.from) pair--;
@@ -183,20 +195,62 @@ class SearchHighlightPlugin {
 				if (from > visible.to) break;
 				if (rawTo < visible.from) continue;
 				const to = rawTo > from ? rawTo : Math.min(view.state.doc.length, from + 1);
+				const replacement = this.preview?.replacements[pair] ?? "";
+				if (this.preview?.mode === "result") {
+					const widget = new SearchReplacementWidget(replacement, "mica-search-preview-result");
+					marks.push(
+						(rawTo > from ? Decoration.replace({ widget }) : Decoration.widget({ widget, side: 1 })).range(
+							from,
+							rawTo > from ? rawTo : from,
+						),
+					);
+					continue;
+				}
+				if (this.preview?.mode === "changes") {
+					if (rawTo > from)
+						marks.push(Decoration.mark({ class: "mica-search-preview-old" }).range(from, rawTo));
+					marks.push(
+						Decoration.widget({
+							widget: new SearchReplacementWidget(replacement, "mica-search-preview-new"),
+							side: 1,
+						}).range(rawTo),
+					);
+					continue;
+				}
 				if (to <= from) continue;
-				marks.push({
-					from,
-					to,
-					decoration: Decoration.mark({
+				marks.push(
+					Decoration.mark({
 						class: pair === this.current ? "mica-search-current" : "mica-search-match",
-					}),
-				});
+					}).range(from, to),
+				);
 			}
 		}
-		this.decorations = Decoration.set(
-			marks.map(({ from, to, decoration }) => decoration.range(from, to)),
-			true,
-		);
+		this.decorations = Decoration.set(marks, true);
+	}
+}
+
+class SearchReplacementWidget extends WidgetType {
+	constructor(
+		private readonly replacement: string,
+		private readonly className: string,
+	) {
+		super();
+	}
+
+	eq(other: SearchReplacementWidget): boolean {
+		return this.replacement === other.replacement && this.className === other.className;
+	}
+
+	toDOM(): HTMLElement {
+		const span = document.createElement("span");
+		span.className = this.className;
+		span.textContent = this.replacement;
+		span.setAttribute("aria-label", this.replacement ? `Replacement: ${this.replacement}` : "Empty replacement");
+		return span;
+	}
+
+	ignoreEvent(): boolean {
+		return true;
 	}
 }
 
@@ -349,6 +403,19 @@ const micaEditorTheme = EditorView.theme({
 		background: "var(--mica-search-current, color-mix(in srgb, var(--text-accent) 38%, transparent))",
 		boxShadow: "inset 0 -1px 0 var(--text-accent)",
 		borderRadius: "2px",
+	},
+	".mica-search-preview-old": {
+		background: "color-mix(in srgb, var(--mica-diff-del, var(--color-red)) 18%, transparent)",
+		textDecoration: "line-through",
+		textDecorationColor: "var(--mica-diff-del, var(--color-red))",
+		textDecorationThickness: "1px",
+	},
+	".mica-search-preview-new, .mica-search-preview-result": {
+		background: "color-mix(in srgb, var(--mica-diff-add, var(--color-green)) 18%, transparent)",
+		textDecoration: "underline",
+		textDecorationColor: "var(--mica-diff-add, var(--color-green))",
+		textDecorationThickness: "1px",
+		whiteSpace: "pre-wrap",
 	},
 	".cm-placeholder": { color: "var(--text-faint)", fontStyle: "italic" },
 	"&[data-mica-live-syntax='on'] .mica-mh": {
@@ -592,8 +659,8 @@ export class MdEditor {
 		this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: value } });
 	}
 
-	setSearchHighlights(ranges: Uint32Array, current: number): void {
-		this.view.dispatch({ effects: setSearchHighlightsEffect.of({ ranges, current }) });
+	setSearchHighlights(ranges: Uint32Array, current: number, preview?: SearchReplacementPreview): void {
+		this.view.dispatch({ effects: setSearchHighlightsEffect.of({ ranges, current, preview }) });
 	}
 
 	revealRange(from: number, to: number): void {

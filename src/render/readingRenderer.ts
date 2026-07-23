@@ -42,10 +42,8 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 		const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
 
 		let chip: ChipInfo | undefined;
-		if (plugin.settings.showVersionChip) {
-			if (id && file instanceof TFile) {
-				chip = { plugin, file, blockId: id, content: source };
-			}
+		if (id && file instanceof TFile) {
+			chip = { plugin, file, blockId: id, content: source };
 		}
 
 		// Share tab/collapse state with Live Preview via the same key.
@@ -70,6 +68,8 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 					includeLineNumbers: plugin.settings.copyIncludeLineNumbers,
 					lineNumberScope: plugin.settings.copyLineNumberScope,
 				}),
+				entityActionLayout: plugin.settings.entityActionLayout,
+				showTabActionMenuOnHover: plugin.settings.showTabActionMenuOnHover,
 			});
 		} catch (e) {
 			// A render error must never blank the block — show it and keep the source.

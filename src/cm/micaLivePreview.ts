@@ -66,7 +66,7 @@ class MicaWidget extends WidgetType {
 		const info = view.state.field(editorInfoField, false);
 		const sourcePath = info?.file?.path ?? this.plugin.app.workspace.getActiveFile()?.path ?? "";
 		const chip =
-			this.plugin.settings.showVersionChip && this.id && info?.file
+			this.id && info?.file
 				? { plugin: this.plugin, file: info.file, blockId: this.id, content: this.content }
 				: undefined;
 		const ui = this.blockUi(sourcePath);
@@ -105,6 +105,8 @@ class MicaWidget extends WidgetType {
 				includeLineNumbers: this.plugin.settings.copyIncludeLineNumbers,
 				lineNumberScope: this.plugin.settings.copyLineNumberScope,
 			}),
+			entityActionLayout: this.plugin.settings.entityActionLayout,
+			showTabActionMenuOnHover: this.plugin.settings.showTabActionMenuOnHover,
 			preImage: () => this.liveContent(view) ?? this.content,
 		});
 		return el;

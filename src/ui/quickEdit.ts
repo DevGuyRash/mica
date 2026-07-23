@@ -5,7 +5,8 @@ import type { RenderCtx } from "./blockShell";
 import { EditorLightbox } from "./lightbox";
 import { editorViewPrefs, MdEditor, saveShortcutLabel, toggleViewPref } from "./mdEditor";
 import { buildToolbar } from "./toolbarView";
-import { mountActionMenu, type ActionSpec } from "./actionMenu";
+import type { ActionSpec } from "./actionMenu";
+import { mountResponsiveActionStrip } from "./responsiveActionStrip";
 
 export interface RegionTarget {
 	path: number[];
@@ -245,10 +246,12 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	});
 
 	const destroyToolbar = buildToolbar(tools, ctx.app, () => editor.view, true);
+	let refreshEditorActions = (): void => undefined;
 	const updateLineButton = (): void => {
 		const on = editorViewPrefs().lineNumbers;
 		lineBtn.setAttribute("aria-pressed", String(on));
 		lineBtn.toggleClass("is-on", on);
+		refreshEditorActions();
 	};
 	lineBtn.addEventListener("mousedown", (event) => event.preventDefault());
 	lineBtn.addEventListener("click", () => toggleViewPref("lineNumbers"));
@@ -266,17 +269,24 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		ctx.repaintRegion?.(region, target);
 		openLightboxFor(ctx, target, value);
 	};
-	const actionMenu = mountActionMenu(
+	const actionMenu = mountResponsiveActionStrip(
 		bar,
 		() => {
 			const prefs = editorViewPrefs();
 			return [
-				{ id: "expand", label: "Open in the full editor", icon: "maximize-2", run: openExpanded },
+				{
+					id: "expand",
+					label: "Open in the full editor",
+					icon: "maximize-2",
+					directPriority: 0,
+					run: openExpanded,
+				},
 				{
 					id: "whitespace",
 					label: "Show whitespace",
 					icon: "pilcrow",
 					checked: prefs.whitespace,
+					directPriority: 1,
 					run: () => toggleViewPref("whitespace"),
 				},
 				{
@@ -284,14 +294,23 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 					label: "Style Markdown source",
 					icon: "wand-sparkles",
 					checked: prefs.liveSyntax,
+					directPriority: 2,
 					run: () => toggleViewPref("liveSyntax"),
 				},
 			] satisfies ActionSpec[];
 		},
-		"mica-qe-actions",
-		"Editor actions",
-		ctx.app,
+		{
+			app: ctx.app,
+			source: bar,
+			label: "Editor actions",
+			className: "mica-editor-actions",
+			buttonClass: "mica-qe-action",
+			menuClass: "mica-qe-actions",
+			preserveFocus: true,
+			reservedWidth: () => save.offsetWidth + cancel.offsetWidth + lineBtn.offsetWidth + 70,
+		},
 	);
+	refreshEditorActions = actionMenu.refresh;
 
 	const closeToView = (): void => {
 		disarm();

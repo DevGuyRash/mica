@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Worker } from "node:worker_threads";
 import { SEARCH_WORKER_SOURCE } from "../src/ui/searchWorker.ts";
+import { buildSearchFlags } from "../src/ui/searchFlags.ts";
 
 interface Request {
 	id: number;
@@ -10,11 +11,14 @@ interface Request {
 	regex: boolean;
 	flags: string;
 	matchCase: boolean;
+	global?: boolean;
 	replacement?: string;
 	target?: number;
 }
 
-async function run(request: Request): Promise<{ ok: boolean; text?: string; ranges?: ArrayBuffer; error?: string }> {
+async function run(
+	request: Request,
+): Promise<{ ok: boolean; text?: string; ranges?: ArrayBuffer; replacements?: string[]; error?: string }> {
 	const wrapper = `
 const { parentPort } = require("node:worker_threads");
 const self = { postMessage: (value, transfer) => parentPort.postMessage(value, transfer) };
@@ -61,5 +65,108 @@ const zeroWidth = await run({
 	matchCase: true,
 });
 assert.deepEqual([...new Uint32Array(zeroWidth.ranges!)], [0, 0, 2, 2]);
+
+assert.deepEqual(buildSearchFlags({ matchCase: false, multiline: true, dotAll: true, otherFlags: "dv" }), {
+	ok: true,
+	flags: "imsdv",
+});
+assert.deepEqual(buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "d" }), {
+	ok: true,
+	flags: "d",
+});
+assert.match(
+	buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "g" }).error,
+	/Global search checkbox/i,
+);
+assert.match(
+	buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "uu" }).error,
+	/duplicate/i,
+);
+assert.match(
+	buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "m" }).error,
+	/controlled by the search checkboxes/i,
+);
+
+const multilineFlags = buildSearchFlags({ matchCase: true, multiline: true, dotAll: false, otherFlags: "u" });
+assert.equal(multilineFlags.ok, true);
+const multiline = await run({
+	id: 4,
+	type: "scan",
+	doc: "first\nsecond",
+	needle: "^second$",
+	regex: true,
+	flags: multilineFlags.ok ? multilineFlags.flags : "",
+	matchCase: true,
+});
+assert.equal(new Uint32Array(multiline.ranges!).length / 2, 1);
+
+const dotAllFlags = buildSearchFlags({ matchCase: true, multiline: false, dotAll: true, otherFlags: "u" });
+assert.equal(dotAllFlags.ok, true);
+const dotAll = await run({
+	id: 5,
+	type: "scan",
+	doc: "first\nsecond",
+	needle: "first.second",
+	regex: true,
+	flags: dotAllFlags.ok ? dotAllFlags.flags : "",
+	matchCase: true,
+});
+assert.equal(new Uint32Array(dotAll.ranges!).length / 2, 1);
+
+const preview = await run({
+	id: 6,
+	type: "scan",
+	doc: "one two one",
+	needle: "(?<word>one)",
+	regex: true,
+	flags: "u",
+	matchCase: true,
+	global: true,
+	replacement: "<$<word>>-$&-$$",
+});
+assert.deepEqual(preview.replacements, ["<one>-one-$", "<one>-one-$"]);
+assert.equal(new Uint32Array(preview.ranges!).length / 2, 2);
+
+const nonGlobal = await run({
+	id: 7,
+	type: "scan",
+	doc: "one two one",
+	needle: "one",
+	regex: false,
+	flags: "",
+	matchCase: true,
+	global: false,
+	replacement: "ONE",
+});
+assert.deepEqual([...new Uint32Array(nonGlobal.ranges!)], [0, 3]);
+assert.deepEqual(nonGlobal.replacements, ["ONE"]);
+
+const zeroWidthPreview = await run({
+	id: 8,
+	type: "scan",
+	doc: "😀😀",
+	needle: "(?=😀)",
+	regex: true,
+	flags: "u",
+	matchCase: true,
+	global: true,
+	replacement: "x",
+});
+assert.deepEqual([...new Uint32Array(zeroWidthPreview.ranges!)], [0, 0, 2, 2]);
+assert.deepEqual(zeroWidthPreview.replacements, ["x", "x"]);
+
+const nonGlobalReplace = await run({
+	id: 9,
+	type: "replace",
+	doc: "one two one",
+	needle: "one",
+	regex: false,
+	flags: "",
+	matchCase: true,
+	global: false,
+	replacement: "ONE",
+	target: -1,
+});
+assert.equal(nonGlobalReplace.text, "ONE two one");
 
 console.log("SEARCH WORKER OK");

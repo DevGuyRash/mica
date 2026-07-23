@@ -22,28 +22,86 @@ async function docContains(_pred: string): Promise<string> {
 	});
 }
 
-async function clickLatestMenuItem(title: string): Promise<void> {
+async function clickLatestMenuItem(title: string, allowDirect = true): Promise<void> {
 	await browser.waitUntil(
 		() =>
 			browser.executeObsidian(
-				(_, expected) =>
+				(_, expected, mayUseDirect) =>
 					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
 						(element) => element.textContent?.trim() === expected,
-					),
+					) ||
+					(mayUseDirect &&
+						Array.from(
+							document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`),
+						).some(
+							(button) =>
+								!button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
+						)),
 				title,
+				allowDirect,
 			),
 		{ timeout: 8000, timeoutMsg: `menu item never appeared: ${title}` },
 	);
-	await browser.executeObsidian((_, expected) => {
-		const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-		const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-			(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
-		);
-		item?.click();
-	}, title);
+	await browser.executeObsidian(
+		(_, expected, mayUseDirect) => {
+			const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+			const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+				(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
+			);
+			if (item) item.click();
+			else if (mayUseDirect)
+				Array.from(document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`))
+					.find(
+						(button) =>
+							!button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
+					)
+					?.click();
+		},
+		title,
+		allowDirect,
+	);
 }
 
 describe("grid column resize + wrap toggle", function () {
+	it("reveals grid drag and actions immediately when the pointer is over a cell", async function () {
+		await seedAndOpen(
+			"GridChrome.md",
+			"Intro.\n\n```mica id=grid-chrome\n:::grid {cols=2}\n:::cell\nalpha\n:::\n:::cell\nbeta\n:::\n:::\n```\n",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-grid-wrap"))),
+			{ timeout: 8000, timeoutMsg: "grid chrome fixture never rendered" },
+		);
+		await browser.$(".mica-lp .mica-cell").moveTo();
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const tools = document.querySelector<HTMLElement>(".mica-lp .mica-grid-tools");
+					const drag = tools?.querySelector<HTMLElement>('[aria-label="Drag to move this grid"]');
+					const more = tools?.querySelector<HTMLElement>('[data-mica-responsive-role="overflow"]');
+					const actionIds = (
+						tools?.querySelector<HTMLElement>("[data-mica-action-strip]")?.dataset.micaActionStrip ?? ""
+					)
+						.split(" ")
+						.filter(Boolean);
+					const direct = Array.from(tools?.querySelectorAll<HTMLElement>("[data-mica-action]") ?? []).filter(
+						(button) => getComputedStyle(button).display !== "none",
+					);
+					return Boolean(
+						tools &&
+						getComputedStyle(tools).opacity === "1" &&
+						getComputedStyle(tools).pointerEvents !== "none" &&
+						drag &&
+						drag.getBoundingClientRect().width > 0 &&
+						direct.length === actionIds.length &&
+						more &&
+						getComputedStyle(more).display === "none",
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "grid drag/actions were unavailable over cell content" },
+		);
+	});
+
 	it("dragging the column divider persists colw fractions into the grid header", async function () {
 		await seedAndOpen(
 			"GridResize.md",
@@ -321,13 +379,19 @@ describe("round 6: folds, click-outside, region delete", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
 			{ timeout: 8000, timeoutMsg: "regions never rendered" },
 		);
-		await browser.executeObsidian(() => {
+		const deletedDirectly = await browser.executeObsidian(() => {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("Delete me"),
 			) as HTMLElement;
+			const direct = region.querySelector<HTMLButtonElement>('[data-mica-action="delete"]');
+			if (direct && getComputedStyle(direct).display !== "none") {
+				direct.click();
+				return true;
+			}
 			(region.querySelector('[data-mica-actions~="delete"]') as HTMLElement).click();
+			return false;
 		});
-		await clickLatestMenuItem("Delete this section");
+		if (!deletedDirectly) await clickLatestMenuItem("Delete this section", false);
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(({ app, obsidian }) => {
@@ -358,13 +422,19 @@ describe("round 6: folds, click-outside, region delete", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
 			{ timeout: 8000, timeoutMsg: "regions never rendered" },
 		);
-		await browser.executeObsidian(() => {
+		const deletedDirectly = await browser.executeObsidian(() => {
 			const region = Array.from(document.querySelectorAll(".mica-lp .mica-region")).find((r) =>
 				r.textContent?.includes("remove me"),
 			) as HTMLElement;
+			const direct = region.querySelector<HTMLButtonElement>('[data-mica-action="delete"]');
+			if (direct && getComputedStyle(direct).display !== "none") {
+				direct.click();
+				return true;
+			}
 			(region.querySelector('[data-mica-actions~="delete"]') as HTMLElement).click();
+			return false;
 		});
-		await clickLatestMenuItem("Delete this section");
+		if (!deletedDirectly) await clickLatestMenuItem("Delete this section", false);
 		await browser.waitUntil(async () => !(await docContains("")).includes("remove me"), {
 			timeout: 8000,
 			timeoutMsg: "the section was not deleted",
@@ -447,10 +517,20 @@ describe("structured callout editor", function () {
 			{ timeout: 8000, timeoutMsg: "callout editor never opened" },
 		);
 
-		await browser.executeObsidian(() => {
+		const previewDirect = await browser.executeObsidian(() => {
+			const direct = Array.from(
+				document.querySelectorAll<HTMLButtonElement>(
+					'.mica-lightbox-toolbar button[aria-label="Live preview"]',
+				),
+			).find((button) => !button.hasClass("mica-editor-menu") && getComputedStyle(button).display !== "none");
+			if (direct) {
+				direct.click();
+				return true;
+			}
 			(document.querySelector(".mica-lightbox .mica-editor-menu") as HTMLButtonElement).click();
+			return false;
 		});
-		await clickLatestMenuItem("Live preview");
+		if (!previewDirect) await clickLatestMenuItem("Live preview");
 		const opened = await browser.executeObsidian(() => {
 			const modal = document.querySelector(".mica-lightbox") as HTMLElement;
 			const listeners = new Set<EventListenerOrEventListenerObject>();
@@ -642,14 +722,66 @@ describe("block navigator", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-tabs").length >= 1),
 			{ timeout: 8000, timeoutMsg: "tabs never rendered" },
 		);
-		// Fold the whole tabs group.
-		await browser.executeObsidian(() => {
-			(document.querySelector('.mica-lp .mica-tabs [data-mica-actions~="fold"]') as HTMLElement).click();
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const fold = document.querySelector<HTMLElement>('.mica-lp .mica-tabs [data-mica-action="fold"]');
+					return Boolean(fold && getComputedStyle(fold).display !== "none");
+				}),
+			{ timeout: 8000, timeoutMsg: "the stable tab-group fold control never rendered" },
+		);
+		// Fold directly, retaining the control's center for the pointer-travel contract.
+		const foldCenter = await browser.executeObsidian(() => {
+			const fold = document.querySelector<HTMLButtonElement>('.mica-lp .mica-tabs [data-mica-action="fold"]')!;
+			const rect = fold.getBoundingClientRect();
+			fold.click();
+			return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 		});
-		await clickLatestMenuItem("Fold this tab group");
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-fold-bar").length === 1),
 			{ timeout: 8000, timeoutMsg: "the group never folded" },
+		);
+		const unfoldCenter = await browser.executeObsidian(() => {
+			const unfold = document.querySelector<HTMLButtonElement>(
+				'.mica-lp .mica-fold-bar [data-mica-action="unfold"]',
+			)!;
+			const rect = unfold.getBoundingClientRect();
+			return {
+				label: unfold.getAttribute("aria-label"),
+				x: rect.left + rect.width / 2,
+				y: rect.top + rect.height / 2,
+			};
+		});
+		expect(unfoldCenter.label).toBe("Unfold this tab group");
+		expect(Math.abs(unfoldCenter.x - foldCenter.x)).toBeLessThanOrEqual(4);
+		expect(Math.abs(unfoldCenter.y - foldCenter.y)).toBeLessThanOrEqual(4);
+		await browser.$(".mica-lp .mica-head").moveTo();
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const grip = document.querySelector<HTMLElement>(".mica-lp .mica-fold-grip")!;
+					return getComputedStyle(grip).opacity === "0" && getComputedStyle(grip).pointerEvents === "none";
+				}),
+			{ timeout: 2000, timeoutMsg: "the folded tab drag grip stayed visible after pointer leave" },
+		);
+		await browser.$(".mica-lp .mica-fold-bar").moveTo();
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const grip = document.querySelector<HTMLElement>(".mica-lp .mica-fold-grip")!;
+					return getComputedStyle(grip).opacity === "1" && getComputedStyle(grip).pointerEvents === "auto";
+				}),
+			{ timeout: 2000, timeoutMsg: "the folded tab drag grip did not appear on hover" },
+		);
+		await browser.$(".mica-lp .mica-head").moveTo();
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() =>
+						getComputedStyle(document.querySelector<HTMLElement>(".mica-lp .mica-fold-grip")!).opacity ===
+						"0",
+				),
+			{ timeout: 2000, timeoutMsg: "the folded tab drag grip did not hide again" },
 		);
 		// Navigator → click the buried callout's row.
 		await browser.executeObsidian(() => {

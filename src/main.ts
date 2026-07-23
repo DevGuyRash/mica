@@ -19,6 +19,7 @@ import { disposeToolbarUi } from "./ui/toolbarView";
 import type { BlockUi } from "./ui/blockShell";
 import { setActionMenuTrigger } from "./ui/actionMenu";
 import { normalizeCustomToolConfig } from "./ui/customToolConfig";
+import { invalidateResponsiveActionStrips } from "./ui/responsiveActionStrip";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, the
@@ -209,6 +210,7 @@ export default class MicaPlugin extends Plugin {
 				void this.saveSettings();
 			},
 		});
+		invalidateResponsiveActionStrips();
 	}
 
 	/** Preferences whose observable contract begins with the next editor/modal. */
@@ -261,6 +263,7 @@ export default class MicaPlugin extends Plugin {
 			void this.saveSettings();
 		});
 		document.dispatchEvent(new CustomEvent("mica-settings-change"));
+		invalidateResponsiveActionStrips();
 		b.toggleClass("mica-animate", s.animations);
 		b.toggleClass("mica-outlines", s.showOutlines);
 		const set = (k: string, v: string | null): void => {

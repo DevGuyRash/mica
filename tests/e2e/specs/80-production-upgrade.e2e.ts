@@ -36,6 +36,63 @@ async function clickLatestMenuItem(title: string): Promise<void> {
 	}, title);
 }
 
+async function activateEditorAction(label: string): Promise<void> {
+	const openedMenu = await browser.executeObsidian((_, expected) => {
+		const direct = Array.from(
+			document.querySelectorAll<HTMLButtonElement>(`.mica-lightbox-toolbar button[aria-label="${expected}"]`),
+		).find((button) => !button.hasClass("mica-editor-menu") && getComputedStyle(button).display !== "none");
+		if (direct) {
+			direct.click();
+			return false;
+		}
+		(document.querySelector(".mica-lightbox .mica-editor-menu") as HTMLButtonElement).click();
+		return true;
+	}, label);
+	if (openedMenu) await clickLatestMenuItem(label);
+}
+
+async function activateEntityAction(rootSelector: string, actionId: string, label: string): Promise<void> {
+	const openedMenu = await browser.executeObsidian(
+		(_, selector, id) => {
+			const root = document.querySelector<HTMLElement>(selector);
+			const direct = root?.querySelector<HTMLButtonElement>(`[data-mica-action="${id}"]`);
+			if (direct && getComputedStyle(direct).display !== "none") {
+				direct.click();
+				return false;
+			}
+			root?.querySelector<HTMLButtonElement>('[data-mica-responsive-role="overflow"]')?.click();
+			return true;
+		},
+		rootSelector,
+		actionId,
+	);
+	if (openedMenu) await clickLatestMenuItem(label);
+}
+
+async function editorActionDisabled(label: string): Promise<boolean> {
+	const direct = await browser.executeObsidian((_, expected) => {
+		const button = Array.from(
+			document.querySelectorAll<HTMLButtonElement>(`.mica-lightbox-toolbar button[aria-label="${expected}"]`),
+		).find(
+			(candidate) => !candidate.hasClass("mica-editor-menu") && getComputedStyle(candidate).display !== "none",
+		);
+		return button ? button.disabled : null;
+	}, label);
+	if (direct !== null) return direct;
+	await browser.executeObsidian(() => (document.querySelector(".mica-editor-menu") as HTMLButtonElement).click());
+	await browser.waitUntil(() => browser.executeObsidian(() => Boolean(document.querySelector("body > .menu"))), {
+		timeout: 8000,
+		timeoutMsg: `editor action menu did not open for ${label}`,
+	});
+	return browser.executeObsidian((_, expected) => {
+		const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
+		const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
+			(row) => row.querySelector(".menu-item-title")?.textContent?.trim() === expected,
+		);
+		return item?.hasClass("is-disabled") ?? false;
+	}, label);
+}
+
 async function closeEditorLightbox(): Promise<void> {
 	// Test teardown commits its disposable fixture. Dedicated tests cover dirty
 	// discard; saving here avoids coupling this spec to that two-step contract.
@@ -87,13 +144,11 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-region.is-editing"))),
 			{ timeout: 8000, timeoutMsg: "the quick editor never opened" },
 		);
-		await browser.executeObsidian(() => {
-			const trigger = document.querySelector(
-				'.mica-lp .mica-region:not(.is-editing) [data-mica-actions~="lightbox"]',
-			) as HTMLElement | null;
-			trigger?.click();
-		});
-		await clickLatestMenuItem("Edit source in lightbox");
+		await activateEntityAction(
+			".mica-lp .mica-region:not(.is-editing) .mica-region-tools",
+			"lightbox",
+			"Edit source in lightbox",
+		);
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-mdeditor").length === 2),
 			{ timeout: 8000, timeoutMsg: "the quick and full editors were not open together" },
@@ -200,10 +255,7 @@ describe("production editor, actions, and focused-history upgrade", function () 
 		expect(sourceDetails).toContain("4 raw lines");
 		await browser.executeObsidian(() => document.body.click());
 
-		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lightbox .mica-editor-menu") as HTMLButtonElement).click();
-		});
-		await clickLatestMenuItem("Find and replace");
+		await activateEditorAction("Find and replace");
 		await browser.executeObsidian(() => {
 			const host = document.querySelector(".mica-lightbox .mica-mdeditor") as HTMLElement & {
 				micaEditor?: { setValue(value: string): void };
@@ -218,12 +270,71 @@ describe("production editor, actions, and focused-history upgrade", function () 
 				browser.executeObsidian(() =>
 					/\d+ of 3/.test(document.querySelector(".mica-find-status")?.textContent ?? ""),
 				),
-			{ timeout: 8000, timeoutMsg: "literal search did not find every match" },
+			{ timeout: 15_000, timeoutMsg: "literal search did not find every match" },
 		);
+		const searchDefaults = await browser.executeObsidian(() => {
+			const labels = Array.from(document.querySelectorAll<HTMLLabelElement>(".mica-find-options label"));
+			const checked = (name: string) =>
+				labels
+					.find((label) => label.textContent?.includes(name))
+					?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked ?? false;
+			return { global: checked("Global"), multiline: checked("Multiline") };
+		});
+		expect(searchDefaults).toEqual({ global: true, multiline: true });
 		await browser.executeObsidian(() => {
-			(document.querySelector('[aria-label="Show or hide replacement"]') as HTMLButtonElement).click();
+			(document.querySelector('[aria-label="Toggle replacement controls"]') as HTMLButtonElement).click();
 			const replacement = document.querySelector(".mica-replace-row .mica-find-input") as HTMLInputElement;
 			replacement.value = "WRONG";
+			replacement.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					/\d+ of 3/.test(document.querySelector(".mica-find-status")?.textContent ?? ""),
+				),
+			{ timeout: 8000, timeoutMsg: "replacement preview scan did not settle" },
+		);
+		await browser.executeObsidian(() => {
+			Array.from(document.querySelectorAll<HTMLButtonElement>(".mica-replace-preview-controls button"))
+				.find((button) => button.textContent === "Changes")
+				?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const host = document.querySelector(".mica-lightbox .mica-mdeditor") as HTMLElement & {
+						micaEditor?: { getValue(): string };
+					};
+					return Boolean(
+						host.shadowRoot?.querySelector(".mica-search-preview-old") &&
+						host.shadowRoot?.querySelector(".mica-search-preview-new") &&
+						host.micaEditor?.getValue() === "alpha Alpha alpha",
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "non-mutating Changes preview did not render" },
+		);
+		await browser.executeObsidian(() => {
+			Array.from(document.querySelectorAll<HTMLButtonElement>(".mica-replace-preview-controls button"))
+				.find((button) => button.textContent === "Result")
+				?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const host = document.querySelector(".mica-lightbox .mica-mdeditor") as HTMLElement & {
+						micaEditor?: { getValue(): string };
+					};
+					return Boolean(
+						host.shadowRoot?.querySelector(".mica-search-preview-result") &&
+						host.micaEditor?.getValue() === "alpha Alpha alpha",
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "non-mutating Result preview did not render" },
+		);
+		await browser.executeObsidian(() => {
+			Array.from(document.querySelectorAll<HTMLButtonElement>(".mica-replace-preview-controls button"))
+				.find((button) => button.textContent === "Original")
+				?.click();
 			const host = document.querySelector(".mica-lightbox .mica-mdeditor") as HTMLElement & {
 				micaEditor?: { getValue(): string; setValue(value: string): void };
 			};
@@ -243,13 +354,36 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			{ timeout: 8000, timeoutMsg: "search did not recover after synchronous stale-result invalidation" },
 		);
 		await browser.executeObsidian(() => {
+			const global = Array.from(document.querySelectorAll<HTMLLabelElement>(".mica-find-options label"))
+				.find((label) => label.textContent?.includes("Global"))
+				?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+			global?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const status = document.querySelector(".mica-find-status")?.textContent ?? "";
+					const replaceAll = Array.from(
+						document.querySelectorAll<HTMLButtonElement>(".mica-replace-row button"),
+					).find((button) => button.textContent === "Replace all");
+					return /1 of 1/.test(status) && replaceAll?.disabled === true;
+				}),
+			{ timeout: 8000, timeoutMsg: "Global-off first-match behavior did not settle" },
+		);
+		await browser.executeObsidian(() => {
+			const global = Array.from(document.querySelectorAll<HTMLLabelElement>(".mica-find-options label"))
+				.find((label) => label.textContent?.includes("Global"))
+				?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+			global?.click();
+		});
+		await browser.executeObsidian(() => {
 			const ribbon = document.querySelector(".mica-find-ribbon") as HTMLElement;
 			const regex = Array.from(ribbon.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find(
 				(input) => input.parentElement?.textContent?.includes("Regex"),
 			)!;
 			regex.click();
 			const flags = ribbon.querySelector(".mica-find-flags input") as HTMLInputElement;
-			flags.value = "giu";
+			flags.value = "u";
 			flags.dispatchEvent(new InputEvent("input", { bubbles: true }));
 			const input = ribbon.querySelector(".mica-find-input") as HTMLInputElement;
 			input.value = "(?<word>alpha)";
@@ -399,16 +533,81 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			"Intro.\n\n````mica id=code-toolbar-upgrade\n```\nconst value = 1;\n```\n````\n",
 		);
 		await browser.waitUntil(
-			() => browser.executeObsidian(() => Boolean(document.querySelector('[data-mica-actions~="fields"]'))),
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector('[data-mica-action="fields"], [data-mica-actions~="fields"]')),
+				),
 			{ timeout: 8000, timeoutMsg: "the code actions never rendered" },
 		);
-		await browser.executeObsidian(() => {
-			(document.querySelector('[data-mica-actions~="fields"]') as HTMLButtonElement).click();
-		});
-		await clickLatestMenuItem("Edit language and code…");
+		await activateEntityAction(
+			'.mica-lp .mica-responsive-actions[data-mica-action-strip~="fields"]',
+			"fields",
+			"Edit language and code…",
+		);
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lightbox .mica-codeedit-info"))),
 			{ timeout: 8000, timeoutMsg: "the code lightbox never opened" },
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const search = document.querySelector<HTMLElement>(
+						'.mica-lightbox-toolbar [aria-label="Find and replace"]',
+					);
+					return Boolean(search && getComputedStyle(search).display !== "none");
+				}),
+			{ timeout: 8000, timeoutMsg: "wide code-lightbox actions did not promote into the toolbar" },
+		);
+		const wideToolbar = await browser.executeObsidian(() => {
+			const toolbar = document.querySelector<HTMLElement>(".mica-lightbox-toolbar")!;
+			const visible = Array.from(toolbar.querySelectorAll<HTMLButtonElement>("button")).filter(
+				(button) => getComputedStyle(button).display !== "none",
+			);
+			return {
+				lineNumbersVisible:
+					getComputedStyle(toolbar.querySelector<HTMLElement>(".mica-tool-lines")!).display !== "none",
+				buttons: visible
+					.filter((button) => button.querySelector("svg"))
+					.map((button) => ({
+						label: button.getAttribute("aria-label"),
+						width: button.getBoundingClientRect().width,
+						svgWidth: button.querySelector("svg")?.getBoundingClientRect().width ?? 0,
+					})),
+			};
+		});
+		expect(wideToolbar.lineNumbersVisible).toBe(true);
+		expect(wideToolbar.buttons.every((button) => button.width >= 22 && button.svgWidth >= 12)).toBe(true);
+		await browser.executeObsidian(() => {
+			document.querySelector<HTMLElement>(".mica-lightbox-toolbar")!.style.maxWidth = "78px";
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const menu = document.querySelector<HTMLElement>(".mica-editor-menu");
+					const search = document.querySelector<HTMLElement>(
+						'.mica-lightbox-toolbar [aria-label="Find and replace"]',
+					);
+					return Boolean(
+						menu &&
+						getComputedStyle(menu).display !== "none" &&
+						search &&
+						getComputedStyle(search).display === "none",
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "narrow code-lightbox actions did not collapse into the ellipsis" },
+		);
+		await browser.executeObsidian(() => {
+			document.querySelector<HTMLElement>(".mica-lightbox-toolbar")!.style.maxWidth = "";
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const search = document.querySelector<HTMLElement>(
+						'.mica-lightbox-toolbar [aria-label="Find and replace"]',
+					);
+					return Boolean(search && getComputedStyle(search).display !== "none");
+				}),
+			{ timeout: 8000, timeoutMsg: "code-lightbox actions did not promote again after widening" },
 		);
 
 		const previous = await browser.executeObsidian(async ({ app }) => {
@@ -470,14 +669,7 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			boldBuiltin: false,
 			buttonTabIndex: 0,
 		});
-		await browser.executeObsidian(() => (document.querySelector(".mica-editor-menu") as HTMLButtonElement).click());
-		const plainSyntaxDisabled = await browser.executeObsidian(() => {
-			const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-			const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-				(row) => row.querySelector(".menu-item-title")?.textContent?.trim() === "Style Markdown source",
-			);
-			return item?.hasClass("is-disabled") ?? false;
-		});
+		const plainSyntaxDisabled = await editorActionDisabled("Style Markdown source");
 		expect(plainSyntaxDisabled).toBe(true);
 		await browser.executeObsidian(() => document.body.click());
 		await browser.waitUntil(() => browser.executeObsidian(() => !document.querySelector("body > .menu")), {
@@ -532,20 +724,25 @@ describe("production editor, actions, and focused-history upgrade", function () 
 				}),
 			{ timeout: 8000, timeoutMsg: "the Markdown code mode or live toolbar scope did not update" },
 		);
-		await browser.executeObsidian(() => (document.querySelector(".mica-editor-menu") as HTMLButtonElement).click());
-		const markdownSyntaxDisabled = await browser.executeObsidian(() => {
-			const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-			const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-				(row) => row.querySelector(".menu-item-title")?.textContent?.trim() === "Style Markdown source",
-			);
-			return item?.hasClass("is-disabled") ?? false;
-		});
+		const markdownSyntaxDisabled = await editorActionDisabled("Style Markdown source");
 		expect(markdownSyntaxDisabled).toBe(false);
 		await browser.executeObsidian(() => document.body.click());
 		await browser.waitUntil(() => browser.executeObsidian(() => !document.querySelector("body > .menu")), {
 			timeout: 8000,
 			timeoutMsg: "the Markdown-code editor menu did not dismiss",
 		});
+		await browser.executeObsidian(() => {
+			const toolbar = document.querySelector<HTMLElement>(".mica-lightbox-toolbar")!;
+			toolbar.style.maxWidth = "150px";
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const button = document.querySelector<HTMLElement>(".mica-editor-menu");
+					return Boolean(button && getComputedStyle(button).display !== "none");
+				}),
+			{ timeout: 8000, timeoutMsg: "editor actions did not collapse into the narrow-toolbar menu" },
+		);
 		await browser.executeObsidian(() => (document.querySelector(".mica-editor-menu") as HTMLElement).focus());
 		await browser.keys([Key.Enter]);
 		await browser.waitUntil(() => browser.executeObsidian(() => Boolean(document.querySelector("body > .menu"))), {
@@ -588,16 +785,25 @@ describe("production editor, actions, and focused-history upgrade", function () 
 		await seedAndOpen("ActionMenuUpgrade.md", "Intro.\n\n```mica id=action-upgrade\nmenu body\n```\n");
 		const previous = await browser.executeObsidian(async ({ app }) => {
 			type Plugin = {
-				settings: { actionMenuTrigger: "click" | "hover" };
+				settings: {
+					actionMenuTrigger: "click" | "hover";
+					entityActionLayout: "responsive" | "menu-only";
+				};
 				applyStyleVars(): void;
+				refreshViews(): void;
 				saveSettings(): Promise<void>;
 			};
 			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin | null } }).plugins.getPlugin(
 				"mica",
 			)!;
-			const old = plugin.settings.actionMenuTrigger;
+			const old = {
+				actionMenuTrigger: plugin.settings.actionMenuTrigger,
+				entityActionLayout: plugin.settings.entityActionLayout,
+			};
 			plugin.settings.actionMenuTrigger = "hover";
+			plugin.settings.entityActionLayout = "responsive";
 			plugin.applyStyleVars();
+			plugin.refreshViews();
 			await plugin.saveSettings();
 			return old;
 		});
@@ -605,9 +811,107 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp [data-mica-actions]"))),
 			{ timeout: 8000, timeoutMsg: "the action trigger never rendered" },
 		);
+		// Make the packing boundary deterministic even under the 390px mobile
+		// profile: this assertion is specifically the wide-container contract.
+		await browser.executeObsidian(() => {
+			const region = document.querySelector<HTMLElement>(".mica-lp .mica-region");
+			if (region) region.style.width = "900px";
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll<HTMLElement>('.mica-lp [data-mica-action^="copy-"]')).some(
+						(button) => getComputedStyle(button).display !== "none",
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "responsive entity actions never promoted copy into the hover strip" },
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const strip = document.querySelector<HTMLElement>(
+						".mica-lp .mica-region-tools .mica-responsive-actions",
+					);
+					const more = strip?.querySelector<HTMLElement>('[data-mica-responsive-role="overflow"]');
+					const actionCount = (strip?.dataset.micaActionStrip ?? "").split(" ").filter(Boolean).length;
+					const directCount = Array.from(
+						strip?.querySelectorAll<HTMLElement>("[data-mica-action]") ?? [],
+					).filter((button) => getComputedStyle(button).display !== "none").length;
+					return Boolean(
+						strip &&
+						more &&
+						getComputedStyle(more).display === "none" &&
+						actionCount > 0 &&
+						directCount === actionCount,
+					);
+				}),
+			{
+				timeout: 8000,
+				timeoutMsg: "wide responsive actions kept an unnecessary ellipsis or hid an action",
+			},
+		);
+		await browser.executeObsidian(() => {
+			const region = document.querySelector<HTMLElement>(".mica-lp .mica-region");
+			if (region) region.style.width = "132px";
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(
+						document.querySelectorAll<HTMLElement>('.mica-lp [data-mica-responsive-role="overflow"]'),
+					).some((button) => getComputedStyle(button).display !== "none"),
+				),
+			{ timeout: 8000, timeoutMsg: "narrow responsive actions did not create an ellipsis" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			type Plugin = {
+				settings: { entityActionLayout: "responsive" | "menu-only" };
+				refreshViews(): void;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			plugin.settings.entityActionLayout = "menu-only";
+			plugin.refreshViews();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll<HTMLElement>(".mica-lp [data-mica-action]")).every(
+						(button) => getComputedStyle(button).display === "none",
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "menu-only mode left a secondary entity action visible" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			type Plugin = {
+				settings: { entityActionLayout: "responsive" | "menu-only" };
+				refreshViews(): void;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			plugin.settings.entityActionLayout = "responsive";
+			plugin.refreshViews();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp [data-mica-actions]"))),
+			{ timeout: 8000, timeoutMsg: "responsive entity actions did not rebuild after menu-only mode" },
+		);
+		await browser.executeObsidian(() => {
+			const region = document.querySelector<HTMLElement>(".mica-lp .mica-region");
+			if (region) region.style.width = "132px";
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll<HTMLElement>(".mica-lp [data-mica-actions]")).some(
+						(button) => getComputedStyle(button).display !== "none",
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "narrow action strip did not settle after rerender" },
+		);
 		const coarseTarget = await browser.executeObsidian(() => {
 			if (!window.matchMedia("(pointer: coarse)").matches) return null;
-			const trigger = document.querySelector(".mica-lp [data-mica-actions]") as HTMLElement;
+			const trigger = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp [data-mica-actions]")).find(
+				(button) => getComputedStyle(button).display !== "none",
+			)!;
 			const rect = trigger.getBoundingClientRect();
 			const style = getComputedStyle(trigger);
 			return {
@@ -624,7 +928,9 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			expect(coarseTarget.pointerEvents).not.toBe("none");
 		}
 		await browser.executeObsidian(() => {
-			const trigger = document.querySelector(".mica-lp [data-mica-actions]") as HTMLElement;
+			const trigger = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp [data-mica-actions]")).find(
+				(button) => getComputedStyle(button).display !== "none",
+			)!;
 			trigger.dispatchEvent(new PointerEvent("pointerenter", { bubbles: false }));
 		});
 		if (coarseTarget) {
@@ -648,7 +954,9 @@ describe("production editor, actions, and focused-history upgrade", function () 
 					query === "(hover: hover) and (pointer: fine)"
 						? ({ matches: false, media: query } as MediaQueryList)
 						: nativeMatch(query)) as typeof window.matchMedia;
-				const trigger = document.querySelector(".mica-lp [data-mica-actions]") as HTMLElement;
+				const trigger = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp [data-mica-actions]")).find(
+					(button) => getComputedStyle(button).display !== "none",
+				)!;
 				trigger.dispatchEvent(new PointerEvent("pointerenter", { bubbles: false }));
 			});
 			await browser.pause(450);
@@ -660,7 +968,13 @@ describe("production editor, actions, and focused-history upgrade", function () 
 			});
 		}
 		await browser.executeObsidian(() => {
-			(document.querySelector(".mica-lp [data-mica-actions]") as HTMLElement).focus();
+			Array.from(
+				document.querySelectorAll<HTMLElement>(
+					".mica-lp .mica-responsive-actions.has-overflow [data-mica-actions]",
+				),
+			)
+				.find((button) => getComputedStyle(button).display !== "none")
+				?.focus();
 		});
 		await browser.keys([Key.Enter]);
 		await browser.waitUntil(() => browser.executeObsidian(() => Boolean(document.querySelector("body > .menu"))), {
@@ -670,15 +984,450 @@ describe("production editor, actions, and focused-history upgrade", function () 
 		await browser.keys([Key.Escape]);
 		await browser.executeObsidian(async ({ app }, old) => {
 			type Plugin = {
-				settings: { actionMenuTrigger: "click" | "hover" };
+				settings: {
+					actionMenuTrigger: "click" | "hover";
+					entityActionLayout: "responsive" | "menu-only";
+				};
+				applyStyleVars(): void;
+				refreshViews(): void;
+				saveSettings(): Promise<void>;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin | null } }).plugins.getPlugin(
+				"mica",
+			)!;
+			plugin.settings.actionMenuTrigger = old.actionMenuTrigger;
+			plugin.settings.entityActionLayout = old.entityActionLayout;
+			plugin.applyStyleVars();
+			plugin.refreshViews();
+			await plugin.saveSettings();
+		}, previous);
+	});
+
+	it("keeps block appearance open across live changes without overflowing its rows", async function () {
+		const previousAppearance = await browser.executeObsidian(async ({ app }) => {
+			type Plugin = {
+				settings: {
+					accentColor: string;
+					density: "comfortable" | "compact";
+					tabStyle: "connected" | "underline" | "pill";
+					showOutlines: boolean;
+					cardRadiusPx: number;
+				};
 				applyStyleVars(): void;
 				saveSettings(): Promise<void>;
 			};
 			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin | null } }).plugins.getPlugin(
 				"mica",
 			)!;
-			plugin.settings.actionMenuTrigger = old;
+			const previous = {
+				accentColor: plugin.settings.accentColor,
+				density: plugin.settings.density,
+				tabStyle: plugin.settings.tabStyle,
+				showOutlines: plugin.settings.showOutlines,
+				cardRadiusPx: plugin.settings.cardRadiusPx,
+			};
+			plugin.settings.accentColor = "#123456";
+			plugin.settings.density = "compact";
+			plugin.settings.tabStyle = "pill";
+			plugin.settings.showOutlines = false;
+			plugin.settings.cardRadiusPx = 14;
 			plugin.applyStyleVars();
+			await plugin.saveSettings();
+			return previous;
+		});
+		await seedAndOpen(
+			"AppearanceSession.md",
+			"```mica id=appearance-session\ntab: One\nBody.\n\ntab: Two\nMore.\n```\n",
+		);
+		await activateEntityAction(".mica-lp .mica-head", "appearance", "Block appearance…");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-appearance"))),
+			{ timeout: 8000, timeoutMsg: "the appearance popover never opened" },
+		);
+
+		await browser.executeObsidian(() => {
+			const color = document.querySelector<HTMLInputElement>('.mica-appearance input[type="color"]');
+			if (!color) throw new Error("missing block accent control");
+			color.value = "#d946ef";
+			color.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(async ({ app, obsidian }) => {
+					const file = app.vault.getAbstractFileByPath("AppearanceSession.md");
+					return (
+						file instanceof obsidian.TFile &&
+						(await app.vault.read(file)).includes("accent=#d946ef") &&
+						Boolean(document.querySelector(".mica-appearance"))
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "the accent edit dismissed the appearance session" },
+		);
+
+		const geometry = await browser.executeObsidian(() => {
+			const popover = document.querySelector<HTMLElement>(".mica-appearance")!;
+			const bounds = popover.getBoundingClientRect();
+			const rows = Array.from(popover.querySelectorAll<HTMLElement>(".mica-appearance-row"));
+			const segmentGroups = Array.from(popover.querySelectorAll<HTMLElement>(".mica-appearance-segments"));
+			return {
+				badge: popover.querySelector(".mica-appearance-override")?.textContent?.trim() ?? "",
+				contained: rows.every((row) =>
+					Array.from(row.children).every((child) => {
+						const rect = child.getBoundingClientRect();
+						return rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1;
+					}),
+				),
+				segmentsReadable: segmentGroups.every((group) => {
+					const groupBounds = group.getBoundingClientRect();
+					return Array.from(group.querySelectorAll<HTMLButtonElement>("button")).every((button) => {
+						const rect = button.getBoundingClientRect();
+						return (
+							rect.left >= groupBounds.left - 1 &&
+							rect.right <= groupBounds.right + 1 &&
+							button.scrollWidth <= button.clientWidth + 1
+						);
+					});
+				}),
+			};
+		});
+		expect(geometry.badge).toBe("Local");
+		expect(geometry.contained).toBe(true);
+		expect(geometry.segmentsReadable).toBe(true);
+
+		for (const [choice, attr] of [
+			["Comfy", "density=comfortable"],
+			["Connected", "tabstyle=connected"],
+			["On", "outline=on"],
+		] as const) {
+			await browser.executeObsidian((_, label) => {
+				const button = Array.from(
+					document.querySelectorAll<HTMLButtonElement>(".mica-appearance .mica-pop-seg"),
+				).find((candidate) => candidate.textContent?.trim() === label);
+				if (!button) throw new Error(`missing appearance choice: ${label}`);
+				button.click();
+			}, choice);
+			await browser.waitUntil(
+				() =>
+					browser.executeObsidian(async ({ app, obsidian }, expectedAttr) => {
+						const file = app.vault.getAbstractFileByPath("AppearanceSession.md");
+						return (
+							file instanceof obsidian.TFile &&
+							(await app.vault.read(file)).includes(expectedAttr) &&
+							Boolean(document.querySelector(".mica-appearance"))
+						);
+					}, attr),
+				{ timeout: 8000, timeoutMsg: `${choice} was not saved or dismissed the appearance session` },
+			);
+		}
+
+		const source = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const file = app.vault.getAbstractFileByPath("AppearanceSession.md");
+			return file instanceof obsidian.TFile ? app.vault.read(file) : "";
+		});
+		expect(source).toContain("density=comfortable");
+		expect(source).toContain("tabstyle=connected");
+		expect(source).toContain("outline=on");
+
+		const effective = await browser.executeObsidian(() => {
+			const root = document.querySelector<HTMLElement>(".mica-lp.mica")!;
+			const activeTab = root.querySelector<HTMLElement>(".mica-tab-btn.is-active")!;
+			const region = root.querySelector<HTMLElement>(".mica-region")!;
+			const rootStyle = getComputedStyle(root);
+			return {
+				accent: rootStyle.getPropertyValue("--mica-accent").trim(),
+				gap: rootStyle.getPropertyValue("--mica-gap").trim(),
+				tabRadius: getComputedStyle(activeTab).borderRadius,
+				regionBorder: getComputedStyle(region).borderTopStyle,
+			};
+		});
+		expect(effective.accent).toBe("#d946ef");
+		expect(effective.gap).toBe("8px");
+		expect(effective.tabRadius).not.toBe("999px");
+		expect(effective.regionBorder).toBe("solid");
+
+		await browser.executeObsidian(() => {
+			const slider = document.querySelector<HTMLInputElement>('.mica-appearance input[type="range"]');
+			if (!slider) throw new Error("missing block radius control");
+			slider.value = "4";
+			slider.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const root = document.querySelector<HTMLElement>(".mica-lp.mica");
+					return (
+						root?.style.getPropertyValue("--mica-radius") === "4px" &&
+						root.style.getPropertyValue("--mica-accent") === "#d946ef" &&
+						Boolean(document.querySelector(".mica-appearance"))
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "radius override did not apply without disturbing the accent" },
+		);
+
+		await browser.executeObsidian(() => {
+			const reset = document.querySelector<HTMLButtonElement>(
+				'.mica-appearance button[aria-label*="global radius"]',
+			);
+			if (!reset) throw new Error("missing radius reset control");
+			reset.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(async ({ app, obsidian }) => {
+					const file = app.vault.getAbstractFileByPath("AppearanceSession.md");
+					const source = file instanceof obsidian.TFile ? await app.vault.read(file) : "";
+					const root = document.querySelector<HTMLElement>(".mica-lp.mica");
+					const color = document.querySelector<HTMLInputElement>('.mica-appearance input[type="color"]');
+					return (
+						!source.includes("radius=") &&
+						getComputedStyle(root!).getPropertyValue("--mica-radius").trim() === "14px" &&
+						root?.style.getPropertyValue("--mica-accent") === "#d946ef" &&
+						color?.value === "#d946ef"
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "radius reset changed the accent or failed to restore the global radius" },
+		);
+
+		await browser.executeObsidian(() => {
+			const reset = document.querySelector<HTMLButtonElement>(
+				'.mica-appearance button[aria-label*="global accent"]',
+			);
+			if (!reset) throw new Error("missing accent reset control");
+			reset.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(async ({ app, obsidian }) => {
+					const file = app.vault.getAbstractFileByPath("AppearanceSession.md");
+					const source = file instanceof obsidian.TFile ? await app.vault.read(file) : "";
+					return !source.includes("accent=") && Boolean(document.querySelector(".mica-appearance"));
+				}),
+			{ timeout: 8000, timeoutMsg: "accent reset did not remove the local override or keep the popover open" },
+		);
+		const resetAccent = await browser.executeObsidian(() => {
+			const root = document.querySelector<HTMLElement>(".mica-lp.mica")!;
+			const color = document.querySelector<HTMLInputElement>('.mica-appearance input[type="color"]');
+			const probe = root.createSpan();
+			probe.style.color = "var(--mica-accent)";
+			const probeColor = getComputedStyle(probe).color;
+			probe.remove();
+			return {
+				computed: getComputedStyle(root).getPropertyValue("--mica-accent").trim(),
+				inline: root.style.getPropertyValue("--mica-accent"),
+				picker: color?.value ?? "",
+				body: document.body.style.getPropertyValue("--mica-accent"),
+				probeColor,
+			};
+		});
+		expect(resetAccent.inline).toBe("");
+		expect(resetAccent.body).toBe("#123456");
+		expect(resetAccent.computed).toBe("#123456");
+		expect(resetAccent.probeColor).toBe("rgb(18, 52, 86)");
+		expect(resetAccent.picker).toBe("#123456");
+
+		await browser.executeObsidian(() => {
+			document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+		});
+		await browser.waitUntil(() => browser.executeObsidian(() => !document.querySelector(".mica-appearance")), {
+			timeout: 8000,
+			timeoutMsg: "outside interaction did not close the appearance popover",
+		});
+		await browser.executeObsidian(async ({ app }, previous) => {
+			type Plugin = {
+				settings: typeof previous;
+				applyStyleVars(): void;
+				saveSettings(): Promise<void>;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin | null } }).plugins.getPlugin(
+				"mica",
+			)!;
+			Object.assign(plugin.settings, previous);
+			plugin.applyStyleVars();
+			await plugin.saveSettings();
+		}, previousAppearance);
+	});
+
+	it("keeps tab actions compact and selects icons through the runtime catalog", async function () {
+		const note = "TabActionPolish.md";
+		await seedAndOpen(
+			note,
+			"Intro.\n\n```mica id=tab-action-polish\ntab: Active\nfirst\n\ntab: Other\nsecond\n```\n",
+		);
+		const previous = await browser.executeObsidian(async ({ app }) => {
+			type Plugin = {
+				settings: { showTabActionMenuOnHover: boolean };
+				refreshViews(): void;
+				saveSettings(): Promise<void>;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			const old = plugin.settings.showTabActionMenuOnHover;
+			plugin.settings.showTabActionMenuOnHover = true;
+			plugin.refreshViews();
+			await plugin.saveSettings();
+			return old;
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					() =>
+						document.querySelectorAll(".mica-lp .mica-tab-chip").length === 2 &&
+						Boolean(document.querySelector(".mica-lp .mica-tab-menu-hover")),
+				),
+			{ timeout: 8000, timeoutMsg: "tab fixtures did not render" },
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const chip = document.querySelector<HTMLElement>(".mica-lp .mica-tab-chip")!;
+					chip.querySelector<HTMLElement>(".mica-tab-btn")?.focus();
+					const trigger = chip.querySelector<HTMLElement>('[data-mica-responsive-role="overflow"]');
+					return Boolean(trigger && Number(getComputedStyle(trigger).opacity) > 0);
+				}),
+			{ timeout: 8000, timeoutMsg: "tab dots did not reveal on keyboard focus" },
+		);
+		const tabPresentation = await browser.executeObsidian(() => {
+			const chips = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp .mica-tab-chip"));
+			const active = chips[0].querySelector<HTMLElement>(".mica-tab-btn")!;
+			const inactive = chips[1].querySelector<HTMLElement>(".mica-tab-btn")!;
+			const trigger = chips[0].querySelector<HTMLElement>('[data-mica-responsive-role="overflow"]')!;
+			return {
+				directActions: chips[0].querySelectorAll('[data-mica-action]:not([style*="display: none"])').length,
+				triggerOpacity: getComputedStyle(trigger).opacity,
+				activeRail: getComputedStyle(active, "::after").backgroundColor,
+				inactiveRail: getComputedStyle(inactive, "::after").backgroundColor,
+				activeBackground: getComputedStyle(active).backgroundColor,
+				inactiveBackground: getComputedStyle(inactive).backgroundColor,
+			};
+		});
+		expect(tabPresentation.directActions).toBe(0);
+		expect(Number(tabPresentation.triggerOpacity)).toBeGreaterThan(0);
+		expect(tabPresentation.activeRail).not.toBe(tabPresentation.inactiveRail);
+		expect(tabPresentation.activeBackground).not.toBe(tabPresentation.inactiveBackground);
+
+		await browser.executeObsidian(({ app }) => {
+			type Plugin = {
+				settings: { showTabActionMenuOnHover: boolean };
+				refreshViews(): void;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			plugin.settings.showTabActionMenuOnHover = false;
+			plugin.refreshViews();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const trigger = document.querySelector<HTMLElement>(
+						'.mica-lp .mica-tab-chip [data-mica-responsive-role="overflow"]',
+					);
+					return Boolean(trigger && getComputedStyle(trigger).opacity === "0" && trigger.tabIndex === -1);
+				}),
+			{ timeout: 8000, timeoutMsg: "disabling tab hover dots did not apply live" },
+		);
+		await browser.executeObsidian(() => {
+			const chip = document.querySelector<HTMLElement>(".mica-lp .mica-tab-chip")!;
+			chip.dispatchEvent(
+				new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }),
+			);
+		});
+		await clickLatestMenuItem("Set icon…");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-icon-picker-modal"))),
+			{ timeout: 8000, timeoutMsg: "icon picker did not open" },
+		);
+		const initialIconPicker = await browser.executeObsidian(() => {
+			const options = Array.from(document.querySelectorAll<HTMLElement>(".mica-icon-picker-option"));
+			return {
+				count: options.length,
+				allLabelsContained: options.every((option) => {
+					const label = option.querySelector<HTMLElement>(".mica-icon-picker-name");
+					if (!label) return false;
+					const outer = option.getBoundingClientRect();
+					const inner = label.getBoundingClientRect();
+					return inner.top >= outer.top && inner.bottom <= outer.bottom;
+				}),
+			};
+		});
+		expect(initialIconPicker.count).toBeLessThanOrEqual(72);
+		expect(initialIconPicker.allLabelsContained).toBe(true);
+		await browser.executeObsidian(() => {
+			const search = document.querySelector<HTMLInputElement>(".mica-icon-picker-search input")!;
+			search.value = "rocket";
+			search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector('[data-icon-id*="rocket"]'))),
+			{ timeout: 8000, timeoutMsg: "runtime icon search did not find rocket" },
+		);
+		const chosenIcon = await browser.executeObsidian(() => {
+			const button = document.querySelector<HTMLButtonElement>('[data-icon-id*="rocket"]');
+			const id = button?.dataset.iconId ?? "";
+			button?.click();
+			return id;
+		});
+		expect(chosenIcon).not.toBe("");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					async ({ app, obsidian }, path, icon) => {
+						const file = app.vault.getAbstractFileByPath(path);
+						return file instanceof obsidian.TFile
+							? (await app.vault.read(file)).includes(`icon=${icon}`)
+							: false;
+					},
+					note,
+					chosenIcon,
+				),
+			{ timeout: 8000, timeoutMsg: "chosen tab icon was not persisted" },
+		);
+		const collapseAnchor = await browser.executeObsidian(() => {
+			const historyCount = document.querySelectorAll<HTMLElement>(
+				'.mica-lp [aria-label^="Version history"]',
+			).length;
+			const button = document.querySelector<HTMLButtonElement>(".mica-lp .mica-collapse-anchor")!;
+			const before = button.getBoundingClientRect();
+			button.click();
+			return { x: before.left + before.width / 2, y: before.top + before.height / 2, historyCount };
+		});
+		expect(collapseAnchor.historyCount).toBe(1);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp.is-collapsed"))),
+			{ timeout: 8000, timeoutMsg: "block did not collapse" },
+		);
+		const expandedAnchor = await browser.executeObsidian(() => {
+			const button = document.querySelector<HTMLButtonElement>(".mica-lp .mica-collapse-anchor")!;
+			const rect = button.getBoundingClientRect();
+			const position = {
+				x: rect.left + rect.width / 2,
+				y: rect.top + rect.height / 2,
+				left: rect.left,
+				right: rect.right,
+				top: rect.top,
+				bottom: rect.bottom,
+			};
+			button.click();
+			return position;
+		});
+		if (process.env.MICA_E2E_PROFILE === "mobile") {
+			// Mobile scrollbars can shift the whole CodeMirror block. Prove the
+			// outcome that matters: the previous touch point still hits the same
+			// 40px control, so a repeated toggle requires no pointer travel.
+			expect(collapseAnchor.x).toBeGreaterThanOrEqual(expandedAnchor.left);
+			expect(collapseAnchor.x).toBeLessThanOrEqual(expandedAnchor.right);
+			expect(collapseAnchor.y).toBeGreaterThanOrEqual(expandedAnchor.top);
+			expect(collapseAnchor.y).toBeLessThanOrEqual(expandedAnchor.bottom);
+		} else {
+			expect(Math.abs(expandedAnchor.x - collapseAnchor.x)).toBeLessThanOrEqual(1);
+			expect(Math.abs(expandedAnchor.y - collapseAnchor.y)).toBeLessThanOrEqual(1);
+		}
+		await browser.executeObsidian(async ({ app }, old) => {
+			type Plugin = {
+				settings: { showTabActionMenuOnHover: boolean };
+				refreshViews(): void;
+				saveSettings(): Promise<void>;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			plugin.settings.showTabActionMenuOnHover = old;
+			plugin.refreshViews();
 			await plugin.saveSettings();
 		}, previous);
 	});

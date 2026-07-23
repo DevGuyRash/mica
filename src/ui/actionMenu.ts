@@ -1,4 +1,5 @@
 import { Menu, Scope, setIcon, type App } from "obsidian";
+import type { DirectActionPriority } from "./responsiveActions";
 
 export type ActionMenuTrigger = "click" | "hover";
 
@@ -10,6 +11,12 @@ export interface ActionSpec {
 	disabled?: boolean;
 	danger?: boolean;
 	separatorBefore?: boolean;
+	/** Lower values remain direct longer as a responsive strip shrinks. */
+	directPriority?: DirectActionPriority;
+	/** Keep this action in the ellipsis even when space is available. */
+	overflowOnly?: boolean;
+	/** Never collapse this action into the ellipsis. */
+	pinned?: boolean;
 	run: () => void;
 }
 

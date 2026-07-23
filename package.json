@@ -33,6 +33,8 @@
 		"test:version-scope": "tsx tests/version-scope.mts",
 		"test:upgrade-performance": "tsx tests/upgrade-performance.mts",
 		"test:search-worker": "tsx tests/search-worker.mts",
+		"test:responsive-actions": "tsx tests/responsive-actions.mts",
+		"test:toolbar-layout": "tsx tests/toolbar-layout.mts",
 		"test:custom-tool-config": "tsx tests/custom-tool-config.mts",
 		"test:block-label": "tsx tests/block-label.mts",
 		"test:code-fence": "tsx tests/code-fence.mts",
@@ -40,7 +42,7 @@
 		"test:section-format": "tsx tests/section-format.mts",
 		"check:release": "node tests/release-metadata.mjs",
 		"check:release:assets": "node tests/release-metadata.mjs --artifacts",
-		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:version-window && pnpm run test:copy-payload && pnpm run test:text-stats && pnpm run test:version-scope && pnpm run test:upgrade-performance && pnpm run test:search-worker && pnpm run test:custom-tool-config && pnpm run test:block-label && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:rust && pnpm run check:release"
+		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:version-window && pnpm run test:copy-payload && pnpm run test:text-stats && pnpm run test:version-scope && pnpm run test:upgrade-performance && pnpm run test:search-worker && pnpm run test:responsive-actions && pnpm run test:toolbar-layout && pnpm run test:custom-tool-config && pnpm run test:block-label && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:rust && pnpm run check:release"
 	},
 	"keywords": [
 		"obsidian",

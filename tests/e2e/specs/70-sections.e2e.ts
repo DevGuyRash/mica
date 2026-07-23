@@ -27,6 +27,10 @@ async function clickLatestMenuItem(title: string): Promise<void> {
 				(_, expected) =>
 					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
 						(element) => element.textContent?.trim() === expected,
+					) ||
+					Array.from(document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`)).some(
+						(button) =>
+							!button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
 					),
 				title,
 			),
@@ -37,7 +41,13 @@ async function clickLatestMenuItem(title: string): Promise<void> {
 		const item = Array.from(menus.at(-1)?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
 			(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
 		);
-		item?.click();
+		if (item) item.click();
+		else
+			Array.from(document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`))
+				.find(
+					(button) => !button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
+				)
+				?.click();
 	}, title);
 }
 
@@ -292,6 +302,22 @@ describe("structured sections", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
 			{ timeout: 8000, timeoutMsg: "the compatible regions never rendered" },
 		);
+		const combineControls = await browser.executeObsidian(() => {
+			const previous = document.querySelector<HTMLButtonElement>('[data-mica-action="combine-previous"]');
+			const next = document.querySelector<HTMLButtonElement>('[data-mica-action="combine-next"]');
+			return {
+				previousLabel: previous?.getAttribute("aria-label") ?? "",
+				nextLabel: next?.getAttribute("aria-label") ?? "",
+				previousIcon: previous?.querySelector("svg")?.innerHTML ?? "",
+				nextIcon: next?.querySelector("svg")?.innerHTML ?? "",
+			};
+		});
+		expect(combineControls.previousLabel).toBe("Combine with previous section");
+		expect(combineControls.nextLabel).toBe("Combine with next section");
+		expect(combineControls.previousIcon.length).toBeGreaterThan(0);
+		expect(combineControls.nextIcon.length).toBeGreaterThan(0);
+		expect(combineControls.previousIcon).not.toBe(combineControls.nextIcon);
+
 		const feedback = await browser.executeObsidian(async () => {
 			const regions = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp .mica-region"));
 			const source = regions.find((region) => region.textContent?.includes("Alpha"));

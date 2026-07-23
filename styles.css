@@ -53,6 +53,11 @@ body {
 	--mica-ctrl-h: 24px; /* every small control targets this height */
 	--mica-ctrl-radius: 6px;
 	--mica-ctrl-pad-x: 8px;
+	--mica-action-size: 26px;
+	--mica-action-gap: 5px;
+	--mica-action-background: var(--background-primary);
+	--mica-action-border: var(--background-modifier-border);
+	--mica-action-hover: var(--background-modifier-hover);
 	--mica-tab-gap: 6px; /* set by settings */
 
 	/* ---- Editor / diff sizing (some set by settings) ---- */
@@ -127,10 +132,16 @@ body.mica-theme-rose {
 }
 
 /* ---------- Density ---------- */
-body[data-mica-density="compact"] {
+body[data-mica-density="compact"],
+.mica[data-mica-density="compact"] {
 	--mica-ctrl-h: 20px;
 	--mica-gap: 6px;
 	--mica-pad: 0.5em 0.75em;
+}
+.mica[data-mica-density="comfortable"] {
+	--mica-ctrl-h: 24px;
+	--mica-gap: 8px;
+	--mica-pad: 0.75em 1em;
 }
 
 /* The inline "+ add tab": a square icon button, centered in the stretched nav. */
@@ -205,6 +216,20 @@ body[data-mica-density="compact"] {
 	transition: opacity 120ms ease;
 }
 
+.mica-tab-nav-sticky > .mica-responsive-actions,
+.mica-fold-bar > .mica-responsive-actions {
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 120ms ease;
+}
+.mica-tab-nav-outer:hover .mica-tab-nav-sticky > .mica-responsive-actions,
+.mica-tab-nav-sticky:focus-within > .mica-responsive-actions,
+.mica-fold-bar:hover > .mica-responsive-actions,
+.mica-fold-bar:focus-within > .mica-responsive-actions {
+	opacity: 1;
+	pointer-events: auto;
+}
+
 .mica-tab-nav-outer:hover .mica-tab-nav-sticky > .mica-entity-menu,
 .mica-tab-nav-sticky:focus-within > .mica-entity-menu,
 .mica-tab-nav-sticky > .mica-entity-menu.is-active {
@@ -242,49 +267,58 @@ body[data-mica-density="compact"] {
 }
 
 .mica-tab-btn.is-active {
-	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
-	   EVERY tab style, so heavily translucent community themes can't wash it out. */
-	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
-	font-weight: 600;
 	position: relative;
 	z-index: 1;
-	color: var(--mica-tab-fg-active);
+	color: var(--mica-tab-fg-active) !important;
 	font-weight: 600;
-	background: var(--mica-tab-bg-active);
-	/* Accent bar on top; extend 1px down to cover the nav's bottom border so the
-	 * active tab reads as connected to the panel below (architectural, not a
-	 * floating button). */
-	box-shadow: inset 0 2px 0 0 var(--mica-accent);
+	background: color-mix(in srgb, var(--mica-accent) 14%, var(--mica-tab-bg-active)) !important;
 	margin-bottom: -1px;
 	padding-bottom: 7px;
 }
+.mica-tab-btn.is-active::after {
+	content: "";
+	position: absolute;
+	left: 7px;
+	right: 7px;
+	bottom: 0;
+	height: 2px;
+	border-radius: 2px 2px 0 0;
+	background: var(--mica-tab-active-rail, var(--mica-accent));
+	pointer-events: none;
+}
+.mica-tab-btn:focus-visible {
+	outline: none;
+	box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--mica-accent) 78%, transparent);
+}
 
 /* Tab style: UNDERLINE — minimal accent underline, no surface change/merge. */
-body[data-mica-tabstyle="underline"] .mica-tab-btn.is-active {
-	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
-	   EVERY tab style, so heavily translucent community themes can't wash it out. */
-	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+body[data-mica-tabstyle="underline"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is-active,
+.mica[data-mica-tabstyle="underline"] .mica-tab-btn.is-active {
 	font-weight: 600;
-	background: transparent;
-	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	background: color-mix(in srgb, var(--mica-accent) 8%, transparent) !important;
 	margin-bottom: 0;
 	padding-bottom: 6px;
 }
 
 /* Tab style: PILL — the active tab is a filled, accent-tinted capsule. */
-body[data-mica-tabstyle="pill"] .mica-tab-nav-outer,
-body[data-mica-tabstyle="pill"] .mica-tab-nav {
+body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-nav-outer,
+body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-nav,
+.mica[data-mica-tabstyle="pill"] .mica-tab-nav-outer,
+.mica[data-mica-tabstyle="pill"] .mica-tab-nav {
 	align-items: center;
 }
-body[data-mica-tabstyle="pill"] .mica-tab-nav-outer {
+body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-nav-outer,
+.mica[data-mica-tabstyle="pill"] .mica-tab-nav-outer {
 	padding: 5px 4px;
 }
-body[data-mica-tabstyle="pill"] .mica-tab-btn {
+body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn,
+.mica[data-mica-tabstyle="pill"] .mica-tab-btn {
 	height: auto;
 	border-radius: 999px;
 	padding: 3px 12px;
 }
-body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
+body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is-active,
+.mica[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
 	   EVERY tab style, so heavily translucent community themes can't wash it out. */
 	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
@@ -331,6 +365,36 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	height: 12px !important;
 }
 
+.mica-tab-chip > .mica-responsive-actions {
+	position: absolute;
+	right: 4px;
+	top: 50%;
+	transform: translateY(-50%);
+	z-index: 3;
+	flex: 0 0 auto;
+	background: transparent;
+}
+/* During a structural drag, entity chrome must not become the hit-test target.
+ * In particular, touch layouts keep actions visible, which otherwise masks a
+ * narrow tab button and prevents its spring-load timer from arming. */
+body.mica-dnd-active .mica-entity-strip {
+	pointer-events: none !important;
+}
+.mica-tab-chip > .mica-responsive-actions > .mica-chip-menu {
+	position: static;
+	transform: none;
+	opacity: 0;
+}
+.mica-tab-chip > .mica-tab-menu-hidden {
+	opacity: 0 !important;
+	pointer-events: none !important;
+}
+.mica-tab-chip:hover > .mica-responsive-actions > .mica-chip-menu,
+.mica-tab-chip:focus-within > .mica-responsive-actions > .mica-chip-menu,
+.mica-tab-chip > .mica-responsive-actions > .mica-chip-menu.is-active {
+	opacity: 0.8;
+}
+
 .mica-chip-x {
 	position: absolute;
 	z-index: 3;
@@ -365,6 +429,10 @@ body[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	opacity: 1;
 	color: var(--mica-accent);
 	background: var(--background-modifier-hover);
+}
+.mica-tab-chip .mica-chip-menu:focus-visible {
+	outline: none;
+	box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--mica-accent) 78%, transparent);
 }
 
 .mica-chip-x:hover {
@@ -1183,8 +1251,8 @@ body.mica-theme-solar {
 	top: 4px;
 	right: 4px;
 	display: inline-flex;
-	gap: 2px;
-	padding: 1px;
+	gap: var(--mica-action-gap);
+	padding: 3px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 6px;
 	background: var(--background-primary);
@@ -1342,7 +1410,8 @@ body[data-mica-grip="left"] .mica-region-tools {
 	flex-wrap: nowrap;
 }
 .mica-qe-lines,
-.mica-qe-actions {
+.mica-qe-actions,
+.mica-qe-action {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -1358,6 +1427,51 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-qe-actions:hover,
 .mica-qe-actions.is-active {
 	color: var(--mica-accent);
+}
+
+/* One adaptive strip serves rendered entities and editor utilities. Direct
+ * buttons keep real geometry; only the strip decides what enters overflow. */
+.mica-responsive-actions {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: var(--mica-action-gap);
+	flex: 0 0 auto;
+	min-width: 0;
+}
+.mica-responsive-actions.is-measuring {
+	visibility: hidden;
+}
+.mica-responsive-action {
+	flex: 0 0 auto !important;
+	min-width: var(--mica-action-size);
+	width: var(--mica-action-size);
+	height: var(--mica-action-size);
+	padding: 0;
+	border: 0;
+	border-radius: var(--mica-ctrl-radius);
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+}
+.mica-responsive-action:hover,
+.mica-responsive-action:focus-visible,
+.mica-responsive-action.is-active {
+	color: var(--text-normal);
+	background: var(--mica-action-hover);
+}
+.mica-responsive-action.is-on {
+	color: var(--mica-accent);
+}
+.mica-responsive-action.is-danger:hover,
+.mica-responsive-action.is-danger:focus-visible {
+	color: var(--text-error);
+}
+.mica-responsive-action > .svg-icon {
+	display: block;
+	flex: 0 0 auto;
+	width: 14px !important;
+	height: 14px !important;
 }
 .mica-qe-host {
 	padding: 2px 0;
@@ -1380,6 +1494,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	flex-wrap: wrap;
 	gap: 5px;
 	position: relative;
+	width: 100%;
 }
 .mica-tool {
 	display: inline-flex;
@@ -1394,6 +1509,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	box-shadow: none;
 	color: var(--text-muted);
 	cursor: pointer;
+	flex: 0 0 auto;
 }
 .mica-tool:hover {
 	background: color-mix(in srgb, var(--mica-accent) 14%, transparent);
@@ -1421,6 +1537,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	height: 18px;
 	margin: 0 7px;
 	background: var(--background-modifier-border);
+	flex: 0 0 auto;
 }
 .mica-toolbar-spacer {
 	flex: 1;
@@ -1441,6 +1558,109 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-pop-search {
 	width: 100%;
 	margin-bottom: 6px;
+}
+
+/* Searchable runtime icon catalog. */
+.mica-icon-picker-modal {
+	width: min(860px, calc(100vw - 32px));
+}
+.mica-icon-picker {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2, 8px);
+	min-height: 0;
+}
+.mica-icon-picker-search {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2, 8px);
+}
+.mica-icon-picker-search input {
+	flex: 1;
+	min-width: 0;
+}
+.mica-icon-picker-search-icon,
+.mica-icon-picker-status {
+	color: var(--text-muted);
+}
+.mica-icon-picker-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+	gap: var(--size-4-2, 8px);
+	max-height: min(55vh, 520px);
+	overflow: auto;
+}
+.mica-icon-picker-option {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 10px;
+	min-width: 0;
+	height: auto !important;
+	min-height: 54px !important;
+	max-height: none !important;
+	padding: 8px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--mica-ctrl-radius);
+	background: var(--background-secondary) !important;
+	color: var(--text-muted);
+	box-shadow: none !important;
+	text-shadow: none !important;
+	overflow: hidden;
+	box-sizing: border-box;
+	font-family: var(--font-interface) !important;
+	line-height: 1.25 !important;
+	text-transform: none !important;
+}
+.mica-icon-picker-option:hover,
+.mica-icon-picker-option:focus-visible {
+	background: var(--background-modifier-hover) !important;
+	color: var(--text-normal);
+}
+.mica-icon-picker-option:focus-visible {
+	outline: 2px solid var(--mica-accent);
+	outline-offset: -2px;
+}
+.mica-icon-picker-option.is-selected {
+	border-color: var(--mica-accent);
+	background: color-mix(in srgb, var(--mica-accent) 12%, var(--background-secondary)) !important;
+	color: var(--text-normal);
+}
+.mica-icon-picker-glyph .svg-icon {
+	width: 24px;
+	height: 24px;
+}
+.mica-icon-picker-name {
+	display: block;
+	flex: 1;
+	min-width: 0;
+	max-width: 100%;
+	overflow: visible;
+	white-space: normal;
+	overflow-wrap: anywhere;
+	line-height: 1.25;
+	text-align: left;
+	font-size: var(--font-ui-smaller);
+}
+.mica-icon-picker-more {
+	grid-column: 1 / -1;
+	justify-self: center;
+	min-width: 10rem;
+}
+.mica-icon-picker-empty {
+	grid-column: 1 / -1;
+	padding: 24px;
+	text-align: center;
+	color: var(--text-muted);
+}
+.mica-icon-picker-footer {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2, 8px);
+}
+.mica-icon-picker-clear {
+	margin-right: auto;
 }
 .mica-pop-row {
 	display: flex;
@@ -1557,21 +1777,27 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-lightbox-toolbar {
 	display: flex;
 	align-items: center;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	gap: 2px;
 	padding: 4px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
 	background: var(--background-secondary);
 	position: relative;
+	overflow: hidden;
 }
 .mica-toolbar-mount {
 	display: flex;
-	flex: 1 1 auto;
+	flex: 1 1 0;
 	min-width: 0;
+	overflow: hidden;
 }
 .mica-toolbar-mount:empty {
 	display: none;
+}
+.mica-lightbox-toolbar > .mica-tool-lines,
+.mica-lightbox-toolbar > .mica-responsive-actions {
+	flex: 0 0 auto;
 }
 .mica-lightbox-split {
 	flex: 1;
@@ -1640,7 +1866,11 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-find-row {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
+}
+.mica-find-options {
+	flex-wrap: wrap;
+	min-height: 24px;
 }
 .mica-find-input {
 	flex: 1 1 18rem;
@@ -1679,6 +1909,37 @@ body[data-mica-grip="left"] .mica-region-tools {
 }
 .mica-replace-row {
 	padding-left: 2px;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.mica-replace-preview-controls {
+	display: inline-flex;
+	align-items: center;
+	flex: 0 0 auto;
+	gap: 3px;
+	padding: 3px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--mica-ctrl-radius);
+	background: var(--background-primary);
+}
+.mica-replace-preview-controls button {
+	min-height: 24px;
+	padding: 3px 10px;
+	border: 0;
+	border-radius: calc(var(--mica-ctrl-radius) - 2px);
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+.mica-replace-preview-controls button:hover,
+.mica-replace-preview-controls button:focus-visible {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+.mica-replace-preview-controls button[aria-pressed="true"] {
+	background: color-mix(in srgb, var(--mica-accent) 15%, var(--background-secondary));
+	color: var(--text-normal);
 }
 
 /* ---------- Drag & drop v2 ---------- */
@@ -1784,6 +2045,7 @@ body.mica-dnd-active .mica-insert-zone,
 body.mica-dnd-active .mica-region-tools,
 body.mica-dnd-active .mica-cell-bar,
 body.mica-dnd-active .mica-grid-tools,
+body.mica-dnd-active .mica-group-grip,
 body.mica-dnd-active .mica-col-resizer,
 body.mica-dnd-active .mica-row-resizer {
 	opacity: 0 !important;
@@ -1847,21 +2109,22 @@ body.mica-dnd-active * {
 }
 .mica-cell-bar {
 	position: absolute;
-	top: 4px;
+	top: auto;
+	bottom: 4px;
 	right: 4px;
 	display: inline-flex;
-	gap: 2px;
+	gap: var(--mica-action-gap);
 	z-index: 3;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 6px;
-	padding: 1px;
+	padding: 3px;
 	box-shadow: var(--shadow-s);
 	opacity: 0;
 	pointer-events: none;
 	transition: opacity 0.12s;
 }
-.mica-cell:hover:not(:has(.mica-region:hover, .mica-grid-wrap:hover, .mica-tabs:hover)) > .mica-cell-bar,
+.mica-cell:hover:not(:has(.mica-grid-wrap:hover, .mica-tabs:hover)) > .mica-cell-bar,
 .mica-cell-bar:focus-within {
 	opacity: 1;
 	pointer-events: auto;
@@ -2183,7 +2446,8 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	top: 34px;
 	right: 8px;
 	z-index: 40;
-	width: 260px;
+	width: min(300px, calc(100% - 16px));
+	box-sizing: border-box;
 	padding: 10px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
@@ -2199,21 +2463,58 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	display: flex;
 	align-items: center;
 	gap: 6px;
+	min-width: 0;
 	margin-bottom: 8px;
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
-.mica-appearance-row > span {
-	width: 52px;
-	flex-shrink: 0;
+.mica-appearance-label {
+	flex: 0 0 52px;
+	min-width: 0;
+}
+.mica-appearance-segments {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 6px;
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.mica-appearance-segments.is-four {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.mica-appearance-row .mica-pop-seg {
+	width: 100%;
+	min-width: 0;
+	padding-inline: 6px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.mica-appearance-row input[type="color"] {
+	flex: 0 0 38px;
+	width: 38px;
+	height: 26px;
+	min-width: 38px;
+	padding: 2px;
+}
+.mica-appearance-row input[type="range"] {
+	flex: 1 1 auto;
+	width: auto;
+	min-width: 42px;
 }
 .mica-appearance-override {
+	flex: 0 1 auto;
+	width: auto;
+	min-width: 0;
+	max-width: 48px;
 	font-size: var(--font-ui-smaller);
 	color: var(--mica-accent);
 	border: 1px solid color-mix(in srgb, var(--mica-accent) 45%, transparent);
 	border-radius: 8px;
 	padding: 0 6px;
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .mica-head-btn.is-override {
 	color: var(--mica-accent);
@@ -2318,6 +2619,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	position: relative;
 	display: inline-flex;
 	align-items: center;
+	flex: 0 0 auto;
 }
 .mica-tool-caret {
 	position: absolute;
@@ -2480,14 +2782,9 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border-color: var(--mica-accent);
 	color: var(--text-normal);
 }
-.mica-fold-ico .svg-icon,
 .mica-fold-kind .svg-icon {
 	width: 13px;
 	height: 13px;
-}
-.mica-fold-ico {
-	color: var(--mica-accent);
-	display: inline-flex;
 }
 .mica-fold-kind {
 	display: inline-flex;
@@ -2497,6 +2794,16 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+.mica-fold-grip {
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 120ms ease;
+}
+.mica-fold-bar:hover .mica-fold-grip,
+.mica-fold-bar:focus-within .mica-fold-grip {
+	opacity: 1;
+	pointer-events: auto;
 }
 .mica-region.is-folded,
 .mica-grid-wrap.is-folded,
@@ -2514,10 +2821,11 @@ body[data-mica-grip="left"] .mica-fold-bar {
 .mica-grid-tools {
 	position: absolute;
 	top: 4px;
-	right: 4px;
+	right: auto;
+	left: 4px;
 	display: inline-flex;
-	gap: 2px;
-	padding: 1px;
+	gap: var(--mica-action-gap);
+	padding: 3px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 6px;
 	background: var(--background-primary);
@@ -2528,13 +2836,10 @@ body[data-mica-grip="left"] .mica-fold-bar {
 	transition: opacity 0.12s;
 }
 body[data-mica-grip="left"] .mica-grid-tools {
-	right: auto;
-	left: 4px;
+	right: 4px;
+	left: auto;
 }
-.mica-grid-wrap:hover:not(
-		:has(.mica-cell:hover, .mica-region:hover, .mica-tabs:hover, .mica-grid-wrap .mica-grid-wrap:hover)
-	)
-	> .mica-grid-tools,
+.mica-grid-wrap:hover:not(:has(.mica-grid-wrap .mica-grid-wrap:hover)) > .mica-grid-tools,
 .mica-grid-tools:focus-within {
 	opacity: 1;
 	pointer-events: auto;
@@ -2728,8 +3033,18 @@ body[data-mica-grip="left"] .mica-grid-tools {
 		opacity: 1;
 		pointer-events: auto;
 	}
+	.mica-fold-bar .mica-fold-grip {
+		opacity: 1;
+		pointer-events: auto;
+	}
 	.mica-chip-menu,
-	.mica-tab-nav-sticky > .mica-entity-menu {
+	.mica-tab-nav-sticky > .mica-entity-menu,
+	.mica-tab-nav-sticky > .mica-responsive-actions,
+	.mica-fold-bar > .mica-responsive-actions {
+		opacity: 0.8;
+		pointer-events: auto;
+	}
+	.mica-tab-chip > .mica-tab-menu-hover > .mica-chip-menu {
 		opacity: 0.8;
 		pointer-events: auto;
 	}
@@ -2755,6 +3070,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	.mica-chip-menu,
 	.mica-group-grip,
 	.mica-tool,
+	.mica-qe-action,
 	.mica-find-icon,
 	.mica-vrow-more {
 		width: 40px;

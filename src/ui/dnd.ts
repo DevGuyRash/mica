@@ -153,6 +153,7 @@ interface ActiveDrag {
 	offsetX: number;
 	offsetY: number;
 	markedEl: HTMLElement | null;
+	springTargets: Map<string, Array<{ el: HTMLElement; left: number; top: number; right: number; bottom: number }>>;
 	springEl: HTMLElement | null;
 	springTimer: number | null;
 	scrollRaf: number | null;
@@ -162,10 +163,45 @@ interface ActiveDrag {
 let active: ActiveDrag | null = null;
 
 const SPRING_LOAD_DELAY_MS = 300;
+const SPRING_BUCKET_PX = 96;
 const COMBINE_DWELL_MS = 650;
 const COMBINE_STATIONARY_PX = 6;
 
 const parsePath = (s: string | undefined): number[] => (s ? s.split(".").map(Number) : []);
+
+function springTargets(scope: Element) {
+	const buckets = new Map<
+		string,
+		Array<{ el: HTMLElement; left: number; top: number; right: number; bottom: number }>
+	>();
+	for (const el of scope.querySelectorAll<HTMLElement>(".mica-tab-chip")) {
+		const rect = el.getBoundingClientRect();
+		const target = { el, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+		for (let y = Math.floor(rect.top / SPRING_BUCKET_PX); y <= Math.floor(rect.bottom / SPRING_BUCKET_PX); y++) {
+			for (
+				let x = Math.floor(rect.left / SPRING_BUCKET_PX);
+				x <= Math.floor(rect.right / SPRING_BUCKET_PX);
+				x++
+			) {
+				const key = `${x}:${y}`;
+				const entries = buckets.get(key) ?? [];
+				entries.push(target);
+				buckets.set(key, entries);
+			}
+		}
+	}
+	return buckets;
+}
+
+function springTargetAt(d: ActiveDrag, x: number, y: number): HTMLElement | null {
+	const key = `${Math.floor(x / SPRING_BUCKET_PX)}:${Math.floor(y / SPRING_BUCKET_PX)}`;
+	return (
+		d.springTargets
+			.get(key)
+			?.find((target) => x >= target.left && x <= target.right && y >= target.top && y <= target.bottom)?.el ??
+		null
+	);
+}
 
 /**
  * Make `handle` start a drag of the node at `path`. `itemEl` is the visual
@@ -248,6 +284,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 
 	const containers = collectContainers(root, spec);
 	const combineTargets = collectCombineTargets(root, item, spec);
+	const springScope = root.closest(".cm-editor, .markdown-preview-view") ?? root;
 	refreshCombineTargets(combineTargets);
 	active = {
 		spec,
@@ -269,6 +306,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		pointerX: e.clientX,
 		pointerY: e.clientY,
 		markedEl: null,
+		springTargets: springTargets(springScope),
 		offsetX: e.clientX - rect.left,
 		offsetY: e.clientY - rect.top,
 		springEl: null,
@@ -790,10 +828,19 @@ function paintDropIndicator(d: ActiveDrag): void {
 function springLoad(e: PointerEvent): void {
 	const d = active;
 	if (!d) return;
-	const under = document.elementFromPoint(e.clientX, e.clientY);
+	// Action/grip chrome may overlap a narrow tab (especially with touch-sized
+	// targets). Walk the hit-test stack so transparent sibling chrome cannot
+	// mask the tab underneath and defeat spring-loading.
+	const under = document.elementsFromPoint(e.clientX, e.clientY).find((element) => element.closest(".mica-tab-chip"));
 	// Match the whole chip (its button is a child, so `closest` from the chip's
 	// padding or its ✕ affordance would miss a `.mica-tab-btn` selector).
-	const chipWrap = (under as HTMLElement | null)?.closest<HTMLElement>(".mica-tab-chip") ?? null;
+	// Coarse/narrow layouts can omit the tab from the hit-test stack beneath
+	// drag chrome. Fall back to numeric bounds cached when geometry changes, so
+	// this path performs no layout reads on pointermove.
+	const chipWrap =
+		(under as HTMLElement | null)?.closest<HTMLElement>(".mica-tab-chip") ??
+		springTargetAt(d, e.clientX, e.clientY) ??
+		null;
 	const chip = chipWrap?.querySelector<HTMLElement>(".mica-tab-btn:not(.is-active)") ?? null;
 	if (chip === d.springEl) return;
 	clearCombineIntent(d);
@@ -811,6 +858,8 @@ function springLoad(e: PointerEvent): void {
 		chip.click();
 		// The panel switch re-lays-out the block — recompute geometry.
 		active.slots = computeSlots(active.containers, active.spec, active.sourceRoot);
+		const springScope = active.sourceRoot.closest(".cm-editor, .markdown-preview-view") ?? active.sourceRoot;
+		active.springTargets = springTargets(springScope);
 		refreshCombineTargets(active.combineTargets);
 	}, SPRING_LOAD_DELAY_MS);
 }
@@ -841,6 +890,8 @@ function autoScroll(e: PointerEvent): boolean {
 				return;
 			}
 			d.slots = computeSlots(d.containers, d.spec, d.sourceRoot);
+			const springScope = d.sourceRoot.closest(".cm-editor, .markdown-preview-view") ?? d.sourceRoot;
+			d.springTargets = springTargets(springScope);
 			refreshCombineTargets(d.combineTargets);
 			d.scrollRaf = window.requestAnimationFrame(step);
 		};

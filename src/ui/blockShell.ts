@@ -24,7 +24,9 @@ import { EditorLightbox } from "./lightbox";
 import { VersionsModal } from "./versionsModal";
 import { copyNodes, copyText, type CopyOptions } from "./copyPayload";
 import { blockNameValidationError, displayBlockName, type BlockNamePresentation } from "../identity/blockLabel";
-import { mountActionMenu, populateActionMenu, showActionMenuAtEvent, type ActionSpec } from "./actionMenu";
+import { populateActionMenu, showActionMenuAtEvent, type ActionSpec } from "./actionMenu";
+import { mountResponsiveActionStrip } from "./responsiveActionStrip";
+import { openIconPicker } from "./iconPicker";
 
 /** The hooks a rendered block uses to mutate itself (Live Preview only). */
 export interface EditHooks {
@@ -61,6 +63,8 @@ export interface BlockUi {
 	reveal: Reveal | null;
 	draft: { key: string; text: string; expected: string } | null;
 	collapsed: boolean;
+	/** Keep the appearance popover open across attribute-driven widget rebuilds. */
+	appearanceOpen: boolean;
 	/** Folded sections/groups (keys: `r:<path>:<start>` and `n:<path>`). */
 	folded: Set<string>;
 	/** Persist the fold set (folds survive restarts). Set by the host. */
@@ -84,6 +88,10 @@ export interface RenderCtx {
 	headerMode?: "hover" | "always" | "never";
 	/** Read the current clipboard preferences when a copy button is pressed. */
 	copyOptions?: () => CopyOptions;
+	/** Secondary rendered-entity actions either promote when they fit or remain menu-only. */
+	entityActionLayout?: "responsive" | "menu-only";
+	/** Tabs stay menu-only; this controls whether their visual trigger appears on hover/focus. */
+	showTabActionMenuOnHover?: boolean;
 	/** The block's current content — captured before destructive ops for Undo. */
 	preImage?: () => string;
 	/** Internal: repaint one region back to view mode after a cancel. */
@@ -167,8 +175,27 @@ function copyAction(ctx: RenderCtx, control: CopyControl, separatorBefore = fals
 		label: control.label,
 		icon: "copy",
 		separatorBefore,
+		directPriority: 0,
 		run: () => copyTarget(ctx, control),
 	};
+}
+
+function presentEntityActions(actions: readonly ActionSpec[]): ActionSpec[] {
+	return actions.map((action) => {
+		if (action.directPriority !== undefined || action.overflowOnly || action.pinned) return action;
+		const id = action.id;
+		if (!action.icon) return { ...action, overflowOnly: true };
+		if (["edit", "edit-source", "lightbox", "fields", "rename"].includes(id))
+			return { ...action, directPriority: 1 };
+		if (["collapse", "fold", "icon", "duplicate"].includes(id)) return { ...action, directPriority: 2 };
+		if (id === "delete" || id === "clear") return { ...action, directPriority: 4 };
+		return { ...action, directPriority: 3 };
+	});
+}
+
+function entityWidthSource(parent: HTMLElement): HTMLElement {
+	if (parent.hasClass("mica-tab-chip") || parent.hasClass("mica-fold-bar")) return parent;
+	return parent.parentElement ?? parent;
 }
 
 function entityMenu(
@@ -177,14 +204,31 @@ function entityMenu(
 	actions: () => readonly ActionSpec[],
 	label: string,
 	cls = "mica-minitool",
-): void {
-	if (ctx.inspection) return;
-	const mounted = mountActionMenu(parent, actions, `${cls} mica-entity-menu`, label, ctx.app);
-	mounted.button.dataset.micaActions = actions()
-		.map((action) => action.id)
-		.join(" ");
-	mounted.button.addEventListener("pointerdown", (event) => event.stopPropagation());
+	options?: { menuOnly?: boolean; className?: string },
+) {
+	if (ctx.inspection) return undefined;
+	const presented = () => presentEntityActions(actions());
+	const source = entityWidthSource(parent);
+	const pinnedSiblings = Array.from(parent.children).filter(
+		(child): child is HTMLElement =>
+			child instanceof HTMLElement && !child.hasClass("mica-footer-spacer") && !child.hasClass("mica-nav-spacer"),
+	);
+	const tabBudget = parent.hasClass("mica-tab-chip") ? Math.max(0, parent.clientWidth - 48) : null;
+	const mounted = mountResponsiveActionStrip(parent, presented, {
+		app: ctx.app,
+		source,
+		label,
+		className: `mica-entity-strip ${options?.className ?? ""}`.trim(),
+		buttonClass: cls,
+		menuClass: `${cls} mica-entity-menu`,
+		menuOnly: options?.menuOnly ?? ctx.entityActionLayout === "menu-only",
+		reservedWidth: () =>
+			tabBudget === null
+				? pinnedSiblings.reduce((width, element) => width + element.offsetWidth, 8)
+				: Math.max(0, source.clientWidth - tabBudget),
+	});
 	ctx.component.register(mounted.destroy);
+	return mounted;
 }
 
 function ownMenu(ctx: RenderCtx, menu: Menu): Menu {
@@ -402,6 +446,11 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 
 /** Per-block appearance: fence attrs → local CSS vars / data attributes. */
 function applyBlockAttrs(el: HTMLElement, attrs: Record<string, string>): void {
+	el.style.removeProperty("--mica-accent");
+	el.style.removeProperty("--mica-radius");
+	el.removeAttribute("data-mica-density");
+	el.removeAttribute("data-mica-tabstyle");
+	el.removeAttribute("data-mica-outline");
 	if (attrs["accent"]) el.style.setProperty("--mica-accent", attrs["accent"]);
 	if (attrs["radius"]) el.style.setProperty("--mica-radius", `${Number(attrs["radius"]) || 0}px`);
 	if (attrs["density"]) el.setAttribute("data-mica-density", attrs["density"]);
@@ -478,6 +527,21 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 			input.addEventListener("blur", commit);
 		});
 	}
+	// The fold control is anchored immediately after the stable block name.
+	// Content height, scrollbars, summaries, and responsive actions can change
+	// across the fold, but none of them can move this slot under the pointer.
+	if (ctx.ui) {
+		const collapse = iconButton(
+			head,
+			"mica-head-btn mica-collapse-anchor",
+			ctx.ui.collapsed ? "chevron-right" : "chevron-down",
+			ctx.ui.collapsed ? "Expand block" : "Collapse block",
+		);
+		collapse.addEventListener("click", () => {
+			ctx.ui!.collapsed = !ctx.ui!.collapsed;
+			rerender(cst, el, ctx);
+		});
+	}
 
 	if (ctx.ui?.collapsed) {
 		const tabs = countTabs(cst.children);
@@ -485,7 +549,6 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	}
 
 	head.createDiv({ cls: "mica-footer-spacer" });
-
 	// Mode glyph: can this block be edited right here?
 	const modeIco = head.createSpan({
 		cls: "mica-head-mode",
@@ -498,17 +561,6 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 		ctx,
 		() => {
 			const actions: ActionSpec[] = [];
-			if (ctx.ui) {
-				actions.push({
-					id: "collapse",
-					label: ctx.ui.collapsed ? "Expand block" : "Collapse block",
-					icon: ctx.ui.collapsed ? "chevron-right" : "chevron-down",
-					run: () => {
-						ctx.ui!.collapsed = !ctx.ui!.collapsed;
-						rerender(cst, el, ctx);
-					},
-				});
-			}
 			if (ctx.editable) {
 				const wrapped = (ctx.blockAttrs?.["wrap"] ?? "on") !== "off";
 				actions.push(
@@ -571,26 +623,37 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 			);
 			if (ctx.chip) {
 				const chip = ctx.chip;
-				actions.push(
-					{
+				if (!chip.plugin.settings.showVersionChip)
+					actions.push({
 						id: "history",
 						label: "Version history…",
 						icon: "history",
 						run: () => new VersionsModal(chip.plugin, chip.file, chip.blockId).open(),
-					},
-					{
-						id: "save-version",
-						label: "Save version now",
-						icon: "save",
-						run: () => void saveVersionNow(chip.plugin, chip.file),
-					},
-				);
+					});
 			}
 			return actions;
 		},
 		"Block actions",
 		"mica-head-btn",
 	);
+	if (ctx.ui?.appearanceOpen) {
+		let frame: number | null = null;
+		let attempts = 0;
+		const resume = (): void => {
+			frame = null;
+			if (!ctx.ui?.appearanceOpen) return;
+			if (!el.isConnected && attempts < 6) {
+				attempts++;
+				frame = window.requestAnimationFrame(resume);
+				return;
+			}
+			if (el.isConnected && !el.querySelector(".mica-appearance")) openAppearance(el, ctx, true);
+		};
+		frame = window.requestAnimationFrame(resume);
+		ctx.component.register(() => {
+			if (frame !== null) window.cancelAnimationFrame(frame);
+		});
+	}
 }
 
 function countTabs(nodes: MicaNode[]): number {
@@ -632,12 +695,11 @@ function renderFoldBar(
 		itemEl: HTMLElement;
 		text?: string;
 		copy?: CopyControl;
+		unfoldLabel?: string;
 	},
 ): void {
 	host.addClass("is-folded");
 	const bar = host.createDiv({ cls: "mica-fold-bar" });
-	const ico = bar.createSpan({ cls: "mica-fold-ico" });
-	setIcon(ico, "chevron-right");
 	const kindIco = bar.createSpan({ cls: "mica-fold-kind" });
 	setIcon(kindIco, icon);
 	bar.createSpan({ cls: "mica-fold-text", text: summary });
@@ -678,6 +740,13 @@ function renderFoldBar(
 			() => {
 				const actions: ActionSpec[] = [];
 				if (drag.copy) actions.push(copyAction(ctx, drag.copy));
+				actions.push({
+					id: "unfold",
+					label: drag.unfoldLabel ?? "Unfold this item",
+					icon: "chevrons-up-down",
+					pinned: true,
+					run: () => toggleFold(ctx, key),
+				});
 				if (ctx.editable) {
 					actions.push({
 						id: "delete",
@@ -1146,33 +1215,87 @@ function revealNode(ctx: RenderCtx, root: HTMLElement, spec: RevealSpec): void {
 function resolveAccentHex(el: HTMLElement): string {
 	const probe = el.createSpan();
 	probe.style.color = "var(--mica-accent)";
-	const rgb = getComputedStyle(probe).color;
+	const resolved = getComputedStyle(probe).color;
 	probe.remove();
-	const m = rgb.match(/\d+/g);
-	if (!m || m.length < 3) return "#8b5cf6";
-	return `#${m
-		.slice(0, 3)
-		.map((x) => Number(x).toString(16).padStart(2, "0"))
-		.join("")}`;
+	const toHex = (channels: readonly number[]): string =>
+		`#${channels
+			.slice(0, 3)
+			.map((channel) =>
+				Math.max(0, Math.min(255, Math.round(channel)))
+					.toString(16)
+					.padStart(2, "0"),
+			)
+			.join("")}`;
+	const normalized = resolved.trim().toLowerCase();
+	const hex = normalized.match(/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i)?.[1];
+	if (hex) {
+		const full = hex.length === 3 ? [...hex].map((digit) => `${digit}${digit}`).join("") : hex.slice(0, 6);
+		return `#${full}`;
+	}
+	if (normalized.startsWith("rgb")) {
+		const values = normalized.match(/[\d.]+%?/g)?.slice(0, 3) ?? [];
+		if (values.length === 3)
+			return toHex(
+				values.map((value) => (value.endsWith("%") ? (Number.parseFloat(value) * 255) / 100 : Number(value))),
+			);
+	}
+	if (normalized.startsWith("color(srgb")) {
+		const values =
+			normalized
+				.match(/[\d.]+/g)
+				?.slice(0, 3)
+				.map(Number) ?? [];
+		if (values.length === 3) return toHex(values.map((value) => value * 255));
+	}
+	try {
+		// Computed CSS colors may be rgb(), color(srgb …), display-p3, or
+		// oklch() depending on Obsidian and the active theme. Let the browser
+		// color engine rasterize one pixel rather than guessing from numbers in
+		// an arbitrary color-space string.
+		const canvas = document.createElement("canvas");
+		canvas.width = 1;
+		canvas.height = 1;
+		const painter = canvas.getContext("2d", { willReadFrequently: true });
+		if (painter) {
+			painter.clearRect(0, 0, 1, 1);
+			painter.fillStyle = resolved;
+			painter.fillRect(0, 0, 1, 1);
+			const [red, green, blue, alpha] = painter.getImageData(0, 0, 1, 1).data;
+			if (alpha) return toHex([red, green, blue]);
+		}
+	} catch {
+		// A locked-down canvas should not make the appearance popover unusable.
+	}
+	return "#000000";
 }
 
-function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
-	const existing = el.querySelector(".mica-appearance") as (HTMLElement & { micaClose?: () => void }) | null;
-	if (existing?.micaClose) existing.micaClose();
-	else existing?.remove();
-	const pop = el.createDiv({ cls: "mica-appearance" }) as HTMLElement & { micaClose?: () => void };
+function openAppearance(el: HTMLElement, ctx: RenderCtx, resume = false): void {
+	const existing = el.querySelector(".mica-appearance") as
+		(HTMLElement & { micaClose?: (endSession?: boolean) => void }) | null;
+	if (existing) {
+		existing.micaClose?.();
+		if (!existing.micaClose) existing.remove();
+		if (!resume) return;
+	}
+	if (ctx.ui) ctx.ui.appearanceOpen = true;
+	const pop = el.createDiv({ cls: "mica-appearance" }) as HTMLElement & {
+		micaClose?: (endSession?: boolean) => void;
+	};
 	// Every close path releases the document listener — a segment click must
 	// not leave it armed until the next stray pointerdown.
 	let closed = false;
-	const done = (): void => {
+	const done = (endSession = true): void => {
 		if (closed) return;
 		closed = true;
+		if (endSession && ctx.ui) ctx.ui.appearanceOpen = false;
 		pop.remove();
 		document.removeEventListener("pointerdown", onOut, true);
 		document.removeEventListener("keydown", onEsc, true);
 	};
 	pop.micaClose = done;
-	ctx.component.register(done);
+	// Attribute edits rebuild the CodeMirror widget. Tear down this DOM instance
+	// without ending the session; the next render resumes the popover from BlockUi.
+	ctx.component.register(() => done(false));
 	function onOut(ev: PointerEvent): void {
 		if (!pop.contains(ev.target as Node)) done();
 	}
@@ -1192,8 +1315,13 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 	// say so explicitly, or the global control looks broken.
 	const overridden = Boolean(ctx.blockAttrs?.["accent"]);
 	const accentRow = pop.createDiv({ cls: "mica-appearance-row" });
-	accentRow.createSpan({ text: "Accent" });
-	if (overridden) accentRow.createSpan({ cls: "mica-appearance-override", text: "overrides global" });
+	accentRow.createSpan({ cls: "mica-appearance-label", text: "Accent" });
+	if (overridden)
+		accentRow.createSpan({
+			cls: "mica-appearance-override",
+			text: "Local",
+			attr: { title: "This block overrides the global accent" },
+		});
 	const color = accentRow.createEl("input", { attr: { type: "color" } });
 	color.value = ctx.blockAttrs?.["accent"] ?? resolveAccentHex(el);
 	color.addEventListener("change", () => ctx.editable?.setAttr("accent", color.value));
@@ -1207,18 +1335,21 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 
 	// Density + tab style segments.
 	const seg = (label: string, key: string, opts: [string, string][]): void => {
-		const row = pop.createDiv({ cls: "mica-appearance-row" });
-		row.createSpan({ text: label });
+		const row = pop.createDiv({ cls: "mica-appearance-row is-segmented" });
+		row.createSpan({ cls: "mica-appearance-label", text: label });
+		const choices = row.createDiv({
+			cls: `mica-appearance-segments${opts.length === 4 ? " is-four" : ""}`,
+			attr: { role: "group", "aria-label": label },
+		});
 		const cur = ctx.blockAttrs?.[key] ?? "";
 		for (const [value, text] of opts) {
-			const b = row.createEl("button", {
+			const b = choices.createEl("button", {
 				cls: `clickable-icon mica-pop-seg ${cur === value ? "is-on" : ""}`,
 				text,
-				attr: { type: "button" },
+				attr: { type: "button", "aria-pressed": String(cur === value) },
 			});
 			b.addEventListener("click", () => {
 				ctx.editable?.setAttr(key, value || null);
-				done();
 			});
 		}
 	};
@@ -1240,9 +1371,14 @@ function openAppearance(el: HTMLElement, ctx: RenderCtx): void {
 	]);
 
 	const radiusRow = pop.createDiv({ cls: "mica-appearance-row" });
-	radiusRow.createSpan({ text: "Radius" });
+	radiusRow.createSpan({ cls: "mica-appearance-label", text: "Radius" });
 	const radiusOverridden = Boolean(ctx.blockAttrs?.["radius"]);
-	if (radiusOverridden) radiusRow.createSpan({ cls: "mica-appearance-override", text: "overrides global" });
+	if (radiusOverridden)
+		radiusRow.createSpan({
+			cls: "mica-appearance-override",
+			text: "Local",
+			attr: { title: "This block overrides the global radius" },
+		});
 	const slider = radiusRow.createEl("input", { attr: { type: "range", min: "0", max: "20", step: "1" } });
 	// Seed from the EFFECTIVE radius (the block override, else the resolved
 	// global) — a literal default would misrepresent unoverridden blocks.
@@ -1566,7 +1702,7 @@ function combineActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarge
 		return {
 			id: `combine-${direction}`,
 			label: `Combine with ${direction} section`,
-			icon: "combine",
+			icon: direction === "previous" ? "arrow-up-to-line" : "arrow-down-to-line",
 			separatorBefore: index === 0,
 			run: () => applyWithUndo(ctx, combineOp(source, destination), "Sections combined"),
 		};
@@ -1600,13 +1736,6 @@ function sectionActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarge
 	} else if (ctx.editable) {
 		const kind = classifySection(target.original);
 		actions.push(
-			{
-				id: "kind",
-				label: `Content type: ${sectionKindLabel(kind)}`,
-				checked: true,
-				disabled: true,
-				run: () => undefined,
-			},
 			{ id: "edit", label: "Edit source", icon: "file-code", run: () => openQuickEdit(region, ctx, target) },
 			{
 				id: "lightbox",
@@ -2120,6 +2249,7 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				path,
 				target: { nodes: [node] },
 			},
+			unfoldLabel: "Unfold this tab group",
 		});
 		return;
 	}
@@ -2181,13 +2311,28 @@ function renderTabs(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 			path: [...path, x.idx],
 			target: { nodes: [tab] },
 		};
-		entityMenu(
+		const tabMenu = entityMenu(
 			chip,
 			ctx,
 			() => tabActions(ctx, path, x.idx, display, tab.title, chip, btn, tabCopy),
 			"Tab actions",
 			"mica-chip-menu",
+			{
+				menuOnly: true,
+				className: ctx.showTabActionMenuOnHover === false ? "mica-tab-menu-hidden" : "mica-tab-menu-hover",
+			},
 		);
+		if (ctx.showTabActionMenuOnHover === false) {
+			tabMenu?.element
+				.querySelector<HTMLButtonElement>('[data-mica-responsive-role="overflow"]')
+				?.setAttribute("tabindex", "-1");
+		}
+		btn.addEventListener("keydown", (event) => {
+			if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+			event.preventDefault();
+			event.stopPropagation();
+			chip.querySelector<HTMLButtonElement>('[data-mica-responsive-role="overflow"]')?.click();
+		});
 
 		if (ctx.editable) {
 			chip.addClass("mica-chip-editable");
@@ -2337,9 +2482,14 @@ function tabActions(
 			label: "Set icon…",
 			icon: "smile",
 			run: () => {
-				const name = window.prompt("Lucide icon name (empty to remove):", "");
-				if (name === null) return;
-				ctx.editable?.apply({ op: "setTabAttr", path, index: idx, key: "icon", value: name.trim() || null });
+				const picker = openIconPicker({
+					app: ctx.app,
+					title: `Choose an icon for ${display || `Tab ${idx + 1}`}`,
+					current: titleAttr(originalTitle, "icon"),
+					onChoose: (value) =>
+						ctx.editable?.apply({ op: "setTabAttr", path, index: idx, key: "icon", value }),
+				});
+				ctx.component.register(() => picker.close());
 			},
 		},
 		{

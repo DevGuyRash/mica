@@ -9,6 +9,7 @@ import {
 	toolbarConfig,
 	type ToolItem,
 } from "./toolSpec";
+import { normalizeToolbarLayout, packToolbarEntries, type ToolbarLayoutEntry } from "./toolbarLayout";
 import * as verbs from "./toolbar";
 
 /** Common fence languages offered first in the codeblock picker. */
@@ -65,6 +66,7 @@ export function buildToolbar(
 		destroyPainted();
 		mount.empty();
 		destroyPainted = buildToolbarOnce(mount, app, getView, compact, surface);
+		mount.style.display = mount.childElementCount ? "" : "none";
 	};
 	const unsubscribe = onToolbarConfigChange(paint);
 	paint();
@@ -83,27 +85,29 @@ function buildToolbarOnce(
 	surface: "markdown" | "code",
 ): () => void {
 	const bar = host.createDiv({ cls: `mica-toolbar ${compact ? "is-compact" : ""}` });
-	const layout = [...toolbarConfig().layout];
+	const layout = normalizeToolbarLayout(toolbarConfig().layout, (id) => resolveTool(id, surface));
+	if (!layout.length) {
+		bar.remove();
+		return () => undefined;
+	}
 
 	// Every top-level element in layout order — the responsive unit.
-	const pieces: HTMLElement[] = [];
+	const pieces: { kind: ToolbarLayoutEntry<ToolItem>["kind"]; el: HTMLElement }[] = [];
 	const cleanups: (() => void)[] = [];
-	const track = <T extends HTMLElement>(el: T): T => {
-		pieces.push(el);
+	const track = <T extends HTMLElement>(kind: ToolbarLayoutEntry<ToolItem>["kind"], el: T): T => {
+		pieces.push({ kind, el });
 		return el;
 	};
-	for (const id of layout) {
-		if (id === "|") {
-			track(bar.createSpan({ cls: "mica-tool-sep" }));
+	for (const entry of layout) {
+		if (entry.kind === "separator") {
+			track("separator", bar.createSpan({ cls: "mica-tool-sep" }));
 			continue;
 		}
-		const item = resolveTool(id, surface);
-		if (!item) continue; // a removed custom tool leaves no corpse
 		const before = bar.lastElementChild;
-		renderItem(bar, app, getView, item, (cleanup) => cleanups.push(cleanup));
+		renderItem(bar, app, getView, entry.value, (cleanup) => cleanups.push(cleanup));
 		// renderItem appends exactly one root element per item.
 		const added = bar.lastElementChild;
-		if (added && added !== before) track(added as HTMLElement);
+		if (added && added !== before) track("tool", added as HTMLElement);
 	}
 
 	// Overflow: whatever doesn't fit folds into a "More tools" popover, so the
@@ -114,6 +118,9 @@ function buildToolbarOnce(
 	});
 	setIcon(more, "chevrons-right");
 	more.style.display = "none";
+	const restorePieceOrder = (): void => {
+		for (const piece of pieces) bar.insertBefore(piece.el, more);
+	};
 	const hidden: HTMLElement[] = [];
 	more.addEventListener("mousedown", (e) => e.preventDefault());
 	more.addEventListener("click", () => {
@@ -130,10 +137,8 @@ function buildToolbarOnce(
 			() => {
 				// The panel is about to be removed — bring the pieces home
 				// (still overflowed, so hidden until the bar grows).
-				for (const el of hidden) {
-					el.style.display = "none";
-					bar.insertBefore(el, more);
-				}
+				for (const el of hidden) el.style.display = "none";
+				restorePieceOrder();
 			},
 			more,
 		);
@@ -142,38 +147,52 @@ function buildToolbarOnce(
 	let relayoutQueued = false;
 	let relayoutFrame: number | null = null;
 	let lastAvail = -1;
-	// Piece widths are constant — measure ONCE (first laid-out pass) so the
-	// relayout never mutates the DOM to measure. Mutating during measurement
-	// fed the ResizeObserver its own changes: the "…" button visibly slid
-	// and flickered while the loop chased itself.
+	let geometryDirty = true;
+	let moreWidth = 0;
+	let gap = 0;
+	let horizontalPadding = 0;
+	// Widths remain cached during ordinary resizes. Obsidian's css-change event
+	// invalidates them when a theme changes font metrics or control density.
 	const widths: number[] = [];
-	const relayout = (): void => {
+	const relayout = (force = false): void => {
 		if (relayoutQueued) return;
 		relayoutQueued = true;
 		relayoutFrame = window.requestAnimationFrame(() => {
 			relayoutFrame = null;
 			relayoutQueued = false;
 			if (!bar.isConnected) return;
-			const avail = bar.clientWidth;
-			if (avail === 0) return; // not laid out yet
-			if (avail === lastAvail) return; // nothing changed — no churn
-			lastAvail = avail;
-			if (!widths.length) {
-				for (const el of pieces) widths.push(el.offsetWidth);
-			}
+			const clientWidth = bar.clientWidth;
+			if (clientWidth === 0) return; // not laid out yet
+			if (!force && !geometryDirty && clientWidth === lastAvail) return; // nothing changed — no churn
+			lastAvail = clientWidth;
 			closeActivePopover?.();
+			if (geometryDirty) {
+				// Restore in source order and measure synchronously before paint. This
+				// avoids zero widths from display:none without a second visible frame.
+				for (const piece of pieces) piece.el.style.display = "";
+				restorePieceOrder();
+				more.style.display = "";
+				widths.length = 0;
+				for (const piece of pieces) widths.push(outerWidth(piece.el));
+				moreWidth = outerWidth(more);
+				const computed = getComputedStyle(bar);
+				gap = Number.parseFloat(computed.columnGap || computed.gap) || 0;
+				horizontalPadding =
+					(Number.parseFloat(computed.paddingLeft) || 0) + (Number.parseFloat(computed.paddingRight) || 0);
+				geometryDirty = false;
+			}
+			const packing = packToolbarEntries(
+				pieces.map((piece, i) => ({ kind: piece.kind, width: widths[i] })),
+				Math.max(0, clientWidth - horizontalPadding),
+				moreWidth,
+				gap,
+			);
 			hidden.length = 0;
-			let used = 34; // reserve room for the "more" button
-			let overflowing = false;
-			pieces.forEach((el, i) => {
-				if (!overflowing) {
-					used += widths[i] + 5;
-					if (used > avail) overflowing = true;
-				}
-				el.style.display = overflowing ? "none" : "";
-				if (overflowing && !el.hasClass("mica-tool-sep")) hidden.push(el);
+			pieces.forEach((piece, i) => {
+				piece.el.style.display = packing.direct[i] ? "" : "none";
+				if (packing.overflow[i]) hidden.push(piece.el);
 			});
-			more.style.display = hidden.length ? "" : "none";
+			more.style.display = packing.showMore ? "" : "none";
 		});
 	};
 	const ro = new ResizeObserver(() => {
@@ -184,13 +203,29 @@ function buildToolbarOnce(
 		relayout();
 	});
 	ro.observe(bar);
+	const cssRef = app.workspace.on("css-change", () => {
+		geometryDirty = true;
+		lastAvail = -1;
+		relayout(true);
+	});
 	relayout();
 	return () => {
 		if (activePopoverBar === bar) closeActivePopover?.();
 		if (relayoutFrame !== null) window.cancelAnimationFrame(relayoutFrame);
 		for (const cleanup of cleanups) cleanup();
+		app.workspace.offref(cssRef);
 		ro.disconnect();
 	};
+}
+
+/** Actual flex footprint, including theme-provided inline margins. */
+function outerWidth(el: HTMLElement): number {
+	const style = getComputedStyle(el);
+	return (
+		el.getBoundingClientRect().width +
+		(Number.parseFloat(style.marginLeft) || 0) +
+		(Number.parseFloat(style.marginRight) || 0)
+	);
 }
 
 function toolButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {

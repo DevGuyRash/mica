@@ -33,40 +33,48 @@ const expandReplacement = (replacement, match, input) => replacement.replace(
   },
 );
 
-const regexMatches = (doc, needle, flags) => {
+const regexMatches = (doc, needle, flags, firstOnly) => {
   const regex = regexFor(needle, flags);
   const matches = [];
   let match;
   while ((match = regex.exec(doc)) !== null) {
     matches.push(match);
+    if (firstOnly) break;
     if (match[0].length === 0) regex.lastIndex = advance(doc, regex.lastIndex, regex.unicode || regex.unicodeSets);
   }
   return matches;
 };
 
-const literalMatches = (doc, needle, matchCase) => {
+const literalMatches = (doc, needle, matchCase, firstOnly) => {
   const escaped = Array.from(needle, (char) => '.+*?^$()[]{}|\\'.includes(char) ? '\\' + char : char).join('');
   const matches = [];
   if (!needle) return matches;
   const regex = new RegExp(escaped, matchCase ? 'gu' : 'giu');
   let match;
-  while ((match = regex.exec(doc)) !== null) matches.push(match);
+  while ((match = regex.exec(doc)) !== null) {
+    matches.push(match);
+    if (firstOnly) break;
+  }
   return matches;
 };
 
 self.onmessage = (event) => {
   const request = event.data;
   try {
+    const firstOnly = request.global === false;
     const matches = request.regex
-      ? regexMatches(request.doc, request.needle, request.flags)
-      : literalMatches(request.doc, request.needle, request.matchCase);
+      ? regexMatches(request.doc, request.needle, request.flags, firstOnly)
+      : literalMatches(request.doc, request.needle, request.matchCase, firstOnly);
     if (request.type === 'scan') {
       const ranges = new Uint32Array(matches.length * 2);
+      const replacement = request.replacement ?? '';
+      const replacements = new Array(matches.length);
       matches.forEach((match, index) => {
         ranges[index * 2] = match.index;
         ranges[index * 2 + 1] = match.index + match[0].length;
+        replacements[index] = request.regex ? expandReplacement(replacement, match, request.doc) : replacement;
       });
-      self.postMessage({ id: request.id, ok: true, type: 'scan', ranges: ranges.buffer }, [ranges.buffer]);
+      self.postMessage({ id: request.id, ok: true, type: 'scan', ranges: ranges.buffer, replacements }, [ranges.buffer]);
       return;
     }
     const target = request.target ?? -1;

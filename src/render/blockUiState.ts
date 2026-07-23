@@ -20,6 +20,7 @@ export function getBlockUi(plugin: MicaPlugin, key: string): BlockUi {
 		reveal: null,
 		draft: null,
 		collapsed: false,
+		appearanceOpen: false,
 		folded: new Set(plugin.settings.foldState[key] ?? []),
 	};
 	ui.persistFolds = () => {
