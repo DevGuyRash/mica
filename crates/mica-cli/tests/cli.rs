@@ -212,6 +212,118 @@ fn snapshot_is_change_gated_and_restore_works() {
 }
 
 #[test]
+fn checkpoint_restore_removal_and_reset_are_identity_safe() {
+    let f = fixture(SIMPLE);
+    run_ok(&["snapshot", "Test note.md"], &f.vault);
+    let newc = f.vault.join("new.md");
+    fs::write(&newc, "tab: One\nchanged\ntab: Two\nsecond body\n").unwrap();
+    run_ok(
+        &["set", "Test note.md", "-f", newc.to_str().unwrap()],
+        &f.vault,
+    );
+    let initial: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    let v1_id = initial[0]["versionId"].as_str().unwrap().to_string();
+    let v2_id = initial[1]["versionId"].as_str().unwrap().to_string();
+
+    run_ok(&["restore", "Test note.md", "v1"], &f.vault);
+    let restored: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    assert_eq!(restored.as_array().unwrap().len(), 3);
+    assert_eq!(restored[0]["hash"], restored[2]["hash"]);
+    assert_ne!(restored[0]["versionId"], restored[2]["versionId"]);
+
+    run_ok(&["remove-versions", "Test note.md", &v2_id], &f.vault);
+    let spliced: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    assert_eq!(spliced.as_array().unwrap().len(), 2);
+    assert_eq!(spliced[0]["n"], 1);
+    assert_eq!(spliced[1]["n"], 2);
+
+    run_ok(&["restore-versions", "Test note.md", &v2_id], &f.vault);
+    let visible: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    assert_eq!(visible.as_array().unwrap().len(), 3);
+    assert_eq!(visible[1]["versionId"], v2_id);
+
+    run_ok(&["reset-head", "Test note.md", &v1_id], &f.vault);
+    let reset: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    assert_eq!(reset[0]["head"], true);
+    assert!(fs::read_to_string(&f.note).unwrap().contains("hello world"));
+}
+
+#[test]
+fn removed_checkpoint_ids_remain_history_targets_but_visibility_stays_subset_scoped() {
+    let f = fixture(SIMPLE);
+    run_ok(&["snapshot", "Test note.md"], &f.vault);
+    let newc = f.vault.join("new.md");
+    fs::write(
+        &newc,
+        "tab: One\nhello brave world\ntab: Two\nsecond body\n",
+    )
+    .unwrap();
+    run_ok(
+        &["set", "Test note.md", "-f", newc.to_str().unwrap()],
+        &f.vault,
+    );
+    let initial: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    let removed_id = initial[0]["versionId"].as_str().unwrap().to_string();
+    let visible_id = initial[1]["versionId"].as_str().unwrap().to_string();
+    run_ok(&["remove-versions", "Test note.md", &removed_id], &f.vault);
+
+    let repeated_remove = bin()
+        .args(["remove-versions", "Test note.md", &removed_id])
+        .current_dir(&f.vault)
+        .output()
+        .expect("spawn mica");
+    assert!(
+        !repeated_remove.status.success(),
+        "an already removed checkpoint is outside remove-versions' visible subset"
+    );
+    assert!(
+        run_ok(&["show", "Test note.md", &removed_id], &f.vault).contains("hello world"),
+        "show resolves an exact removed checkpoint id"
+    );
+    let patch = run_ok(
+        &[
+            "diff",
+            "Test note.md",
+            "--base",
+            &removed_id,
+            "--to",
+            &visible_id,
+            "--patch",
+        ],
+        &f.vault,
+    );
+    assert!(
+        patch.contains("-hello world") && patch.contains("+hello brave world"),
+        "diff resolves an exact removed checkpoint id: {patch}"
+    );
+
+    run_ok(
+        &["label", "Test note.md", &removed_id, "Removed golden"],
+        &f.vault,
+    );
+    run_ok(&["restore", "Test note.md", &removed_id], &f.vault);
+    run_ok(&["reset-head", "Test note.md", &removed_id], &f.vault);
+    run_ok(&["restore-versions", "Test note.md", &removed_id], &f.vault);
+
+    let final_versions: serde_json::Value =
+        serde_json::from_str(&run_ok(&["--json", "versions", "Test note.md"], &f.vault)).unwrap();
+    let restored = final_versions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|version| version["versionId"] == removed_id)
+        .expect("restored checkpoint");
+    assert_eq!(restored["label"], "Removed golden");
+    assert_eq!(restored["head"], true);
+}
+
+#[test]
 fn diff_prints_patch_between_versions() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
@@ -429,6 +541,60 @@ fn doctor_reports_missing_raw_objects_and_pending_normalization() {
         .collect();
     assert!(kinds.contains(&"missing-raw-object"), "{report}");
     assert!(kinds.contains(&"pending-normalization"), "{report}");
+}
+
+#[test]
+fn doctor_reports_missing_and_corrupt_pending_tab_consolidation_objects() {
+    let original = "```mica id=demo\nalpha\n```\n";
+    let consolidated = "```mica id=demo\n:::tabs\n:::tab Alpha\nalpha\n:::\n:::\n```\n";
+    let f = fixture(original);
+    let original_hash = mica_core::hash_content_impl(original);
+    let consolidated_hash = mica_core::hash_content_impl(consolidated);
+    mica_cli::sidecar::write_object(&f.note, &consolidated_hash, consolidated)
+        .expect("consolidated object");
+    fs::write(
+        mica_cli::sidecar::object_path(&f.note, &consolidated_hash),
+        "CORRUPT",
+    )
+    .expect("corrupt consolidated object");
+    mica_cli::sidecar::write_tab_consolidation_journal(
+        &f.note,
+        &mica_cli::sidecar::TabConsolidationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Test note.md".to_string(),
+            original: original_hash.clone(),
+            consolidated: consolidated_hash.clone(),
+            history: false,
+            target_block: "demo".to_string(),
+            tabs: Vec::new(),
+            versions: Vec::new(),
+            events: Vec::new(),
+            manifest_original: None,
+            manifest_consolidated: "{}\n".to_string(),
+        },
+    )
+    .expect("pending tab-consolidation journal");
+
+    let report = run_ok(&["--json", "doctor"], &f.vault);
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
+    let findings = parsed["findings"].as_array().expect("findings");
+    assert!(
+        findings.iter().any(|finding| {
+            finding["kind"] == "missing-tab-consolidation-object"
+                && finding["role"] == "original"
+                && finding["hash"] == original_hash
+        }),
+        "{report}"
+    );
+    assert!(
+        findings.iter().any(|finding| {
+            finding["kind"] == "corrupt-tab-consolidation-object"
+                && finding["role"] == "consolidated"
+                && finding["hash"] == consolidated_hash
+        }),
+        "{report}"
+    );
 }
 
 #[test]

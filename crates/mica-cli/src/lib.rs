@@ -12,6 +12,7 @@
 pub mod blocks;
 pub mod cli;
 pub mod commands;
+pub mod consolidate;
 pub mod engine;
 pub mod error;
 mod fsutil;

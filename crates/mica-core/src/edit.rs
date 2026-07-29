@@ -9,7 +9,7 @@
 //! This is where the `obsidian-tabs` append bug is made structurally
 //! impossible: the replacement range is always exact, even when content grows.
 
-use crate::scanner::{scan_impl, BlockSpan};
+use crate::scanner::{scan_impl, scan_with, BlockSpan};
 use crate::util::utf16_len;
 use serde::Serialize;
 
@@ -201,13 +201,33 @@ pub fn rewrite_block_id_at_impl(
     if expected_id == new_id || !valid_header_attr("id", Some(new_id)) || new_id.is_empty() {
         return None;
     }
-    if scan_impl(doc)
-        .iter()
-        .any(|block| block.id() == Some(new_id))
-    {
+    let mut cursor_byte = 0;
+    let mut cursor_utf16 = 0;
+    let mut block = None;
+    let mut duplicate_new_id = false;
+    // One canonical scan establishes both the exact occurrence and global
+    // uniqueness in O(n) document time and O(1) lookup space. The previous two
+    // scans doubled per-repair document work and retained every block span.
+    scan_with(doc, |candidate| {
+        if candidate.id() == Some(new_id) {
+            duplicate_new_id = true;
+            return false;
+        }
+        cursor_utf16 += utf16_len(&doc[cursor_byte..candidate.start]);
+        cursor_byte = candidate.start;
+        if cursor_utf16 == block_start {
+            block = Some(candidate);
+            return true;
+        }
+        // Once the requested position is behind us, it cannot match a later
+        // block; stop unless the target was already found and uniqueness still
+        // needs checking through EOF.
+        block.is_some() || cursor_utf16 < block_start
+    });
+    if duplicate_new_id {
         return None;
     }
-    let block = block_at_utf16_start(doc, block_start)?;
+    let block = block?;
     if block.id() != Some(expected_id) {
         return None;
     }
@@ -215,28 +235,42 @@ pub fn rewrite_block_id_at_impl(
 }
 
 fn unique_block_by_id(doc: &str, id: &str) -> Option<BlockSpan> {
-    let mut matches = scan_impl(doc)
-        .into_iter()
-        .filter(|block| block.id() == Some(id));
-    let block = matches.next()?;
-    matches.next().is_none().then_some(block)
+    let mut found = None;
+    let mut ambiguous = false;
+    // O(n) document time; only the first matching span is retained.
+    scan_with(doc, |block| {
+        if block.id() != Some(id) {
+            return true;
+        }
+        if found.is_some() {
+            ambiguous = true;
+            return false;
+        }
+        found = Some(block);
+        true
+    });
+    if ambiguous {
+        None
+    } else {
+        found
+    }
 }
 
 fn block_at_utf16_start(doc: &str, block_start: usize) -> Option<BlockSpan> {
     let mut cursor_byte = 0;
     let mut cursor_utf16 = 0;
+    let mut found = None;
     // O(n) where n = document bytes; each prefix segment is visited once.
-    for block in scan_impl(doc) {
+    scan_with(doc, |block| {
         cursor_utf16 += utf16_len(&doc[cursor_byte..block.start]);
         cursor_byte = block.start;
         if cursor_utf16 == block_start {
-            return Some(block);
+            found = Some(block);
+            return false;
         }
-        if cursor_utf16 > block_start {
-            return None;
-        }
-    }
-    None
+        cursor_utf16 < block_start
+    });
+    found
 }
 
 fn content_edit_for_block(doc: &str, block: &BlockSpan, new_content: &str) -> Option<BlockEdit> {
@@ -336,6 +370,22 @@ fn header_edit_for_block(
     value: Option<&str>,
 ) -> Option<BlockEdit> {
     let header = &doc[block.start..block.content_start];
+    let line = header_replacement_for_block(doc, block, key, value)?;
+    let from = utf16_len(&doc[..block.start]);
+    Some(BlockEdit {
+        from,
+        to: from + utf16_len(header),
+        insert: line,
+    })
+}
+
+fn header_replacement_for_block(
+    doc: &str,
+    block: &BlockSpan,
+    key: &str,
+    value: Option<&str>,
+) -> Option<String> {
+    let header = &doc[block.start..block.content_start];
     let indent_len = header.len() - header.trim_start_matches(' ').len();
     let indent = &header[..indent_len];
     let fence = &header[indent_len..indent_len + block.fence_len];
@@ -347,45 +397,49 @@ fn header_edit_for_block(
         ""
     };
 
-    let mut attrs = block.attrs.clone();
-    match value {
-        Some(value) => {
-            if let Some(slot) = attrs.iter_mut().find(|(found, _)| found == key) {
-                slot.1 = value.to_string();
-            } else {
-                attrs.push((key.to_string(), value.to_string()));
-            }
-        }
-        None => attrs.retain(|(found, _)| found != key),
-    }
-
     let mut line = String::with_capacity(header.len() + value.map_or(0, str::len) + key.len() + 4);
     line.push_str(indent);
     line.push_str(fence);
     line.push_str("mica");
-    for (attr_key, attr_value) in &attrs {
-        line.push(' ');
-        line.push_str(attr_key);
-        if attr_value.is_empty() {
-        } else if attr_value.contains(char::is_whitespace) {
-            line.push_str("=\"");
-            line.push_str(attr_value);
-            line.push('"');
+    let mut replaced = false;
+    for (attr_key, attr_value) in &block.attrs {
+        if attr_key == key {
+            if let Some(value) = value {
+                if !replaced {
+                    write_header_attr(&mut line, key, value);
+                    replaced = true;
+                } else {
+                    write_header_attr(&mut line, attr_key, attr_value);
+                }
+            }
         } else {
-            line.push('=');
-            line.push_str(attr_value);
+            write_header_attr(&mut line, attr_key, attr_value);
+        }
+    }
+    if let Some(value) = value {
+        if !replaced {
+            write_header_attr(&mut line, key, value);
         }
     }
     line.push_str(eol);
     if line == header {
         return None;
     }
-    let from = utf16_len(&doc[..block.start]);
-    Some(BlockEdit {
-        from,
-        to: from + utf16_len(header),
-        insert: line,
-    })
+    Some(line)
+}
+
+fn write_header_attr(line: &mut String, key: &str, value: &str) {
+    line.push(' ');
+    line.push_str(key);
+    if value.is_empty() {
+    } else if value.contains(char::is_whitespace) {
+        line.push_str("=\"");
+        line.push_str(value);
+        line.push('"');
+    } else {
+        line.push('=');
+        line.push_str(value);
+    }
 }
 
 fn valid_header_attr(key: &str, value: Option<&str>) -> bool {
@@ -466,16 +520,15 @@ pub fn set_block_attr_impl(doc: &str, id: &str, key: &str, value: Option<&str>) 
         return None;
     }
     let block = unique_block_by_id(doc, id)?;
-    let Some(edit) = header_edit_for_block(doc, &block, key, value) else {
+    let Some(replacement) = header_replacement_for_block(doc, &block, key, value) else {
         return Some(doc.to_string());
     };
-    // Convert the known header boundaries in bytes without a UTF-16 reverse
-    // map; this full-document compatibility API still shares all validation
-    // and reconstruction with the exact-range edit.
+    // This full-document compatibility API uses known byte boundaries directly;
+    // unlike the editor API it does not pay for a discarded UTF-16 prefix map.
     let mut out =
-        String::with_capacity(doc.len() - (block.content_start - block.start) + edit.insert.len());
+        String::with_capacity(doc.len() - (block.content_start - block.start) + replacement.len());
     out.push_str(&doc[..block.start]);
-    out.push_str(&edit.insert);
+    out.push_str(&replacement);
     out.push_str(&doc[block.content_start..]);
     Some(out)
 }

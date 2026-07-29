@@ -28,6 +28,8 @@ pub struct MigratedBlock {
     pub id: String,
     /// Display name (the first tab's title).
     pub name: Option<String>,
+    /// Every legacy tab title in source order.
+    pub tab_names: Vec<String>,
     /// Extracted historical versions, in document order (oldest intent first
     /// is the vault's own ordering; the migrated head is snapshotted last).
     pub versions: Vec<MigratedVersion>,
@@ -94,36 +96,42 @@ pub fn migrate_tabs_impl(doc: &str, callout_types: &str) -> MigrationResult {
 }
 
 fn convert(content: &str, allowed_callouts: &HashSet<String>) -> (String, MigratedBlock) {
-    let mut preamble = String::new();
-    let mut tabs: Vec<(String, String)> = Vec::new();
+    let mut preamble_end = content.len();
+    let mut tabs: Vec<(String, &str)> = Vec::new();
     let mut name: Option<String> = None;
-    let mut body = String::new();
+    let mut body_start = 0;
+    let mut offset = 0;
+    // O(n) over disjoint source lines; tab bodies remain borrowed source spans.
     for line in content.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
         let text = line.strip_suffix('\n').unwrap_or(line);
         if let Some(rest) = text.strip_prefix("tab:") {
             if let Some(n) = name.take() {
-                tabs.push((n, std::mem::take(&mut body)));
+                tabs.push((n, &content[body_start..line_start]));
+            } else {
+                preamble_end = line_start;
             }
             name = Some(rest.trim().to_string());
-        } else if name.is_some() {
-            body.push_str(line);
-        } else {
-            preamble.push_str(line); // verbatim content before the first tab:
+            body_start = offset;
         }
     }
     if let Some(n) = name.take() {
-        tabs.push((n, body));
+        tabs.push((n, &content[body_start..]));
     }
 
     let id = new_id_impl();
     let block_name = tabs.first().map(|(name, _)| name).cloned();
+    let tab_names = tabs.iter().map(|(name, _)| name).cloned().collect();
     let versions = tabs
         .iter()
-        .flat_map(|(_, b)| extract_versions(b, allowed_callouts))
+        .flat_map(|(_, body)| extract_versions(body, allowed_callouts))
         .collect();
 
     // Emit the friendly, closer-free `tab:` form — the obsidian-tabs feel.
-    let mut inner = preamble;
+    // Bodies remain borrowed from the source until this one final output copy.
+    let mut inner = String::with_capacity(content.len() + tabs.len());
+    inner.push_str(&content[..preamble_end]);
     if !inner.is_empty() && !inner.ends_with('\n') {
         inner.push('\n');
     }
@@ -144,6 +152,7 @@ fn convert(content: &str, allowed_callouts: &HashSet<String>) -> (String, Migrat
         MigratedBlock {
             id,
             name: block_name,
+            tab_names,
             versions,
         },
     )
@@ -165,7 +174,10 @@ fn extract_versions(body: &str, allowed: &HashSet<String>) -> Vec<MigratedVersio
         }
         // Collect the quoted body, stopping at the NEXT callout header (which is
         // itself a quoted line, so it must be detected before dequoting).
-        let mut quoted: Vec<String> = Vec::new();
+        // Borrow the legacy body while identifying the wrapper. Only the final
+        // migrated payload is allocated; large archived versions no longer
+        // allocate and then join one intermediate `String` per quoted line.
+        let mut quoted: Vec<&str> = Vec::new();
         while let Some(next) = lines.peek() {
             if parse_callout_header(next).is_some() {
                 break;
@@ -198,9 +210,9 @@ fn parse_callout_header(line: &str) -> Option<(String, String)> {
 }
 
 /// Strip one level of `> ` quoting; `None` when the line is not quoted.
-fn dequote(line: &str) -> Option<String> {
+fn dequote(line: &str) -> Option<&str> {
     let rest = line.strip_prefix('>')?;
-    Some(rest.strip_prefix(' ').unwrap_or(rest).to_string())
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
 
 /// `Review Kernel (V1.0)` → `V1.0`; otherwise the whole (nonempty) title.
@@ -226,7 +238,7 @@ fn parse_version_label(title: &str) -> String {
 
 /// When the dequoted body is exactly one fenced block, return its inside;
 /// otherwise return the body joined as-is.
-fn strip_wrapping_fence(lines: &[String]) -> String {
+fn strip_wrapping_fence(lines: &[&str]) -> String {
     if let (Some(first), Some(last)) = (
         lines.iter().position(|line| !line.trim().is_empty()),
         lines.iter().rposition(|line| !line.trim().is_empty()),
@@ -273,6 +285,7 @@ mod tests {
         assert!(r.changed);
         assert_eq!(r.blocks.len(), 1);
         assert_eq!(r.blocks[0].name.as_deref(), Some("A"));
+        assert_eq!(r.blocks[0].tab_names, ["A", "B"]);
         assert_eq!(scan_impl(&r.doc).len(), 1);
         assert!(r.doc.contains("tab: A"));
         assert!(r.doc.contains("tab: B"));

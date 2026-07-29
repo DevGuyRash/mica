@@ -4,7 +4,7 @@
 //! deterministic and unit-tested here.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 
 /// A block id occurrence inside a note.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,14 +53,20 @@ pub enum ReconcileAction {
 
 /// Classify the content vs sidecar indexes into actions.
 pub fn reconcile_impl(content: &[ContentRef], sidecar: &[SidecarRef]) -> Vec<ReconcileAction> {
-    let mut by_block: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut by_block: HashMap<&str, Vec<&str>> = HashMap::with_capacity(content.len());
+    // O(c) expected for c live block occurrences.
     for c in content {
         by_block.entry(&c.block).or_default().push(&c.note);
     }
-    let sidecar_blocks: BTreeSet<&str> = sidecar.iter().map(|s| s.block.as_str()).collect();
+    // Membership only: hash lookup keeps the per-content check O(1) expected;
+    // deterministic action order still comes from `by_block` below.
+    let sidecar_blocks: HashSet<&str> = sidecar.iter().map(|s| s.block.as_str()).collect();
 
-    let mut actions = Vec::new();
-    for (block, notes) in &by_block {
+    let mut actions = Vec::with_capacity(by_block.len() + sidecar.len());
+    let mut ordered_blocks: Vec<_> = by_block.iter().collect();
+    // O(u log u) for u unique live ids preserves deterministic action order.
+    ordered_blocks.sort_unstable_by_key(|(block, _)| *block);
+    for (block, notes) in ordered_blocks {
         if notes.len() > 1 {
             let mut ns: Vec<String> = notes.iter().map(|n| (*n).to_string()).collect();
             ns.sort();
@@ -75,9 +81,10 @@ pub fn reconcile_impl(content: &[ContentRef], sidecar: &[SidecarRef]) -> Vec<Rec
             });
         }
     }
-    let content_blocks: BTreeSet<&str> = by_block.keys().copied().collect();
     for s in sidecar {
-        if !content_blocks.contains(s.block.as_str()) {
+        // `by_block` is already the authoritative content-id index. Reusing it
+        // avoids retaining a second O(unique blocks) tree solely for membership.
+        if !by_block.contains_key(s.block.as_str()) {
             actions.push(ReconcileAction::OrphanSidecar {
                 block: s.block.clone(),
                 sidecar: s.sidecar.clone(),
@@ -140,6 +147,35 @@ mod tests {
                 block: "b".into(),
                 notes: vec!["a.md".into(), "b.md".into()]
             }]
+        );
+    }
+
+    #[test]
+    fn actions_keep_block_order_before_input_ordered_orphan_sidecars() {
+        assert_eq!(
+            reconcile_impl(
+                &[
+                    c("z", "z.md"),
+                    c("a", "b.md"),
+                    c("m", "m.md"),
+                    c("a", "a.md"),
+                ],
+                &[s("z", "z.mica"), s("x", "x.mica")],
+            ),
+            vec![
+                ReconcileAction::DuplicateBlock {
+                    block: "a".into(),
+                    notes: vec!["a.md".into(), "b.md".into()],
+                },
+                ReconcileAction::OrphanBlock {
+                    block: "m".into(),
+                    note: "m.md".into(),
+                },
+                ReconcileAction::OrphanSidecar {
+                    block: "x".into(),
+                    sidecar: "x.mica".into(),
+                },
+            ]
         );
     }
 }

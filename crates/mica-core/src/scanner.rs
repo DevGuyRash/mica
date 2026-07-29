@@ -78,9 +78,27 @@ pub fn scan_impl(src: &str) -> Vec<BlockSpan> {
 /// Only the outermost blocks are returned; nested structure is the parser's job.
 pub(crate) fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
     let mut blocks = Vec::new();
+    scan_tag_with(src, tag, |block| {
+        blocks.push(block);
+        true
+    });
+    blocks
+}
+
+/// Run the canonical fence scanner and emit blocks in document order.
+///
+/// Returning `false` from `emit` stops immediately. Mutation lookups use this
+/// form to avoid materializing every block and, for occurrence-addressed edits,
+/// avoid scanning the document suffix after the target has been resolved.
+pub(crate) fn scan_with(src: &str, emit: impl FnMut(BlockSpan) -> bool) {
+    scan_tag_with(src, MICA_TAG, emit);
+}
+
+fn scan_tag_with(src: &str, tag: &str, mut emit: impl FnMut(BlockSpan) -> bool) {
     let mut offset = 0usize;
     let mut ctx = Ctx::None;
 
+    // O(n) where n = document bytes; `split_inclusive` yields disjoint slices.
     for line in src.split_inclusive('\n') {
         let line_start = offset;
         offset += line.len();
@@ -125,7 +143,7 @@ pub(crate) fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
                     let Ctx::Target(o) = std::mem::replace(&mut ctx, Ctx::None) else {
                         continue;
                     };
-                    blocks.push(BlockSpan {
+                    if !emit(BlockSpan {
                         start: o.start,
                         end: offset,
                         fence_char: o.fence_char,
@@ -134,14 +152,16 @@ pub(crate) fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
                         content_end: line_start,
                         closed: true,
                         attrs: o.attrs,
-                    });
+                    }) {
+                        return;
+                    }
                 }
             }
         }
     }
 
     if let Ctx::Target(o) = ctx {
-        blocks.push(BlockSpan {
+        let _ = emit(BlockSpan {
             start: o.start,
             end: offset,
             fence_char: o.fence_char,
@@ -152,8 +172,6 @@ pub(crate) fn scan_tag_impl(src: &str, tag: &str) -> Vec<BlockSpan> {
             attrs: o.attrs,
         });
     }
-
-    blocks
 }
 
 /// Any fenced-code opener: a run of >= 3 backticks or tildes at <= 3 spaces of
@@ -283,26 +301,26 @@ pub fn scan_view_impl(src: &str) -> Vec<BlockView> {
         cursor_byte = byte;
         cursor_u16
     };
-    scan_impl(src)
-        .into_iter()
-        .map(|b| {
-            let start = to_u16(b.start);
-            let content_start = to_u16(b.content_start);
-            let content_end = to_u16(b.content_end);
-            let end = to_u16(b.end);
-            BlockView {
-                start,
-                end,
-                content_start,
-                content_end,
-                fence_len: b.fence_len,
-                closed: b.closed,
-                id: b.id().map(str::to_string),
-                name: b.get("name").map(str::to_string),
-                attrs: b.attrs,
-            }
-        })
-        .collect()
+    let mut views = Vec::new();
+    scan_with(src, |b| {
+        let start = to_u16(b.start);
+        let content_start = to_u16(b.content_start);
+        let content_end = to_u16(b.content_end);
+        let end = to_u16(b.end);
+        views.push(BlockView {
+            start,
+            end,
+            content_start,
+            content_end,
+            fence_len: b.fence_len,
+            closed: b.closed,
+            id: b.id().map(str::to_string),
+            name: b.get("name").map(str::to_string),
+            attrs: b.attrs,
+        });
+        true
+    });
+    views
 }
 
 #[cfg(test)]

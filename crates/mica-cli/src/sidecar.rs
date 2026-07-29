@@ -74,6 +74,62 @@ pub struct SectionNormalizationJournal {
     pub events: Vec<Event>,
 }
 
+/// Recoverable transaction record for consolidating legacy prompt blocks as tabs.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabConsolidationJournal {
+    /// Journal schema version.
+    pub format: u8,
+    /// `pending` until note, ledger, manifest, and verification publication finish.
+    pub status: String,
+    /// Vault-relative note path at the time of consolidation.
+    pub note: String,
+    /// Object hash of the exact whole-note preimage.
+    pub original: String,
+    /// Object hash of the exact consolidated whole-note result.
+    pub consolidated: String,
+    /// Whether this transaction preserves historical version events.
+    pub history: bool,
+    /// Block that owns the consolidated tabs and resulting history.
+    pub target_block: String,
+    /// Source-block to tab-title mappings used by the consolidation.
+    pub tabs: Vec<TabConsolidationTab>,
+    /// Source-version to target-version mappings used by the consolidation.
+    pub versions: Vec<TabConsolidationVersion>,
+    /// Stable ledger events to replay after an interrupted publication.
+    pub events: Vec<Event>,
+    /// Exact original manifest bytes, when a manifest existed.
+    pub manifest_original: Option<String>,
+    /// Exact consolidated manifest bytes.
+    pub manifest_consolidated: String,
+}
+
+/// One source block represented as a tab in a consolidated Mica block.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabConsolidationTab {
+    /// Stable block identity from the source note.
+    pub source_block: String,
+    /// Display title assigned to the resulting tab.
+    pub title: String,
+}
+
+/// One historical source event mapped to its consolidated target event.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabConsolidationVersion {
+    /// Existing source `add-version` event identity.
+    pub source_event: String,
+    /// Newly planned target `add-version` event identity.
+    pub target_event: String,
+    /// Stable block identity that owned the source version.
+    pub source_block: String,
+    /// Object hash stored by the source version.
+    pub source_hash: String,
+    /// Object hash stored by the consolidated target version.
+    pub target_hash: String,
+}
+
 /// Return the co-located logical-section normalization journal path.
 ///
 /// # Arguments
@@ -94,6 +150,259 @@ pub struct SectionNormalizationJournal {
 /// ```
 pub fn section_normalization_journal_path(note: &Path) -> PathBuf {
     sidecar_dir(note).join("section-normalization.json")
+}
+
+/// Return the co-located tab-consolidation transaction journal path.
+///
+/// # Arguments
+/// * `note` - Markdown note path
+///
+/// # Returns
+/// `<Note>.mica/tab-consolidation.json`.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```
+/// let path = mica_cli::sidecar::tab_consolidation_journal_path(
+///     std::path::Path::new("Note.md"),
+/// );
+/// assert!(path.ends_with("Note.mica/tab-consolidation.json"));
+/// ```
+pub fn tab_consolidation_journal_path(note: &Path) -> PathBuf {
+    sidecar_dir(note).join("tab-consolidation.json")
+}
+
+/// Read and validate a bounded tab-consolidation transaction journal.
+///
+/// # Arguments
+/// * `note` - Markdown note whose sidecar contains the journal
+///
+/// # Returns
+/// The journal, or `None` when no transaction has started.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```no_run
+/// let journal = mica_cli::sidecar::read_tab_consolidation_journal(
+///     std::path::Path::new("Note.md"),
+/// )?;
+/// # Ok::<(), mica_cli::CliError>(())
+/// ```
+pub fn read_tab_consolidation_journal(note: &Path) -> Result<Option<TabConsolidationJournal>> {
+    let path = tab_consolidation_journal_path(note);
+    let Some(file) = open_regular_for_read(&path, "tab-consolidation journal")? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take((MAX_LEDGER_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_ctx(path.display().to_string()))?;
+    if bytes.len() > MAX_LEDGER_BYTES {
+        return Err(CliError::Corrupt(format!(
+            "tab-consolidation journal exceeds the {MAX_LEDGER_BYTES} byte safety limit: {}",
+            path.display()
+        )));
+    }
+    let journal: TabConsolidationJournal = serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::Corrupt(format!(
+            "tab-consolidation journal is invalid at {}: {error}",
+            path.display()
+        ))
+    })?;
+    validate_tab_consolidation_journal(&journal)?;
+    Ok(Some(journal))
+}
+
+/// Atomically write a validated tab-consolidation transaction journal.
+///
+/// # Arguments
+/// * `note` - Markdown note whose sidecar owns the journal
+/// * `journal` - Pending or complete transaction record
+///
+/// # Returns
+/// `()` after durable publication.
+///
+/// # Panics
+/// None.
+///
+/// # Examples
+/// ```no_run
+/// # fn example(journal: &mica_cli::sidecar::TabConsolidationJournal)
+/// #     -> Result<(), mica_cli::CliError> {
+/// mica_cli::sidecar::write_tab_consolidation_journal(
+///     std::path::Path::new("Note.md"),
+///     journal,
+/// )?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn write_tab_consolidation_journal(
+    note: &Path,
+    journal: &TabConsolidationJournal,
+) -> Result<()> {
+    validate_tab_consolidation_journal_encoding(journal, MAX_LEDGER_BYTES)?;
+    let mut bytes =
+        serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    bytes.push(b'\n');
+    ensure_sidecar(note)?;
+    let path = tab_consolidation_journal_path(note);
+    validate_regular_file_or_missing(&path, "tab-consolidation journal")?;
+    fsutil::atomic_write(&path, &bytes)
+}
+
+fn validate_tab_consolidation_journal(journal: &TabConsolidationJournal) -> Result<()> {
+    if journal.format != 1 || !matches!(journal.status.as_str(), "pending" | "complete") {
+        return Err(CliError::Corrupt(
+            "unsupported tab-consolidation journal format or status".to_string(),
+        ));
+    }
+    if journal.note.is_empty() || journal.target_block.is_empty() {
+        return Err(CliError::Corrupt(
+            "tab-consolidation journal note and target block must not be empty".to_string(),
+        ));
+    }
+    validate_hash(&journal.original)?;
+    validate_hash(&journal.consolidated)?;
+    if journal.events.len() > MAX_LEDGER_EVENTS {
+        return Err(CliError::Corrupt(format!(
+            "tab-consolidation journal has more than {MAX_LEDGER_EVENTS} events"
+        )));
+    }
+
+    let mut tab_blocks = HashMap::with_capacity(journal.tabs.len());
+    for tab in &journal.tabs {
+        if tab.source_block.is_empty() || tab.title.is_empty() {
+            return Err(CliError::Corrupt(
+                "tab-consolidation journal tab identities and titles must not be empty".to_string(),
+            ));
+        }
+        if tab_blocks.insert(tab.source_block.as_str(), ()).is_some() {
+            return Err(CliError::Corrupt(format!(
+                "tab-consolidation journal repeats source block {:?}",
+                tab.source_block
+            )));
+        }
+    }
+
+    let mut event_by_eid = HashMap::with_capacity(journal.events.len());
+    for event in &journal.events {
+        let eid = event_eid(event);
+        if eid.is_empty() {
+            return Err(CliError::Corrupt(
+                "tab-consolidation journal event identities must not be empty".to_string(),
+            ));
+        }
+        if event_by_eid.insert(eid, event).is_some() {
+            return Err(CliError::Corrupt(format!(
+                "tab-consolidation journal reuses event id {eid:?}"
+            )));
+        }
+        let block = match event {
+            Event::AddVersion { block, .. }
+            | Event::ReplaceVersion { block, .. }
+            | Event::SetHead { block, .. }
+            | Event::Label { block, .. }
+            | Event::Checkpoint { block, .. }
+            | Event::MoveHead { block, .. }
+            | Event::VersionLabel { block, .. }
+            | Event::VersionVisibility { block, .. } => block,
+        };
+        if block.is_empty() || block != &journal.target_block {
+            return Err(CliError::Corrupt(
+                "tab-consolidation journal events must identify the target block".to_string(),
+            ));
+        }
+        if !journal.history
+            && matches!(
+                event,
+                Event::AddVersion { .. } | Event::ReplaceVersion { .. } | Event::Label { .. }
+            )
+        {
+            return Err(CliError::Corrupt(
+                "tab-consolidation journal contains history events without history".to_string(),
+            ));
+        }
+        validate_event(event)?;
+        let encoded =
+            serde_json::to_vec(event).map_err(|error| CliError::Corrupt(error.to_string()))?;
+        if encoded.len() > MAX_LEDGER_LINE_BYTES {
+            return Err(CliError::Corrupt(format!(
+                "tab-consolidation journal event is {} bytes (limit {MAX_LEDGER_LINE_BYTES})",
+                encoded.len()
+            )));
+        }
+    }
+
+    if !journal.history && !journal.versions.is_empty() {
+        return Err(CliError::Corrupt(
+            "tab-consolidation journal contains version mappings without history".to_string(),
+        ));
+    }
+    let mut source_events = HashMap::with_capacity(journal.versions.len());
+    let mut target_events = HashMap::with_capacity(journal.versions.len());
+    for version in &journal.versions {
+        if version.source_event.is_empty()
+            || version.target_event.is_empty()
+            || version.source_block.is_empty()
+        {
+            return Err(CliError::Corrupt(
+                "tab-consolidation journal version identities must not be empty".to_string(),
+            ));
+        }
+        validate_hash(&version.source_hash)?;
+        validate_hash(&version.target_hash)?;
+        if !tab_blocks.contains_key(version.source_block.as_str()) {
+            return Err(CliError::Corrupt(format!(
+                "tab-consolidation journal version references unknown source block {:?}",
+                version.source_block
+            )));
+        }
+        if source_events
+            .insert(version.source_event.as_str(), ())
+            .is_some()
+            || target_events
+                .insert(version.target_event.as_str(), ())
+                .is_some()
+        {
+            return Err(CliError::Corrupt(
+                "tab-consolidation journal repeats a version event mapping".to_string(),
+            ));
+        }
+        let Some(target_event) = event_by_eid.get(version.target_event.as_str()).copied() else {
+            return Err(CliError::Corrupt(format!(
+                "tab-consolidation journal target event {:?} is not included",
+                version.target_event
+            )));
+        };
+        let (eid, block, hash) = match target_event {
+            Event::AddVersion {
+                block, hash, eid, ..
+            }
+            | Event::Checkpoint {
+                block, hash, eid, ..
+            } => (eid, block, hash),
+            _ => {
+                return Err(CliError::Corrupt(format!(
+                    "tab-consolidation journal target event {:?} is not a version checkpoint",
+                    version.target_event
+                )));
+            }
+        };
+        if eid != &version.target_event
+            || block != &journal.target_block
+            || hash != &version.target_hash
+        {
+            return Err(CliError::Corrupt(format!(
+                "tab-consolidation journal target event {:?} disagrees with its version mapping",
+                version.target_event
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read and validate a bounded logical-section normalization journal.
@@ -282,23 +591,40 @@ fn object_stem(hash: &str) -> String {
 /// let events = mica_cli::sidecar::read_ledger(std::path::Path::new("Note.md")).unwrap();
 /// ```
 pub fn read_ledger(note: &Path) -> Result<Vec<Event>> {
-    read_ledger_at(&ledger_path(note))
+    read_ledger_report(note).map(|report| report.events)
 }
 
 /// [`read_ledger`] against an explicit ledger path (repair/doctor sweeps).
 pub fn read_ledger_at(path: &Path) -> Result<Vec<Event>> {
+    read_ledger_report_at(path).map(|report| report.events)
+}
+
+/// One bounded ledger read and parse, including recoverable-line diagnostics.
+pub(crate) struct LedgerRead {
+    pub(crate) events: Vec<Event>,
+    pub(crate) bad_lines: usize,
+}
+
+pub(crate) fn read_ledger_report(note: &Path) -> Result<LedgerRead> {
+    read_ledger_report_at(&ledger_path(note))
+}
+
+pub(crate) fn read_ledger_report_at(path: &Path) -> Result<LedgerRead> {
     let Some(text) = read_ledger_text(path)? else {
-        return Ok(Vec::new());
+        return Ok(LedgerRead {
+            events: Vec::new(),
+            bad_lines: 0,
+        });
     };
-    parse_ledger(&text).map(|(events, _)| events)
+    // Per ledger: O(bytes + events) time and O(bytes + events) space. Keeping
+    // events and diagnostics together prevents callers from repeating both the
+    // bounded file read and the JSON parse.
+    parse_ledger(&text).map(|(events, bad_lines)| LedgerRead { events, bad_lines })
 }
 
 /// Count of unparseable ledger lines (doctor's corruption signal).
 pub fn ledger_bad_lines(path: &Path) -> Result<usize> {
-    let Some(text) = read_ledger_text(path)? else {
-        return Ok(0);
-    };
-    parse_ledger(&text).map(|(_, bad)| bad)
+    read_ledger_report_at(path).map(|report| report.bad_lines)
 }
 
 /// Read the bounded migration journal, if one exists.
@@ -556,6 +882,19 @@ pub(crate) fn preflight_section_normalization_journal(
     Ok(())
 }
 
+pub(crate) fn preflight_tab_consolidation_journal(
+    note: &Path,
+    journal: &TabConsolidationJournal,
+) -> Result<()> {
+    validate_tab_consolidation_journal_encoding(journal, MAX_LEDGER_BYTES)?;
+    validate_sidecar_layout_for_write(note)?;
+    validate_regular_file_or_missing(
+        &tab_consolidation_journal_path(note),
+        "tab-consolidation journal",
+    )?;
+    Ok(())
+}
+
 fn validate_section_normalization_journal_encoding(
     journal: &SectionNormalizationJournal,
     max_bytes: usize,
@@ -567,6 +906,22 @@ fn validate_section_normalization_journal_encoding(
     if bytes.len() > max_bytes {
         return Err(CliError::Corrupt(format!(
             "section-normalization journal exceeds the {max_bytes} byte safety limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_tab_consolidation_journal_encoding(
+    journal: &TabConsolidationJournal,
+    max_bytes: usize,
+) -> Result<()> {
+    validate_tab_consolidation_journal(journal)?;
+    let mut bytes =
+        serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() > max_bytes {
+        return Err(CliError::Corrupt(format!(
+            "tab-consolidation journal exceeds the {max_bytes} byte safety limit"
         )));
     }
     Ok(())
@@ -626,6 +981,13 @@ pub(crate) struct EventBatchStatus {
 
 pub(crate) fn classify_event_batch(note: &Path, intended: &[Event]) -> Result<EventBatchStatus> {
     let existing = read_ledger(note)?;
+    classify_event_batch_in(&existing, intended)
+}
+
+pub(crate) fn classify_event_batch_in(
+    existing: &[Event],
+    intended: &[Event],
+) -> Result<EventBatchStatus> {
     let by_eid: HashMap<&str, &Event> = existing
         .iter()
         .map(|event| (event_eid(event), event))
@@ -782,9 +1144,9 @@ fn parse_ledger(text: &str) -> Result<(Vec<Event>, usize)> {
                 line.len()
             )));
         }
-        validate_known_replacement_record(line, now)?;
         match serde_json::from_str::<Event>(line) {
-            Ok(event) if validate_event_at(&event, now).is_ok() => {
+            Ok(event) => {
+                validate_event_at(&event, now)?;
                 let eid = event_eid(&event);
                 if let Some(&index) = by_eid.get(eid) {
                     if events[index] != event {
@@ -797,13 +1159,18 @@ fn parse_ledger(text: &str) -> Result<(Vec<Event>, usize)> {
                 by_eid.insert(eid.to_string(), events.len());
                 events.push(event);
             }
-            Ok(_) => bad += 1,
             Err(_) => {
-                if let Some(kind) = unknown_ledger_event_type(line) {
-                    return Err(CliError::Corrupt(format!(
-                        "ledger contains unknown event type {kind:?} — upgrade Mica or repair the ledger before retrying"
-                    )));
-                }
+                let Ok(serde_json::Value::Object(object)) =
+                    serde_json::from_str::<serde_json::Value>(line)
+                else {
+                    bad += 1;
+                    continue;
+                };
+                let Some(kind) = object.get("type").and_then(serde_json::Value::as_str) else {
+                    bad += 1;
+                    continue;
+                };
+                validate_known_event_record(kind, &object, now)?;
                 bad += 1;
             }
         }
@@ -811,66 +1178,129 @@ fn parse_ledger(text: &str) -> Result<(Vec<Event>, usize)> {
     Ok((events, bad))
 }
 
-fn unknown_ledger_event_type(line: &str) -> Option<String> {
-    let serde_json::Value::Object(object) = serde_json::from_str(line).ok()? else {
-        return None;
-    };
-    let serde_json::Value::String(kind) = object.get("type")? else {
-        return None;
-    };
-    if matches!(
-        kind.as_str(),
-        "add-version" | "replace-version" | "set-head" | "label"
-    ) {
-        None
-    } else {
-        Some(kind.clone())
-    }
+fn is_known_event_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "add-version"
+            | "replace-version"
+            | "set-head"
+            | "label"
+            | "checkpoint"
+            | "move-head"
+            | "version-label"
+            | "version-visibility"
+    )
 }
 
-fn validate_known_replacement_record(line: &str, now: u64) -> Result<()> {
-    let Ok(serde_json::Value::Object(object)) = serde_json::from_str(line) else {
-        return Ok(());
-    };
-    if object.get("type").and_then(serde_json::Value::as_str) != Some("replace-version") {
-        return Ok(());
+fn validate_known_event_record(
+    kind: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+    now: u64,
+) -> Result<()> {
+    if !is_known_event_type(kind) {
+        return Err(CliError::Corrupt(format!(
+            "ledger contains unknown event type {kind:?} — upgrade Mica or repair the ledger before retrying"
+        )));
     }
-    let valid_nonempty = |field: &str| {
+    let eid = object.get("eid").and_then(serde_json::Value::as_str);
+    if eid.is_none_or(str::is_empty) {
+        return Err(invalid_typed_event(kind, "eid must be a non-empty string"));
+    }
+    let ts = object.get("ts").and_then(serde_json::Value::as_u64);
+    if ts.is_none_or(|timestamp| {
+        timestamp > MAX_EVENT_TIMESTAMP_MS
+            || timestamp > now.saturating_add(MAX_FUTURE_EVENT_SKEW_MS)
+    }) {
+        return Err(invalid_typed_event(
+            kind,
+            "ts must be an accepted non-negative integer timestamp",
+        ));
+    }
+    let block = object.get("block").and_then(serde_json::Value::as_str);
+    if block.is_none_or(str::is_empty) {
+        return Err(invalid_typed_event(
+            kind,
+            "block must be a non-empty string",
+        ));
+    }
+
+    let valid_hash = |field: &str| {
         object
             .get(field)
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(|hash| validate_hash(hash).is_ok())
     };
-    let valid_timestamp = object
-        .get("ts")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|timestamp| {
-            timestamp <= MAX_EVENT_TIMESTAMP_MS
-                && timestamp <= now.saturating_add(MAX_FUTURE_EVENT_SKEW_MS)
-        });
-    let valid_hash = object
-        .get("hash")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|hash| validate_hash(hash).is_ok());
-    let invalid = if !valid_nonempty("eid") {
-        Some("eid must be a non-empty string")
-    } else if !valid_timestamp {
-        Some("ts must be an accepted non-negative integer timestamp")
-    } else if !valid_nonempty("block") {
-        Some("block must be a non-empty string")
-    } else if !valid_hash {
-        Some("hash must be a valid object hash")
-    } else if !valid_nonempty("target") {
-        Some("target must be a non-empty string")
-    } else {
-        None
+    let valid_optional_hash = |field: &str| {
+        object.get(field).is_none_or(|value| {
+            value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|hash| validate_hash(hash).is_ok())
+        })
+    };
+    let valid_optional_id = |field: &str| {
+        object.get(field).is_none_or(|value| {
+            value.is_null() || value.as_str().is_some_and(|identity| !identity.is_empty())
+        })
+    };
+    let valid_optional_string = |field: &str| {
+        object
+            .get(field)
+            .is_none_or(|value| value.is_null() || value.as_str().is_some())
+    };
+    let valid_target = || {
+        object
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|target| !target.is_empty())
+    };
+
+    let invalid = match kind {
+        "add-version" if !valid_hash("hash") => Some("hash must be a valid object hash"),
+        "add-version" if !valid_optional_hash("parent") => {
+            Some("parent must be a valid object hash when present")
+        }
+        "replace-version" | "set-head" | "label" if !valid_hash("hash") => {
+            Some("hash must be a valid object hash")
+        }
+        "replace-version" if !valid_target() => Some("target must be a non-empty string"),
+        "checkpoint" if !valid_hash("hash") => Some("hash must be a valid object hash"),
+        "checkpoint" if !valid_optional_id("parent") => {
+            Some("parent must be a non-empty string when present")
+        }
+        "checkpoint" if !valid_optional_id("source") => {
+            Some("source must be a non-empty string when present")
+        }
+        "checkpoint" if !valid_optional_string("cause") => {
+            Some("cause must be a string when present")
+        }
+        "move-head" if !valid_optional_id("target") => {
+            Some("target must be a non-empty string when present")
+        }
+        "version-label" if !valid_target() => Some("target must be a non-empty string"),
+        "version-visibility" if !valid_target() => Some("target must be a non-empty string"),
+        "version-visibility"
+            if object
+                .get("visible")
+                .and_then(serde_json::Value::as_bool)
+                .is_none() =>
+        {
+            Some("visible must be a boolean")
+        }
+        "add-version" | "replace-version" | "set-head" | "label" | "checkpoint" | "move-head"
+        | "version-label" | "version-visibility" => None,
+        _ => Some("type has no semantic validator"),
     };
     if let Some(detail) = invalid {
-        return Err(CliError::Corrupt(format!(
-            "invalid replace-version event: {detail} — repair the ledger before retrying"
-        )));
+        return Err(invalid_typed_event(kind, detail));
     }
     Ok(())
+}
+
+fn invalid_typed_event(kind: &str, detail: &str) -> CliError {
+    CliError::Corrupt(format!(
+        "invalid {kind} event: {detail} — repair the ledger before retrying"
+    ))
 }
 
 fn event_eid(event: &Event) -> &str {
@@ -878,7 +1308,11 @@ fn event_eid(event: &Event) -> &str {
         Event::AddVersion { eid, .. }
         | Event::ReplaceVersion { eid, .. }
         | Event::SetHead { eid, .. }
-        | Event::Label { eid, .. } => eid,
+        | Event::Label { eid, .. }
+        | Event::Checkpoint { eid, .. }
+        | Event::MoveHead { eid, .. }
+        | Event::VersionLabel { eid, .. }
+        | Event::VersionVisibility { eid, .. } => eid,
     }
 }
 
@@ -887,6 +1321,22 @@ fn validate_event(event: &Event) -> Result<()> {
 }
 
 fn validate_event_at(event: &Event, now: u64) -> Result<()> {
+    let eid = event_eid(event);
+    let block = match event {
+        Event::AddVersion { block, .. }
+        | Event::ReplaceVersion { block, .. }
+        | Event::SetHead { block, .. }
+        | Event::Label { block, .. }
+        | Event::Checkpoint { block, .. }
+        | Event::MoveHead { block, .. }
+        | Event::VersionLabel { block, .. }
+        | Event::VersionVisibility { block, .. } => block,
+    };
+    if eid.is_empty() || block.is_empty() {
+        return Err(CliError::Corrupt(
+            "ledger event eid and block must be non-empty strings".to_string(),
+        ));
+    }
     if let Event::ReplaceVersion {
         eid, block, target, ..
     } = event
@@ -898,13 +1348,42 @@ fn validate_event_at(event: &Event, now: u64) -> Result<()> {
             ));
         }
     }
+    match event {
+        Event::Checkpoint { parent, source, .. } => {
+            if parent.as_deref().is_some_and(str::is_empty)
+                || source.as_deref().is_some_and(str::is_empty)
+            {
+                return Err(CliError::Corrupt(
+                    "checkpoint parent and source identities must be non-empty when present"
+                        .to_string(),
+                ));
+            }
+        }
+        Event::MoveHead {
+            target: Some(target),
+            ..
+        }
+        | Event::VersionLabel { target, .. }
+        | Event::VersionVisibility { target, .. }
+            if target.is_empty() =>
+        {
+            return Err(CliError::Corrupt(
+                "checkpoint target identity must be non-empty".to_string(),
+            ));
+        }
+        _ => {}
+    }
     let (ts, hash, parent) = match event {
         Event::AddVersion {
             ts, hash, parent, ..
-        } => (*ts, hash.as_str(), parent.as_deref()),
+        } => (*ts, Some(hash.as_str()), parent.as_deref()),
         Event::ReplaceVersion { ts, hash, .. }
         | Event::SetHead { ts, hash, .. }
-        | Event::Label { ts, hash, .. } => (*ts, hash.as_str(), None),
+        | Event::Label { ts, hash, .. }
+        | Event::Checkpoint { ts, hash, .. } => (*ts, Some(hash.as_str()), None),
+        Event::MoveHead { ts, .. }
+        | Event::VersionLabel { ts, .. }
+        | Event::VersionVisibility { ts, .. } => (*ts, None, None),
     };
     if ts > MAX_EVENT_TIMESTAMP_MS {
         return Err(CliError::Corrupt(format!(
@@ -917,7 +1396,9 @@ fn validate_event_at(event: &Event, now: u64) -> Result<()> {
             "ledger timestamp {ts} is more than {MAX_FUTURE_EVENT_SKEW_MS}ms ahead of this host ({now})"
         )));
     }
-    validate_hash(hash)?;
+    if let Some(hash) = hash {
+        validate_hash(hash)?;
+    }
     if let Some(parent) = parent {
         validate_hash(parent)?;
     }
@@ -1145,6 +1626,17 @@ pub fn write_manifest(
     updated: u64,
 ) -> Result<()> {
     ensure_sidecar(note)?;
+    let out = manifest_bytes(note_id, path, blocks, updated);
+    let p = sidecar_dir(note).join("manifest.json");
+    fsutil::atomic_write(&p, &out)
+}
+
+pub(crate) fn manifest_bytes(
+    note_id: Option<&str>,
+    path: &str,
+    blocks: &[(String, String)],
+    updated: u64,
+) -> Vec<u8> {
     // Hand-rolled to match JSON.stringify(manifest, null, "\t") + "\n" byte for
     // byte, including insertion-ordered `blocks` (BTreeMap would reorder).
     let mut out = String::from("{\n");
@@ -1166,8 +1658,7 @@ pub fn write_manifest(
     }
     out.push_str(&format!("\t\"updated\": {updated}\n"));
     out.push_str("}\n");
-    let p = sidecar_dir(note).join("manifest.json");
-    fsutil::atomic_write(&p, out.as_bytes())
+    out.into_bytes()
 }
 
 fn json_str(s: &str) -> String {
@@ -1236,6 +1727,208 @@ mod tests {
             Some(journal)
         );
         assert!(section_normalization_journal_path(&note).is_file());
+    }
+
+    #[test]
+    fn tab_consolidation_journal_roundtrips() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "before").expect("seed note");
+        let original = mica_core::hash_content_impl("before");
+        let consolidated = mica_core::hash_content_impl("after");
+        let target_hash = mica_core::hash_content_impl("target version");
+        let journal = TabConsolidationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original,
+            consolidated,
+            history: true,
+            target_block: "target-block".to_string(),
+            tabs: vec![TabConsolidationTab {
+                source_block: "source-block".to_string(),
+                title: "First".to_string(),
+            }],
+            versions: vec![TabConsolidationVersion {
+                source_event: "source-event".to_string(),
+                target_event: "target-event".to_string(),
+                source_block: "source-block".to_string(),
+                source_hash: mica_core::hash_content_impl("source version"),
+                target_hash: target_hash.clone(),
+            }],
+            events: vec![
+                Event::AddVersion {
+                    eid: "target-event".to_string(),
+                    ts: 0,
+                    block: "target-block".to_string(),
+                    hash: target_hash.clone(),
+                    label: Some("V1".to_string()),
+                    origin: Some("tab-consolidation".to_string()),
+                    parent: None,
+                },
+                Event::SetHead {
+                    eid: "head-event".to_string(),
+                    ts: 0,
+                    block: "target-block".to_string(),
+                    hash: target_hash,
+                },
+            ],
+            manifest_original: Some("{\"before\":true}\n".to_string()),
+            manifest_consolidated: "{\"after\":true}\n".to_string(),
+        };
+
+        write_tab_consolidation_journal(&note, &journal).expect("write journal");
+
+        assert_eq!(
+            read_tab_consolidation_journal(&note).expect("read journal"),
+            Some(journal)
+        );
+        assert!(tab_consolidation_journal_path(&note).is_file());
+    }
+
+    #[test]
+    fn tab_consolidation_journal_rejects_invalid_mappings_and_history_events() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "before").expect("seed note");
+        let hash = mica_core::hash_content_impl("body");
+        let mut journal = TabConsolidationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: "Note.md".to_string(),
+            original: hash.clone(),
+            consolidated: hash.clone(),
+            history: true,
+            target_block: "target-block".to_string(),
+            tabs: vec![TabConsolidationTab {
+                source_block: "source-block".to_string(),
+                title: "First".to_string(),
+            }],
+            versions: vec![TabConsolidationVersion {
+                source_event: "source-event".to_string(),
+                target_event: "missing-target-event".to_string(),
+                source_block: "source-block".to_string(),
+                source_hash: hash.clone(),
+                target_hash: hash.clone(),
+            }],
+            events: vec![Event::SetHead {
+                eid: "head-event".to_string(),
+                ts: 0,
+                block: "target-block".to_string(),
+                hash: hash.clone(),
+            }],
+            manifest_original: None,
+            manifest_consolidated: "{}\n".to_string(),
+        };
+
+        assert!(matches!(
+            write_tab_consolidation_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+
+        journal.versions[0].target_event = "target-event".to_string();
+        journal.versions[0].source_hash = "not-a-hash".to_string();
+        journal.events[0] = Event::AddVersion {
+            eid: "target-event".to_string(),
+            ts: 0,
+            block: "target-block".to_string(),
+            hash: hash.clone(),
+            label: None,
+            origin: None,
+            parent: None,
+        };
+        assert!(matches!(
+            write_tab_consolidation_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+
+        journal.versions.clear();
+        journal.history = false;
+        assert!(matches!(
+            write_tab_consolidation_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[test]
+    fn tab_consolidation_journal_rejects_empty_identity_and_duplicate_event_ids() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "before").expect("seed note");
+        let hash = mica_core::hash_content_impl("body");
+        let event = Event::SetHead {
+            eid: "duplicate-event".to_string(),
+            ts: 0,
+            block: "target-block".to_string(),
+            hash: hash.clone(),
+        };
+        let mut journal = TabConsolidationJournal {
+            format: 1,
+            status: "pending".to_string(),
+            note: String::new(),
+            original: hash.clone(),
+            consolidated: hash,
+            history: false,
+            target_block: "target-block".to_string(),
+            tabs: vec![TabConsolidationTab {
+                source_block: "source-block".to_string(),
+                title: "First".to_string(),
+            }],
+            versions: Vec::new(),
+            events: vec![event.clone()],
+            manifest_original: None,
+            manifest_consolidated: "{}\n".to_string(),
+        };
+
+        assert!(matches!(
+            write_tab_consolidation_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+        journal.note = "Note.md".to_string();
+        journal.events.push(event);
+        assert!(matches!(
+            write_tab_consolidation_journal(&note, &journal),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(!sidecar_dir(&note).exists());
+    }
+
+    #[test]
+    fn tab_consolidation_preflight_allows_head_without_history_and_enforces_bounds() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let note = tmp.path().join("Note.md");
+        std::fs::write(&note, "before").expect("seed note");
+        let hash = mica_core::hash_content_impl("body");
+        let journal = TabConsolidationJournal {
+            format: 1,
+            status: "complete".to_string(),
+            note: "Note.md".to_string(),
+            original: hash.clone(),
+            consolidated: hash.clone(),
+            history: false,
+            target_block: "target-block".to_string(),
+            tabs: vec![TabConsolidationTab {
+                source_block: "source-block".to_string(),
+                title: "First".to_string(),
+            }],
+            versions: Vec::new(),
+            events: vec![Event::SetHead {
+                eid: "head-event".to_string(),
+                ts: 0,
+                block: "target-block".to_string(),
+                hash,
+            }],
+            manifest_original: None,
+            manifest_consolidated: "{}\n".to_string(),
+        };
+
+        preflight_tab_consolidation_journal(&note, &journal).expect("preflight journal");
+        assert!(matches!(
+            validate_tab_consolidation_journal_encoding(&journal, 1),
+            Err(CliError::Corrupt(_))
+        ));
+        assert!(!sidecar_dir(&note).exists());
     }
 
     #[test]
@@ -1436,13 +2129,13 @@ mod tests {
         writeln!(f, "{{not json").unwrap();
         drop(f);
         append_events(&note, std::slice::from_ref(&ev)).unwrap();
-        let events = read_ledger(&note).unwrap();
+        let report = read_ledger_report(&note).unwrap();
         assert_eq!(
-            events,
+            report.events,
             vec![ev],
             "exact eid replays are logically deduplicated"
         );
-        assert_eq!(ledger_bad_lines(&ledger_path(&note)).unwrap(), 1);
+        assert_eq!(report.bad_lines, 1);
     }
 
     #[test]
@@ -1482,6 +2175,165 @@ mod tests {
                 parse_ledger(&line),
                 Err(CliError::Corrupt(message)) if message.contains("invalid replace-version")
             ));
+        }
+    }
+
+    #[test]
+    fn known_typed_invalid_events_fail_closed_like_typescript() {
+        let hash = mica_core::hash_content_impl("typed event");
+        let cases = [
+            (
+                "add-version invalid hash",
+                serde_json::json!({
+                    "type": "add-version",
+                    "eid": "add",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": "not-a-hash",
+                }),
+            ),
+            (
+                "set-head empty eid",
+                serde_json::json!({
+                    "type": "set-head",
+                    "eid": "",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": hash.clone(),
+                }),
+            ),
+            (
+                "label empty block",
+                serde_json::json!({
+                    "type": "label",
+                    "eid": "label",
+                    "ts": 1,
+                    "block": "",
+                    "hash": hash.clone(),
+                }),
+            ),
+            (
+                "checkpoint empty parent",
+                serde_json::json!({
+                    "type": "checkpoint",
+                    "eid": "checkpoint",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": hash.clone(),
+                    "parent": "",
+                }),
+            ),
+            (
+                "move-head empty target",
+                serde_json::json!({
+                    "type": "move-head",
+                    "eid": "move",
+                    "ts": 1,
+                    "block": "demo",
+                    "target": "",
+                }),
+            ),
+            (
+                "version-label empty target",
+                serde_json::json!({
+                    "type": "version-label",
+                    "eid": "version-label",
+                    "ts": 1,
+                    "block": "demo",
+                    "target": "",
+                }),
+            ),
+            (
+                "version-visibility empty target",
+                serde_json::json!({
+                    "type": "version-visibility",
+                    "eid": "visibility",
+                    "ts": 1,
+                    "block": "demo",
+                    "target": "",
+                    "visible": true,
+                }),
+            ),
+            (
+                "add-version typed hash",
+                serde_json::json!({
+                    "type": "add-version",
+                    "eid": "add",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": 7,
+                }),
+            ),
+            (
+                "set-head typed hash",
+                serde_json::json!({
+                    "type": "set-head",
+                    "eid": "head",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": 7,
+                }),
+            ),
+            (
+                "label typed hash",
+                serde_json::json!({
+                    "type": "label",
+                    "eid": "label",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": 7,
+                }),
+            ),
+            (
+                "checkpoint typed parent",
+                serde_json::json!({
+                    "type": "checkpoint",
+                    "eid": "checkpoint",
+                    "ts": 1,
+                    "block": "demo",
+                    "hash": hash,
+                    "parent": 7,
+                }),
+            ),
+            (
+                "move-head typed target",
+                serde_json::json!({
+                    "type": "move-head",
+                    "eid": "move",
+                    "ts": 1,
+                    "block": "demo",
+                    "target": 7,
+                }),
+            ),
+            (
+                "version-label typed target",
+                serde_json::json!({
+                    "type": "version-label",
+                    "eid": "version-label",
+                    "ts": 1,
+                    "block": "demo",
+                    "target": 7,
+                }),
+            ),
+            (
+                "version-visibility typed visible",
+                serde_json::json!({
+                    "type": "version-visibility",
+                    "eid": "visibility",
+                    "ts": 1,
+                    "block": "demo",
+                    "target": "checkpoint",
+                    "visible": "yes",
+                }),
+            ),
+        ];
+
+        for (case, value) in cases {
+            let line = value.to_string();
+            assert!(
+                matches!(parse_ledger(&line), Err(CliError::Corrupt(_))),
+                "{case} was accepted as recoverable ledger damage"
+            );
         }
     }
 
@@ -1607,7 +2459,10 @@ mod tests {
             "{future_line}"
         )
         .expect("write future event");
-        assert_eq!(ledger_bad_lines(&ledger_path(&note)).expect("bad lines"), 1);
+        assert!(matches!(
+            ledger_bad_lines(&ledger_path(&note)),
+            Err(CliError::Corrupt(message)) if message.contains("ledger timestamp")
+        ));
 
         let ledger = ledger_path(&note);
         std::fs::OpenOptions::new()

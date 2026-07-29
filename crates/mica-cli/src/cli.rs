@@ -11,7 +11,7 @@ use std::path::PathBuf;
     about = "Versioned, structured content blocks in your Obsidian vault — from the shell.",
     after_help = "Works directly on vault files; Obsidian does not need to be running.\n\
                   Block addressing (-b): a block id, a block name, or a 1-based index.\n\
-                  Version addressing: a hash (b3:… or unique prefix) or vN (v1 = oldest)."
+                  Version addressing: a stable checkpoint id, unambiguous hash, label, or visible vN (v1 = oldest)."
 )]
 pub struct Cli {
     /// Vault root (default: walk up from the note / cwd to a `.obsidian` folder)
@@ -129,13 +129,39 @@ pub enum Cmd {
         #[arg(long)]
         patch: bool,
     },
-    /// Restore a block to a stored version (snapshots current state first)
+    /// Restore stored content as a new checkpoint (keeps history moving forward)
     Restore {
         /// Target note and block
         #[command(flatten)]
         target: NoteBlock,
         /// Version: hash or vN
         version: String,
+    },
+    /// Replace the block and move HEAD to an existing checkpoint (starts a branch)
+    ResetHead {
+        /// Target note and block
+        #[command(flatten)]
+        target: NoteBlock,
+        /// Version: stable id, hash, label, or visible vN
+        version: String,
+    },
+    /// Remove checkpoints from the ordinary timeline (recoverable)
+    RemoveVersions {
+        /// Target note and block
+        #[command(flatten)]
+        target: NoteBlock,
+        /// One or more stable ids, hashes, labels, or visible vN selectors
+        #[arg(required = true)]
+        versions: Vec<String>,
+    },
+    /// Restore removed checkpoints to their original timeline positions
+    RestoreVersions {
+        /// Target note and block
+        #[command(flatten)]
+        target: NoteBlock,
+        /// One or more stable ids or unambiguous hashes
+        #[arg(required = true)]
+        versions: Vec<String>,
     },
     /// Label a stored version (empty label clears)
     Label {
@@ -180,6 +206,17 @@ pub enum Cmd {
         /// Note or directory path (cwd-relative or vault-relative)
         path: String,
         /// Normalize stored version history as well as live block bodies
+        #[arg(long)]
+        history: bool,
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Merge one note's prompt blocks into tabs with recoverable history
+    ConsolidateTabs {
+        /// Note or directory path (cwd-relative or vault-relative)
+        path: String,
+        /// Preserve every source block's stored version history
         #[arg(long)]
         history: bool,
         /// Report what would change without writing

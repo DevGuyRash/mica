@@ -17,7 +17,7 @@ use mica_core::{
     make_patch_impl, migrate_tabs_impl, new_id_impl, parse_block_impl, reconcile_impl, scan_impl,
     serialize_impl, ContentRef, Cst, Event, GroupKind, Node, SidecarRef, StructOp, VersionMeta,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -40,10 +40,6 @@ const OBSIDIAN_CALLOUT_TYPES: &str = "note, abstract, summary, tldr, info, todo,
 /// # Panics
 /// None.
 ///
-/// # Examples
-/// ```no_run
-/// // dispatched from `mica_cli::run()`
-/// ```
 pub fn dispatch(cli: Cli) -> Result<()> {
     let ctx = Ctx {
         vault: cli.vault,
@@ -80,6 +76,13 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             patch,
         ),
         Cmd::Restore { target, version } => restore(&ctx, &target, &version),
+        Cmd::ResetHead { target, version } => reset_head(&ctx, &target, &version),
+        Cmd::RemoveVersions { target, versions } => {
+            set_versions_visible(&ctx, &target, &versions, false)
+        }
+        Cmd::RestoreVersions { target, versions } => {
+            set_versions_visible(&ctx, &target, &versions, true)
+        }
         Cmd::Label {
             target,
             version,
@@ -97,6 +100,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             history,
             dry_run,
         } => crate::normalize::run(&ctx, &path, history, dry_run),
+        Cmd::ConsolidateTabs {
+            path,
+            history,
+            dry_run,
+        } => crate::consolidate::run(&ctx, &path, history, dry_run),
         Cmd::Prepare { note } => prepare(&ctx, &note),
         Cmd::Repair => repair(&ctx),
         Cmd::Doctor => doctor(&ctx),
@@ -638,8 +646,9 @@ pub fn versions(ctx: &Ctx, target: &NoteBlock) -> Result<()> {
             .enumerate()
             .map(|(i, v)| {
                 serde_json::json!({
-                    "n": i + 1, "hash": v.hash, "ts": v.ts, "label": v.label,
-                    "head": bs.head.as_deref() == Some(v.hash.as_str()),
+                    "n": i + 1, "versionId": v.version_id, "hash": v.hash,
+                    "ts": v.ts, "label": v.label,
+                    "head": bs.head_version_id.as_deref() == Some(v.version_id.as_str()),
                 })
             })
             .collect();
@@ -649,7 +658,7 @@ pub fn versions(ctx: &Ctx, target: &NoteBlock) -> Result<()> {
     let s = &ctx.style;
     let now = engine::now_ms();
     for (i, v) in bs.versions.iter().enumerate().rev() {
-        let head = if bs.head.as_deref() == Some(v.hash.as_str()) {
+        let head = if bs.head_version_id.as_deref() == Some(v.version_id.as_str()) {
             s.green(" ● head")
         } else {
             String::new()
@@ -660,12 +669,27 @@ pub fn versions(ctx: &Ctx, target: &NoteBlock) -> Result<()> {
             .map(|l| format!("  {}", s.yellow(l)))
             .unwrap_or_default();
         println!(
-            "{}  {}  {}{}{}",
+            "{}  {}  {}  {}{}{}",
             s.bold(&format!("v{}", i + 1)),
+            s.dim(&v.version_id),
             s.cyan(&v.hash),
             s.dim(&rel_time(v.ts, now)),
             label,
             head,
+        );
+    }
+    if !bs.removed_versions.is_empty() {
+        println!(
+            "{}",
+            s.dim(&format!(
+                "{} removed checkpoint{} (use `mica restore-versions`)",
+                bs.removed_versions.len(),
+                if bs.removed_versions.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ))
         );
     }
     Ok(())
@@ -676,9 +700,9 @@ pub fn show(ctx: &Ctx, target: &NoteBlock, version: &str) -> Result<()> {
     let (note, _, located) = load(ctx, target)?;
     let id = require_id(&note, &located)?;
     let st = engine::state(&note.abs)?;
-    let versions = st.get(&id).map(|b| b.versions.as_slice()).unwrap_or(&[]);
-    let hash = resolve_version(versions, version)?;
-    match sidecar::read_object(&note.abs, &hash)? {
+    let selected = resolve_history_version_meta(st.get(&id), version)?;
+    let hash = &selected.hash;
+    match sidecar::read_object(&note.abs, hash)? {
         Some(content) => {
             print!("{content}");
             Ok(())
@@ -709,7 +733,8 @@ pub fn diff(
     let (note, _, located) = load(ctx, target)?;
     let id = require_id(&note, &located)?;
     let st = engine::state(&note.abs)?;
-    let versions = st.get(&id).map(|b| b.versions.as_slice()).unwrap_or(&[]);
+    let block = st.get(&id);
+    let versions = block.map(|block| block.versions.as_slice()).unwrap_or(&[]);
 
     let read = |hash: &str| -> Result<String> {
         sidecar::read_object(&note.abs, hash)?.ok_or_else(|| {
@@ -721,7 +746,7 @@ pub fn diff(
 
     // Base: --base, else the version before the newest, else the newest.
     let base_text = match base {
-        Some(sel) => read(&resolve_version(versions, sel)?)?,
+        Some(sel) => read(&resolve_history_version_meta(block, sel)?.hash)?,
         None => {
             if versions.len() >= 2 {
                 read(&versions[versions.len() - 2].hash)?
@@ -736,7 +761,7 @@ pub fn diff(
     };
     // To: --to, else the current (working) content.
     let to_text = match to {
-        Some(sel) => read(&resolve_version(versions, sel)?)?,
+        Some(sel) => read(&resolve_history_version_meta(block, sel)?.hash)?,
         None => located.content.clone(),
     };
 
@@ -771,10 +796,67 @@ pub fn restore(ctx: &Ctx, target: &NoteBlock, version: &str) -> Result<()> {
     let (note, _, located) = load(ctx, target)?;
     let id = require_id(&note, &located)?;
     let st = engine::state(&note.abs)?;
-    let versions = st.get(&id).map(|b| b.versions.as_slice()).unwrap_or(&[]);
-    let hash = resolve_version(versions, version)?;
-    engine::restore(&note, &id, &hash)?;
-    eprintln!("mica: block {id} restored to {hash} (previous state snapshotted first)");
+    let selected = resolve_history_version_meta(st.get(&id), version)?;
+    if engine::restore_as_checkpoint(&note, &id, &selected.version_id, &selected.hash)? {
+        eprintln!(
+            "mica: block {id} restored from {} as a new checkpoint",
+            selected.version_id
+        );
+    } else {
+        eprintln!("mica: no restore checkpoint created — there were no changes");
+    }
+    Ok(())
+}
+
+/// `mica reset-head` — replace the live block and continue from an old checkpoint.
+pub fn reset_head(ctx: &Ctx, target: &NoteBlock, version: &str) -> Result<()> {
+    let (note, _, located) = load(ctx, target)?;
+    let id = require_id(&note, &located)?;
+    let st = engine::state(&note.abs)?;
+    let selected = resolve_history_version_meta(st.get(&id), version)?;
+    if engine::reset_head(&note, &id, &selected.version_id, &selected.hash)? {
+        eprintln!(
+            "mica: block {id} reset to {} — subsequent checkpoints branch from here",
+            selected.version_id
+        );
+    } else {
+        eprintln!("mica: block and HEAD already match the selected checkpoint");
+    }
+    Ok(())
+}
+
+/// Hide or restore logical checkpoints without deleting ledger/object data.
+pub fn set_versions_visible(
+    ctx: &Ctx,
+    target: &NoteBlock,
+    selectors: &[String],
+    visible: bool,
+) -> Result<()> {
+    let (note, _, located) = load(ctx, target)?;
+    let id = require_id(&note, &located)?;
+    let st = engine::state(&note.abs)?;
+    let Some(block) = st.get(&id) else {
+        return Err(CliError::NotFound(
+            "no stored versions — run `mica snapshot` first".to_string(),
+        ));
+    };
+    let candidates = if visible {
+        block.removed_versions.as_slice()
+    } else {
+        block.versions.as_slice()
+    };
+    let ids = resolve_unique_version_ids(candidates, selectors)?;
+    engine::set_versions_visible(&note, &id, &ids, visible)?;
+    eprintln!(
+        "mica: {} {} checkpoint{}",
+        if visible {
+            "restored to timeline"
+        } else {
+            "removed from timeline"
+        },
+        ids.len(),
+        if ids.len() == 1 { "" } else { "s" }
+    );
     Ok(())
 }
 
@@ -783,9 +865,8 @@ pub fn label_cmd(ctx: &Ctx, target: &NoteBlock, version: &str, label: &str) -> R
     let (note, _, located) = load(ctx, target)?;
     let id = require_id(&note, &located)?;
     let st = engine::state(&note.abs)?;
-    let versions = st.get(&id).map(|b| b.versions.as_slice()).unwrap_or(&[]);
-    let hash = resolve_version(versions, version)?;
-    engine::label(&note, &id, &hash, label)
+    let selected = resolve_history_version_meta(st.get(&id), version)?;
+    engine::label(&note, &id, &selected.version_id, label)
 }
 
 /// `mica snapshot` — snapshot a note now.
@@ -923,7 +1004,11 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                         } if origin.starts_with("migrated:") => Some(block.as_str()),
                         Event::ReplaceVersion { .. }
                         | Event::SetHead { .. }
-                        | Event::Label { .. } => None,
+                        | Event::Label { .. }
+                        | Event::Checkpoint { .. }
+                        | Event::MoveHead { .. }
+                        | Event::VersionLabel { .. }
+                        | Event::VersionVisibility { .. } => None,
                         Event::AddVersion { .. } => None,
                     })
                     .collect();
@@ -1068,7 +1153,11 @@ fn finish_migration(
             Event::AddVersion { eid, .. }
             | Event::ReplaceVersion { eid, .. }
             | Event::SetHead { eid, .. }
-            | Event::Label { eid, .. } => eid.as_str(),
+            | Event::Label { eid, .. }
+            | Event::Checkpoint { eid, .. }
+            | Event::MoveHead { eid, .. }
+            | Event::VersionLabel { eid, .. }
+            | Event::VersionVisibility { eid, .. } => eid.as_str(),
         })
         .collect();
     let missing: Vec<Event> = journal
@@ -1079,7 +1168,11 @@ fn finish_migration(
                 Event::AddVersion { eid, .. }
                 | Event::ReplaceVersion { eid, .. }
                 | Event::SetHead { eid, .. }
-                | Event::Label { eid, .. } => eid.as_str(),
+                | Event::Label { eid, .. }
+                | Event::Checkpoint { eid, .. }
+                | Event::MoveHead { eid, .. }
+                | Event::VersionLabel { eid, .. }
+                | Event::VersionVisibility { eid, .. } => eid.as_str(),
             };
             !existing_ids.contains(eid)
         })
@@ -1151,10 +1244,11 @@ fn frontmatter_closer(frontmatter: &str) -> Option<usize> {
 pub fn repair(ctx: &Ctx) -> Result<()> {
     let root = ctx.vault_root()?;
     let s = &ctx.style;
+    let inventory = vault::vault_inventory(&root)?;
 
     // Content index: every block id in every note.
     let mut content: Vec<ContentRef> = Vec::new();
-    for n in vault::vault_notes(&root)? {
+    for n in inventory.notes {
         let doc = engine::read_doc(&n)?;
         let rel = n
             .strip_prefix(&root)
@@ -1172,7 +1266,7 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     }
     // Sidecar index: every block id in every ledger.
     let mut screfs: Vec<SidecarRef> = Vec::new();
-    let sidecars = vault::vault_sidecars(&root)?;
+    let sidecars = inventory.sidecars;
     let mut ledgers = Vec::with_capacity(sidecars.len());
     for sc in &sidecars {
         let events = sidecar::read_ledger_at(&sc.join("ledger.jsonl"))?;
@@ -1187,7 +1281,11 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
                 Event::AddVersion { block, .. }
                 | Event::ReplaceVersion { block, .. }
                 | Event::SetHead { block, .. }
-                | Event::Label { block, .. } => block,
+                | Event::Label { block, .. }
+                | Event::Checkpoint { block, .. }
+                | Event::MoveHead { block, .. }
+                | Event::VersionLabel { block, .. }
+                | Event::VersionVisibility { block, .. } => block,
             };
             if seen.insert(block) {
                 screfs.push(SidecarRef {
@@ -1260,7 +1358,11 @@ fn unambiguous_rehome_target(
             Event::AddVersion { block, .. }
             | Event::ReplaceVersion { block, .. }
             | Event::SetHead { block, .. }
-            | Event::Label { block, .. } => block,
+            | Event::Label { block, .. }
+            | Event::Checkpoint { block, .. }
+            | Event::MoveHead { block, .. }
+            | Event::VersionLabel { block, .. }
+            | Event::VersionVisibility { block, .. } => block,
         };
         blocks.insert(block.as_str());
     }
@@ -1287,15 +1389,16 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
     let mut findings: Vec<serde_json::Value> = Vec::new();
     for sc in vault::vault_sidecars(&root)? {
         let ledger = sc.join("ledger.jsonl");
-        let ledger_header_valid = match sidecar::ledger_bad_lines(&ledger) {
-            Ok(bad) => {
-                if bad > 0 {
-                    problems += bad;
+        let ledger_read = match sidecar::read_ledger_report_at(&ledger) {
+            Ok(report) => {
+                if report.bad_lines > 0 {
+                    problems += report.bad_lines;
                     findings.push(serde_json::json!({
-                        "sidecar": sc.display().to_string(), "kind": "bad-ledger-lines", "count": bad
+                        "sidecar": sc.display().to_string(), "kind": "bad-ledger-lines",
+                        "count": report.bad_lines
                     }));
                 }
-                true
+                Some(report)
             }
             Err(error) => {
                 problems += 1;
@@ -1303,7 +1406,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                     "sidecar": sc.display().to_string(), "kind": "corrupt-ledger",
                     "detail": error.to_string()
                 }));
-                false
+                None
             }
         };
         // Note gone but sidecar remains?
@@ -1381,11 +1484,21 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 } else {
                     None
                 };
-                match crate::normalize::inspect_normalization_journal(
-                    &note_ref,
-                    current.as_deref(),
-                    &journal,
-                ) {
+                let inspection = if let Some(ledger_read) = ledger_read.as_ref() {
+                    crate::normalize::inspect_normalization_journal_with_ledger(
+                        &note_ref,
+                        current.as_deref(),
+                        &journal,
+                        Some(ledger_read),
+                    )
+                } else {
+                    crate::normalize::inspect_normalization_journal(
+                        &note_ref,
+                        current.as_deref(),
+                        &journal,
+                    )
+                };
+                match inspection {
                     Ok(inspection) => {
                         problems += inspection.conflicts.len();
                         findings.extend(inspection.conflicts.into_iter().map(|conflict| {
@@ -1416,23 +1529,71 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 }));
             }
         }
-
-        // Validate both the append-only source record and its checked effective view.
-        let events = if ledger_header_valid {
-            match sidecar::read_ledger_at(&ledger) {
-                Ok(events) => events,
-                Err(error) => {
-                    problems += 1;
-                    findings.push(serde_json::json!({
-                        "sidecar": sc.display().to_string(), "kind": "corrupt-ledger",
-                        "detail": error.to_string()
-                    }));
-                    Vec::new()
+        match sidecar::read_tab_consolidation_journal(&note) {
+            Ok(Some(journal)) if journal.status == "pending" => {
+                problems += 1;
+                findings.push(serde_json::json!({
+                    "sidecar": sc.display().to_string(), "kind": "pending-tab-consolidation"
+                }));
+                for (role, hash) in [
+                    ("original", journal.original.as_str()),
+                    ("consolidated", journal.consolidated.as_str()),
+                ] {
+                    match sidecar::read_object(&note, hash) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            problems += 1;
+                            findings.push(serde_json::json!({
+                                "sidecar": sc.display().to_string(),
+                                "kind": "missing-tab-consolidation-object",
+                                "role": role,
+                                "hash": hash
+                            }));
+                        }
+                        Err(error) => {
+                            problems += 1;
+                            findings.push(serde_json::json!({
+                                "sidecar": sc.display().to_string(),
+                                "kind": "corrupt-tab-consolidation-object",
+                                "role": role,
+                                "hash": hash,
+                                "detail": error.to_string()
+                            }));
+                        }
+                    }
                 }
             }
-        } else {
-            Vec::new()
-        };
+            Ok(Some(journal)) => {
+                let note_ref = NoteRef {
+                    abs: note.clone(),
+                    vault: root.clone(),
+                };
+                if let Err(error) =
+                    crate::consolidate::inspect_completed_journal(&note_ref, &journal)
+                {
+                    problems += 1;
+                    findings.push(serde_json::json!({
+                        "sidecar": sc.display().to_string(),
+                        "kind": "tab-consolidation-journal-validation-error",
+                        "detail": error.to_string()
+                    }));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                problems += 1;
+                findings.push(serde_json::json!({
+                    "sidecar": sc.display().to_string(),
+                    "kind": "corrupt-tab-consolidation-journal",
+                    "detail": error.to_string()
+                }));
+            }
+        }
+
+        // Validate both the append-only source record and its checked effective view.
+        let events = ledger_read
+            .map(|ledger_read| ledger_read.events)
+            .unwrap_or_default();
         let resolution = match mica_core::resolve_ledger_impl(&events) {
             Ok(resolution) => Some(resolution),
             Err(error) => {
@@ -1447,12 +1608,11 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
 
         let raw_versions: BTreeSet<(&str, &str)> = events
             .iter()
-            .filter_map(|event| {
-                if let Event::AddVersion { block, hash, .. } = event {
+            .filter_map(|event| match event {
+                Event::AddVersion { block, hash, .. } | Event::Checkpoint { block, hash, .. } => {
                     Some((block.as_str(), hash.as_str()))
-                } else {
-                    None
                 }
+                _ => None,
             })
             .collect();
         for (block, hash) in raw_versions {
@@ -1630,10 +1790,18 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
 /// None.
 ///
 /// # Examples
-/// ```no_run
-/// // resolve_version(&state.versions, "v2")
+/// ```text
+/// resolve_version(versions, "v2")
 /// ```
 pub fn resolve_version(versions: &[VersionMeta], selector: &str) -> Result<String> {
+    resolve_version_meta(versions, selector).map(|version| version.hash.clone())
+}
+
+/// Resolve a selector to one logical checkpoint, preserving duplicate hashes.
+pub fn resolve_version_meta<'a>(
+    versions: &'a [VersionMeta],
+    selector: &str,
+) -> Result<&'a VersionMeta> {
     if versions.is_empty() {
         return Err(CliError::NotFound(
             "no stored versions — run `mica snapshot` first".to_string(),
@@ -1645,40 +1813,101 @@ pub fn resolve_version(versions: &[VersionMeta], selector: &str) -> Result<Strin
     {
         return versions
             .get(n.checked_sub(1).unwrap_or(usize::MAX))
-            .map(|v| &v.hash)
-            .cloned()
             .ok_or_else(|| {
                 CliError::NotFound(format!("no version v{n} — only {} stored", versions.len()))
             });
     }
-    // Labels are addressable too.
-    if let Some(v) = versions
+    if let Some(version) = versions
         .iter()
-        .find(|v| v.label.as_deref() == Some(selector))
+        .find(|version| version.version_id == selector)
     {
-        return Ok(v.hash.clone());
+        return Ok(version);
+    }
+    let id_matches = versions
+        .iter()
+        .filter(|version| version.version_id.starts_with(selector))
+        .collect::<Vec<_>>();
+    if id_matches.len() == 1 {
+        return Ok(id_matches[0]);
+    }
+    if id_matches.len() > 1 {
+        return Err(CliError::BadArgs(format!(
+            "'{selector}' is ambiguous ({} checkpoint ids match) — give more id characters",
+            id_matches.len()
+        )));
+    }
+    let label_matches = versions
+        .iter()
+        .filter(|version| version.label.as_deref() == Some(selector))
+        .collect::<Vec<_>>();
+    if label_matches.len() == 1 {
+        return Ok(label_matches[0]);
+    }
+    if label_matches.len() > 1 {
+        return Err(CliError::BadArgs(format!(
+            "'{selector}' is ambiguous ({} labels match) — use a checkpoint id",
+            label_matches.len()
+        )));
     }
     let norm = if selector.starts_with("b3:") {
         selector.to_string()
     } else {
         format!("b3:{selector}")
     };
-    let mut matches = versions
+    let matches = versions
         .iter()
-        .filter(|version| version.hash.starts_with(&norm));
-    let Some(first) = matches.next() else {
+        .filter(|version| version.hash.starts_with(&norm))
+        .collect::<Vec<_>>();
+    let Some(first) = matches.first() else {
         return Err(CliError::NotFound(format!(
             "no version matching '{selector}' — see `mica versions`"
         )));
     };
-    let count = 1 + matches.count();
-    if count == 1 {
-        Ok(first.hash.clone())
+    if matches.len() == 1 {
+        Ok(*first)
     } else {
         Err(CliError::BadArgs(format!(
-            "'{selector}' is ambiguous ({count} versions match) — give more hash characters"
+            "'{selector}' is ambiguous ({} checkpoints match) — use a checkpoint id",
+            matches.len()
         )))
     }
+}
+
+fn resolve_history_version_meta<'a>(
+    block: Option<&'a mica_core::BlockState>,
+    selector: &str,
+) -> Result<&'a VersionMeta> {
+    // Exact checkpoint targeting is O(V + R) time and O(1) space across
+    // visible (V) and removed (R) history; other selector forms retain the
+    // visible-only resolver's existing scope and complexity.
+    if let Some(version) = block
+        .into_iter()
+        .flat_map(|block| block.versions.iter().chain(&block.removed_versions))
+        .find(|version| version.version_id == selector)
+    {
+        return Ok(version);
+    }
+    let visible = block
+        .map(|block| block.versions.as_slice())
+        .unwrap_or_default();
+    resolve_version_meta(visible, selector)
+}
+
+fn resolve_unique_version_ids(
+    versions: &[VersionMeta],
+    selectors: &[String],
+) -> Result<Vec<String>> {
+    let mut ids = Vec::with_capacity(selectors.len());
+    let mut seen = HashSet::with_capacity(selectors.len());
+    // O(k * v) selector resolution plus O(k) expected deduplication, where k
+    // is selectors and v is candidate versions. Output preserves first use.
+    for selector in selectors {
+        let version = resolve_version_meta(versions, selector)?;
+        if seen.insert(version.version_id.as_str()) {
+            ids.push(version.version_id.clone());
+        }
+    }
+    Ok(ids)
 }
 
 /// A block used by versioning must carry an id (stamp with `mica prepare`).
@@ -1704,6 +1933,37 @@ fn load(ctx: &Ctx, target: &NoteBlock) -> Result<(NoteRef, String, Located)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
+
+    #[test]
+    fn bulk_version_ids_deduplicate_in_first_selector_order() {
+        let version = |version_id: &str, hash: &str| VersionMeta {
+            version_id: version_id.to_string(),
+            hash: hash.to_string(),
+            ts: 1,
+            label: None,
+            parent: None,
+            parent_version_id: None,
+            effective_parent_version_id: None,
+            lineage_root: true,
+            source_version_id: None,
+            cause: None,
+            visible: true,
+        };
+        let versions = vec![
+            version("first", "b3:first"),
+            version("second", "b3:second"),
+            version("third", "b3:third"),
+        ];
+        let selectors = ["v2", "v1", "second", "third"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            resolve_unique_version_ids(&versions, &selectors).expect("resolve selectors"),
+            ["second", "first", "third"]
+        );
+    }
 
     #[test]
     fn watch_state_forgets_deleted_paths() {

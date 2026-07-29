@@ -2,6 +2,7 @@
 //! state. `eid`/`ts` are minted by the plugin (JS) because wasm has no clock;
 //! everything here is a deterministic, idempotent function of the event list.
 
+use crate::checkpoints::{effective_visible_parents, inferred_linear_parents, CheckpointIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -68,11 +69,73 @@ pub enum Event {
         #[serde(default)]
         label: Option<String>,
     },
+    /// Store one logical checkpoint, even when its content hash already exists.
+    Checkpoint {
+        /// Stable checkpoint and event identity.
+        eid: String,
+        /// Event time, unix milliseconds.
+        ts: u64,
+        /// Block id.
+        block: String,
+        /// Immutable content object hash.
+        hash: String,
+        /// Logical parent checkpoint identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        /// Older checkpoint whose content this checkpoint restored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// Optional machine-readable reason the checkpoint was created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+    },
+    /// Move a block's HEAD by stable checkpoint identity.
+    MoveHead {
+        /// Unique event id.
+        eid: String,
+        /// Event time, unix milliseconds.
+        ts: u64,
+        /// Block id.
+        block: String,
+        /// Target checkpoint, or no HEAD.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    /// Set or clear a checkpoint label by stable identity.
+    VersionLabel {
+        /// Unique event id.
+        eid: String,
+        /// Event time, unix milliseconds.
+        ts: u64,
+        /// Block id.
+        block: String,
+        /// Target checkpoint identity.
+        target: String,
+        /// New label.
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// Show or remove a checkpoint from the ordinary timeline.
+    VersionVisibility {
+        /// Unique event id.
+        eid: String,
+        /// Event time, unix milliseconds.
+        ts: u64,
+        /// Block id.
+        block: String,
+        /// Target checkpoint identity.
+        target: String,
+        /// Whether the checkpoint is visible.
+        visible: bool,
+    },
 }
 
 /// Metadata for one stored version.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct VersionMeta {
+    /// Stable logical checkpoint identity.
+    #[serde(rename = "versionId")]
+    pub version_id: String,
     /// Content hash (also the object filename).
     pub hash: String,
     /// First-seen time, unix milliseconds.
@@ -81,6 +144,22 @@ pub struct VersionMeta {
     pub label: Option<String>,
     /// Effective lineage parent after replacement resolution.
     pub parent: Option<String>,
+    /// Original logical parent identity, including hidden checkpoints.
+    #[serde(rename = "parentVersionId")]
+    pub parent_version_id: Option<String>,
+    /// Nearest visible logical parent identity.
+    #[serde(rename = "effectiveParentVersionId")]
+    pub effective_parent_version_id: Option<String>,
+    /// Whether the ledger explicitly establishes this checkpoint as a lineage root.
+    #[serde(default, rename = "lineageRoot")]
+    pub lineage_root: bool,
+    /// Older checkpoint whose bytes were deliberately restored.
+    #[serde(rename = "sourceVersionId")]
+    pub source_version_id: Option<String>,
+    /// Optional machine-readable reason the checkpoint was created.
+    pub cause: Option<String>,
+    /// Whether this checkpoint appears in the ordinary timeline.
+    pub visible: bool,
 }
 
 /// One replacement relationship resolved from an append-only ledger.
@@ -175,6 +254,24 @@ pub enum LedgerError {
         /// Second original hash associated with the alias.
         second: String,
     },
+    /// A checkpoint-state event targets an absent logical version.
+    MissingVersionTarget {
+        /// Event that contains the invalid reference.
+        event: String,
+        /// Missing checkpoint identity.
+        target: String,
+    },
+    /// A checkpoint-state event names a different block than its target.
+    VersionBlockMismatch {
+        /// Event that contains the invalid reference.
+        event: String,
+        /// Target checkpoint identity.
+        target: String,
+        /// Block that owns the target.
+        expected: String,
+        /// Block named by the event.
+        actual: String,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -227,6 +324,19 @@ impl fmt::Display for LedgerError {
                 formatter,
                 "hash {alias} in block {block} aliases both original versions {first} and {second}; repair the replacement histories before retrying"
             ),
+            Self::MissingVersionTarget { event, target } => write!(
+                formatter,
+                "version event {event} targets missing checkpoint {target}; restore the checkpoint event before retrying"
+            ),
+            Self::VersionBlockMismatch {
+                event,
+                target,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "version event {event} targets checkpoint {target} in block {expected} but names block {actual}; repair the block reference before retrying"
+            ),
         }
     }
 }
@@ -238,8 +348,22 @@ impl std::error::Error for LedgerError {}
 pub struct BlockState {
     /// Hash of the current head version, when one exists.
     pub head: Option<String>,
+    /// Stable identity of the effective visible HEAD.
+    #[serde(rename = "headVersionId")]
+    pub head_version_id: Option<String>,
+    /// Hash of the ledger's actual HEAD, including a checkpoint hidden from
+    /// the ordinary timeline.
+    #[serde(rename = "rawHead")]
+    pub raw_head: Option<String>,
+    /// Stable identity of the ledger's actual HEAD, including a checkpoint
+    /// hidden from the ordinary timeline.
+    #[serde(rename = "rawHeadVersionId")]
+    pub raw_head_version_id: Option<String>,
     /// Every stored version, in add order.
     pub versions: Vec<VersionMeta>,
+    /// Checkpoints removed from the ordinary timeline.
+    #[serde(rename = "removedVersions")]
+    pub removed_versions: Vec<VersionMeta>,
 }
 
 /// Resolve replacement relationships and fold the append-only ledger.
@@ -462,10 +586,21 @@ pub fn resolve_ledger_impl(events: &[Event]) -> Result<LedgerResolution, LedgerE
 
     let version_count = ordered
         .iter()
-        .filter(|event| matches!(event, Event::AddVersion { .. }))
+        .filter(|event| matches!(event, Event::AddVersion { .. } | Event::Checkpoint { .. }))
         .count();
-    let mut state: HashMap<&str, BlockState> = HashMap::new();
-    let mut slot: HashMap<(&str, &str), usize> = HashMap::with_capacity(version_count);
+    let mut state: HashMap<String, BlockState> = HashMap::new();
+    let mut record_by_id: HashMap<String, (String, usize)> = HashMap::with_capacity(version_count);
+    let mut id_by_block_hash: HashMap<(String, String), String> =
+        HashMap::with_capacity(version_count);
+    let mut legacy_alias: HashMap<String, String> = HashMap::new();
+    let mut raw_head: HashMap<String, Option<String>> = HashMap::new();
+    // Legacy migrations occasionally published a live object with `set-head`
+    // before (or without) adding that object as a timeline row. Preserve that
+    // detached hash exactly; later identity-bearing events may supersede it.
+    let mut detached_legacy_head: HashMap<String, String> = HashMap::new();
+    // Ordered record of what HEAD pointed at. A legacy ledger omits parents, so
+    // this progression is the only evidence of descent it retains.
+    let mut head_sequence: HashMap<String, Vec<String>> = HashMap::new();
     // O(n) where n = unique ledger events; every lookup is O(1) expected.
     for event in ordered {
         match event {
@@ -475,48 +610,257 @@ pub fn resolve_ledger_impl(events: &[Event]) -> Result<LedgerResolution, LedgerE
                 hash,
                 ts,
                 label,
+                origin,
                 parent,
-                ..
             } => {
                 let effective = effective_by_add.get(eid.as_str()).copied().unwrap_or(hash);
-                let block_state = state.entry(block).or_default();
-                if !slot.contains_key(&(block.as_str(), effective)) {
-                    slot.insert((block, effective), block_state.versions.len());
-                    block_state.versions.push(VersionMeta {
-                        hash: effective.to_string(),
-                        ts: *ts,
-                        label: label.clone(),
-                        parent: parent.as_deref().map(|hash| {
-                            resolve_hash(&effective_by_block_alias, block, hash).to_string()
-                        }),
-                    });
+                let key = (block.clone(), effective.to_string());
+                if let Some(existing) = id_by_block_hash.get(&key) {
+                    legacy_alias.insert(eid.clone(), existing.clone());
+                    continue;
                 }
+                let parent_hash = parent
+                    .as_deref()
+                    .map(|hash| resolve_hash(&effective_by_block_alias, block, hash).to_string());
+                let parent_id = parent_hash
+                    .as_ref()
+                    .and_then(|hash| id_by_block_hash.get(&(block.clone(), hash.clone())))
+                    .cloned();
+                let block_state = state.entry(block.clone()).or_default();
+                let lineage_root =
+                    parent.is_none() && (origin.is_some() || block_state.versions.is_empty());
+                let index = block_state.versions.len();
+                block_state.versions.push(VersionMeta {
+                    version_id: eid.clone(),
+                    hash: effective.to_string(),
+                    ts: *ts,
+                    label: label.clone(),
+                    parent: parent_hash,
+                    parent_version_id: parent_id,
+                    effective_parent_version_id: None,
+                    lineage_root,
+                    source_version_id: None,
+                    cause: None,
+                    visible: true,
+                });
+                record_by_id.insert(eid.clone(), (block.clone(), index));
+                id_by_block_hash.insert(key, eid.clone());
             }
             Event::ReplaceVersion { .. } => {}
             Event::SetHead { block, hash, .. } => {
+                state.entry(block.clone()).or_default();
                 let effective = resolve_hash(&effective_by_block_alias, block, hash);
-                state.entry(block).or_default().head = Some(effective.to_string());
+                if let Some(target) = id_by_block_hash
+                    .get(&(block.clone(), effective.to_string()))
+                    .cloned()
+                {
+                    head_sequence
+                        .entry(block.clone())
+                        .or_default()
+                        .push(target.clone());
+                    raw_head.insert(block.clone(), Some(target));
+                    detached_legacy_head.remove(block);
+                } else {
+                    // This was valid in the hash-based ledger: HEAD could name
+                    // an immutable object that was not itself a visible
+                    // version. Do not manufacture a user-visible checkpoint or
+                    // reject the entire history merely because stable inner
+                    // identity was introduced later.
+                    raw_head.remove(block);
+                    detached_legacy_head.insert(block.clone(), effective.to_string());
+                }
             }
             Event::Label {
                 block, hash, label, ..
             } => {
                 let effective = resolve_hash(&effective_by_block_alias, block, hash);
-                let block_state = state.entry(block).or_default();
-                if let Some(version) = slot
-                    .get(&(block.as_str(), effective))
-                    .and_then(|index| block_state.versions.get_mut(*index))
+                if let Some(id) = id_by_block_hash.get(&(block.clone(), effective.to_string())) {
+                    let (owner, index) = record_by_id.get(id).cloned().ok_or_else(|| {
+                        LedgerError::MissingVersionTarget {
+                            event: event_eid(event).to_string(),
+                            target: id.clone(),
+                        }
+                    })?;
+                    if let Some(version) = state
+                        .get_mut(&owner)
+                        .and_then(|block_state| block_state.versions.get_mut(index))
+                    {
+                        version.label = label.clone();
+                    }
+                }
+            }
+            Event::Checkpoint {
+                eid,
+                ts,
+                block,
+                hash,
+                parent,
+                source,
+                cause,
+            } => {
+                for target in [parent.as_ref(), source.as_ref()].into_iter().flatten() {
+                    validate_version_owner(&record_by_id, &legacy_alias, eid, block, target)?;
+                }
+                let block_state = state.entry(block.clone()).or_default();
+                let index = block_state.versions.len();
+                block_state.versions.push(VersionMeta {
+                    version_id: eid.clone(),
+                    hash: hash.clone(),
+                    ts: *ts,
+                    label: None,
+                    parent: None,
+                    parent_version_id: parent.as_ref().map(|id| canonical_id(&legacy_alias, id)),
+                    effective_parent_version_id: None,
+                    lineage_root: parent.is_none(),
+                    source_version_id: source.as_ref().map(|id| canonical_id(&legacy_alias, id)),
+                    cause: cause.clone(),
+                    visible: true,
+                });
+                record_by_id.insert(eid.clone(), (block.clone(), index));
+                id_by_block_hash
+                    .entry((block.clone(), hash.clone()))
+                    .or_insert_with(|| eid.clone());
+            }
+            Event::MoveHead {
+                eid, block, target, ..
+            } => {
+                state.entry(block.clone()).or_default();
+                detached_legacy_head.remove(block);
+                if let Some(target) = target {
+                    validate_version_owner(&record_by_id, &legacy_alias, eid, block, target)?;
+                    raw_head.insert(block.clone(), Some(canonical_id(&legacy_alias, target)));
+                } else {
+                    raw_head.insert(block.clone(), None);
+                }
+            }
+            Event::VersionLabel {
+                eid,
+                block,
+                target,
+                label,
+                ..
+            } => {
+                let (owner, index) =
+                    validate_version_owner(&record_by_id, &legacy_alias, eid, block, target)?;
+                if let Some(version) = state
+                    .get_mut(&owner)
+                    .and_then(|block_state| block_state.versions.get_mut(index))
                 {
                     version.label = label.clone();
+                }
+            }
+            Event::VersionVisibility {
+                eid,
+                block,
+                target,
+                visible,
+                ..
+            } => {
+                let (owner, index) =
+                    validate_version_owner(&record_by_id, &legacy_alias, eid, block, target)?;
+                if let Some(version) = state
+                    .get_mut(&owner)
+                    .and_then(|block_state| block_state.versions.get_mut(index))
+                {
+                    version.visible = *visible;
                 }
             }
         }
     }
 
+    // O(v) across logical checkpoints. Hidden ancestors remain present for
+    // recovery and matching, while ordinary Auto comparison skips them.
+    for (block, block_state) in &mut state {
+        let mut identities: Vec<CheckpointIdentity> = block_state
+            .versions
+            .iter()
+            .map(|version| CheckpointIdentity {
+                id: version.version_id.clone(),
+                parent: version.parent_version_id.clone(),
+                visible: version.visible,
+            })
+            .collect();
+        // Recover lineage a legacy ledger never wrote down, but only where its
+        // own head progression proves no branch could have occurred.
+        if let Some(inferred) = inferred_linear_parents(
+            &identities,
+            head_sequence.get(block).map(Vec::as_slice).unwrap_or(&[]),
+        ) {
+            for identity in &mut identities {
+                identity.parent = inferred.get(&identity.id).cloned();
+            }
+            for version in &mut block_state.versions {
+                if let Some(parent) = inferred.get(&version.version_id) {
+                    version.parent_version_id = Some(parent.clone());
+                    version.lineage_root = false;
+                } else {
+                    version.lineage_root = true;
+                }
+            }
+        }
+        let effective = effective_visible_parents(&identities);
+        let hash_by_id: HashMap<String, String> = block_state
+            .versions
+            .iter()
+            .map(|version| (version.version_id.clone(), version.hash.clone()))
+            .collect();
+        for version in &mut block_state.versions {
+            version.effective_parent_version_id =
+                effective.get(&version.version_id).cloned().flatten();
+            if version.parent_version_id.is_some() {
+                version.parent = version
+                    .effective_parent_version_id
+                    .as_ref()
+                    .and_then(|id| hash_by_id.get(id))
+                    .cloned();
+            }
+        }
+        let detached_head = detached_legacy_head.get(block).cloned();
+        let raw_head_version_id = match raw_head.get(block) {
+            Some(target) => target.clone(),
+            None => detached_head
+                .as_ref()
+                .and_then(|hash| id_by_block_hash.get(&(block.clone(), hash.clone())))
+                .cloned(),
+        };
+        let raw_head_hash = match raw_head.get(block) {
+            Some(Some(id)) => hash_by_id.get(id).cloned(),
+            Some(None) => None,
+            None => detached_head.clone(),
+        };
+        let effective_head = raw_head_version_id.clone().and_then(|id| {
+            block_state
+                .versions
+                .iter()
+                .find(|version| version.version_id == id)
+                .and_then(|version| {
+                    version
+                        .visible
+                        .then_some(version.version_id.clone())
+                        .or_else(|| effective.get(&id).cloned().flatten())
+                })
+        });
+        block_state.raw_head = raw_head_hash;
+        block_state.raw_head_version_id = raw_head_version_id;
+        let effective_head_hash = effective_head
+            .as_ref()
+            .and_then(|id| hash_by_id.get(id))
+            .cloned();
+        block_state.head = if raw_head.contains_key(block) {
+            effective_head_hash
+        } else {
+            effective_head_hash.or(detached_head)
+        };
+        block_state.head_version_id = effective_head;
+        let all = std::mem::take(&mut block_state.versions);
+        let (visible, removed): (Vec<_>, Vec<_>) =
+            all.into_iter().partition(|version| version.visible);
+        block_state.versions = visible;
+        block_state.removed_versions = removed;
+    }
+
     Ok(LedgerResolution {
-        blocks: state
-            .into_iter()
-            .map(|(block, block_state)| (block.to_string(), block_state))
-            .collect(),
+        blocks: state.into_iter().collect(),
         replacements,
     })
 }
@@ -541,12 +885,45 @@ pub fn fold_ledger_impl(events: &[Event]) -> Result<BTreeMap<String, BlockState>
     Ok(resolve_ledger_impl(events)?.blocks)
 }
 
+fn canonical_id(aliases: &HashMap<String, String>, id: &str) -> String {
+    aliases.get(id).cloned().unwrap_or_else(|| id.to_string())
+}
+
+fn validate_version_owner(
+    records: &HashMap<String, (String, usize)>,
+    aliases: &HashMap<String, String>,
+    event: &str,
+    block: &str,
+    target: &str,
+) -> Result<(String, usize), LedgerError> {
+    let canonical = canonical_id(aliases, target);
+    let Some((owner, index)) = records.get(&canonical) else {
+        return Err(LedgerError::MissingVersionTarget {
+            event: event.to_string(),
+            target: target.to_string(),
+        });
+    };
+    if owner != block {
+        return Err(LedgerError::VersionBlockMismatch {
+            event: event.to_string(),
+            target: target.to_string(),
+            expected: owner.clone(),
+            actual: block.to_string(),
+        });
+    }
+    Ok((owner.clone(), *index))
+}
+
 fn event_eid(event: &Event) -> &str {
     match event {
         Event::AddVersion { eid, .. }
         | Event::ReplaceVersion { eid, .. }
         | Event::SetHead { eid, .. }
-        | Event::Label { eid, .. } => eid,
+        | Event::Label { eid, .. }
+        | Event::Checkpoint { eid, .. }
+        | Event::MoveHead { eid, .. }
+        | Event::VersionLabel { eid, .. }
+        | Event::VersionVisibility { eid, .. } => eid,
     }
 }
 
@@ -555,7 +932,11 @@ fn event_key(event: &Event) -> (u64, &str) {
         Event::AddVersion { ts, eid, .. }
         | Event::ReplaceVersion { ts, eid, .. }
         | Event::SetHead { ts, eid, .. }
-        | Event::Label { ts, eid, .. } => (*ts, eid),
+        | Event::Label { ts, eid, .. }
+        | Event::Checkpoint { ts, eid, .. }
+        | Event::MoveHead { ts, eid, .. }
+        | Event::VersionLabel { ts, eid, .. }
+        | Event::VersionVisibility { ts, eid, .. } => (*ts, eid),
     }
 }
 
@@ -755,6 +1136,399 @@ mod tests {
         let st = fold(&ev);
         assert_eq!(st["b"].head.as_deref(), Some("h2"));
         assert_eq!(st["b"].versions.len(), 2);
+    }
+
+    #[test]
+    fn legacy_linear_ledger_recovers_comparable_lineage() {
+        // The shape a pre-parent-tracking ledger actually has: every
+        // `add-version` carries only a hash and a timestamp, each followed by
+        // `set-head` onto that same hash. Nothing records descent, so before
+        // inference every checkpoint after the first compared against nothing.
+        let events = vec![
+            add("b", "h1", 1),
+            set("b", "h1", 1),
+            add("b", "h2", 2),
+            set("b", "h2", 2),
+            add("b", "h3", 3),
+            set("b", "h3", 3),
+        ];
+        let state = fold(&events);
+        let block = &state["b"];
+        assert_eq!(block.versions.len(), 3);
+        assert!(
+            block.versions[0].lineage_root,
+            "the oldest checkpoint remains a root"
+        );
+        assert_eq!(block.versions[0].parent_version_id, None);
+        assert_eq!(
+            block.versions[1].effective_parent_version_id.as_deref(),
+            Some(block.versions[0].version_id.as_str()),
+            "a provably linear head progression makes the predecessor the parent"
+        );
+        assert_eq!(
+            block.versions[2].effective_parent_version_id.as_deref(),
+            Some(block.versions[1].version_id.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_ledger_with_a_head_reset_keeps_refusing_to_guess() {
+        // Head returns to the first checkpoint before the third is written, so
+        // list order is NOT descent. Inferring here would report a diff against
+        // a checkpoint that was never this one's parent.
+        let events = vec![
+            add("b", "h1", 1),
+            set("b", "h1", 1),
+            add("b", "h2", 2),
+            set("b", "h2", 2),
+            set("b", "h1", 3),
+            add("b", "h3", 4),
+            set("b", "h3", 4),
+        ];
+        let state = fold(&events);
+        let block = &state["b"];
+        assert_eq!(block.versions.len(), 3);
+        for version in &block.versions {
+            assert_eq!(
+                version.effective_parent_version_id, None,
+                "an ambiguous legacy history stays explicitly unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_detached_head_does_not_invalidate_later_history() {
+        let events = vec![
+            add("b", "visible-root", 1),
+            set("b", "detached-live-object", 2),
+            Event::AddVersion {
+                eid: "child".into(),
+                ts: 3,
+                block: "b".into(),
+                hash: "visible-child".into(),
+                label: None,
+                origin: None,
+                parent: Some("detached-live-object".into()),
+            },
+            set("b", "visible-child", 4),
+        ];
+        let state = fold(&events);
+        let block = &state["b"];
+        assert_eq!(block.head.as_deref(), Some("visible-child"));
+        assert_eq!(block.head_version_id.as_deref(), Some("child"));
+        assert_eq!(block.versions.len(), 2);
+        assert_eq!(
+            block.versions[1].parent.as_deref(),
+            Some("detached-live-object"),
+            "unresolved legacy lineage remains explicit instead of being invented"
+        );
+        assert_eq!(block.versions[1].parent_version_id, None);
+    }
+
+    #[test]
+    fn migrated_histories_preserve_multiple_explicit_lineage_roots() {
+        let events = vec![
+            Event::AddVersion {
+                eid: "first-root".into(),
+                ts: 1,
+                block: "b".into(),
+                hash: "first".into(),
+                label: Some("V1".into()),
+                origin: Some("migrated:success".into()),
+                parent: None,
+            },
+            Event::AddVersion {
+                eid: "second-root".into(),
+                ts: 2,
+                block: "b".into(),
+                hash: "second".into(),
+                label: Some("V1".into()),
+                origin: Some("migrated:bug".into()),
+                parent: None,
+            },
+        ];
+        let state = fold(&events);
+        let block = &state["b"];
+        assert!(block.versions[0].lineage_root);
+        assert!(
+            block.versions[1].lineage_root,
+            "dense visible ordering must not erase a later migrated branch root"
+        );
+    }
+
+    #[test]
+    fn final_legacy_detached_head_preserves_hash_without_inventing_a_row() {
+        let state = fold(&[add("b", "visible", 1), set("b", "detached", 2)]);
+        let block = &state["b"];
+        assert_eq!(block.head.as_deref(), Some("detached"));
+        assert_eq!(block.head_version_id, None);
+        assert_eq!(block.versions.len(), 1);
+    }
+
+    #[test]
+    fn legacy_set_head_without_a_version_still_materializes_block_state() {
+        let state = fold(&[set("b", "detached", 1)]);
+        let block = &state["b"];
+
+        assert_eq!(block.head.as_deref(), Some("detached"));
+        assert_eq!(block.raw_head.as_deref(), Some("detached"));
+        assert_eq!(block.head_version_id, None);
+        assert_eq!(block.raw_head_version_id, None);
+        assert!(block.versions.is_empty());
+        assert!(block.removed_versions.is_empty());
+    }
+
+    #[test]
+    fn move_head_to_none_without_a_version_materializes_empty_block_state() {
+        let state = fold(&[Event::MoveHead {
+            eid: "clear".into(),
+            ts: 1,
+            block: "b".into(),
+            target: None,
+        }]);
+        let block = &state["b"];
+
+        assert_eq!(block.head, None);
+        assert_eq!(block.raw_head, None);
+        assert_eq!(block.head_version_id, None);
+        assert_eq!(block.raw_head_version_id, None);
+        assert!(block.versions.is_empty());
+        assert!(block.removed_versions.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_restore_keeps_duplicate_content_identity() {
+        let events = vec![
+            Event::Checkpoint {
+                eid: "a-v1".into(),
+                ts: 1,
+                block: "b".into(),
+                hash: "h1".into(),
+                parent: None,
+                source: None,
+                cause: None,
+            },
+            Event::MoveHead {
+                eid: "b-head-1".into(),
+                ts: 1,
+                block: "b".into(),
+                target: Some("a-v1".into()),
+            },
+            Event::Checkpoint {
+                eid: "c-v2".into(),
+                ts: 2,
+                block: "b".into(),
+                hash: "h2".into(),
+                parent: Some("a-v1".into()),
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "d-v3".into(),
+                ts: 3,
+                block: "b".into(),
+                hash: "h1".into(),
+                parent: Some("c-v2".into()),
+                source: Some("a-v1".into()),
+                cause: Some("restore".into()),
+            },
+            Event::MoveHead {
+                eid: "e-head-3".into(),
+                ts: 3,
+                block: "b".into(),
+                target: Some("d-v3".into()),
+            },
+        ];
+        let state = fold(&events);
+        assert_eq!(state["b"].versions.len(), 3);
+        assert_eq!(state["b"].versions[0].hash, state["b"].versions[2].hash);
+        assert_eq!(state["b"].head_version_id.as_deref(), Some("d-v3"));
+        assert_eq!(
+            state["b"].versions[2].source_version_id.as_deref(),
+            Some("a-v1")
+        );
+    }
+
+    #[test]
+    fn hidden_versions_are_recoverable_and_spliced_from_visible_lineage() {
+        let events = vec![
+            Event::Checkpoint {
+                eid: "v1".into(),
+                ts: 1,
+                block: "b".into(),
+                hash: "h1".into(),
+                parent: None,
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "v2".into(),
+                ts: 2,
+                block: "b".into(),
+                hash: "h2".into(),
+                parent: Some("v1".into()),
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "v3".into(),
+                ts: 3,
+                block: "b".into(),
+                hash: "h3".into(),
+                parent: Some("v2".into()),
+                source: None,
+                cause: None,
+            },
+            Event::MoveHead {
+                eid: "head".into(),
+                ts: 3,
+                block: "b".into(),
+                target: Some("v2".into()),
+            },
+            Event::VersionVisibility {
+                eid: "hide".into(),
+                ts: 4,
+                block: "b".into(),
+                target: "v2".into(),
+                visible: false,
+            },
+        ];
+        let state = fold(&events);
+        assert_eq!(state["b"].versions.len(), 2);
+        assert_eq!(state["b"].removed_versions.len(), 1);
+        assert_eq!(
+            state["b"].versions[1]
+                .effective_parent_version_id
+                .as_deref(),
+            Some("v1")
+        );
+        assert_eq!(state["b"].head_version_id.as_deref(), Some("v1"));
+        assert_eq!(state["b"].raw_head.as_deref(), Some("h2"));
+        assert_eq!(state["b"].raw_head_version_id.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn consecutive_hidden_ancestors_and_branches_reconnect_independently() {
+        let mut events = vec![
+            Event::Checkpoint {
+                eid: "v1".into(),
+                ts: 1,
+                block: "b".into(),
+                hash: "h1".into(),
+                parent: None,
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "v2".into(),
+                ts: 2,
+                block: "b".into(),
+                hash: "h2".into(),
+                parent: Some("v1".into()),
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "v3".into(),
+                ts: 3,
+                block: "b".into(),
+                hash: "h3".into(),
+                parent: Some("v2".into()),
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "main".into(),
+                ts: 4,
+                block: "b".into(),
+                hash: "main-hash".into(),
+                parent: Some("v3".into()),
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "branch".into(),
+                ts: 5,
+                block: "b".into(),
+                hash: "branch-hash".into(),
+                parent: Some("v2".into()),
+                source: None,
+                cause: None,
+            },
+        ];
+        for (at, target) in ["v2", "v3"].into_iter().enumerate() {
+            events.push(Event::VersionVisibility {
+                eid: format!("hide-{target}"),
+                ts: 10 + at as u64,
+                block: "b".into(),
+                target: target.into(),
+                visible: false,
+            });
+        }
+        let state = fold(&events);
+        let block = &state["b"];
+        assert_eq!(block.versions.len(), 3);
+        assert_eq!(block.removed_versions.len(), 2);
+        for id in ["main", "branch"] {
+            let version = block
+                .versions
+                .iter()
+                .find(|version| version.version_id == id)
+                .expect("branch checkpoint");
+            assert_eq!(
+                version.effective_parent_version_id.as_deref(),
+                Some("v1"),
+                "each branch reconnects to its own nearest retained ancestor"
+            );
+        }
+    }
+
+    #[test]
+    fn restoring_visibility_restores_original_lineage_without_rewriting_content() {
+        let events = vec![
+            Event::Checkpoint {
+                eid: "v1".into(),
+                ts: 1,
+                block: "b".into(),
+                hash: "same".into(),
+                parent: None,
+                source: None,
+                cause: None,
+            },
+            Event::Checkpoint {
+                eid: "v2".into(),
+                ts: 2,
+                block: "b".into(),
+                hash: "same".into(),
+                parent: Some("v1".into()),
+                source: None,
+                cause: None,
+            },
+            Event::VersionVisibility {
+                eid: "hide".into(),
+                ts: 3,
+                block: "b".into(),
+                target: "v1".into(),
+                visible: false,
+            },
+            Event::VersionVisibility {
+                eid: "show".into(),
+                ts: 4,
+                block: "b".into(),
+                target: "v1".into(),
+                visible: true,
+            },
+        ];
+        let state = fold(&events);
+        let block = &state["b"];
+        assert_eq!(block.versions.len(), 2);
+        assert!(block.removed_versions.is_empty());
+        assert_eq!(block.versions[0].hash, "same");
+        assert_eq!(block.versions[1].hash, "same");
+        assert_eq!(
+            block.versions[1].effective_parent_version_id.as_deref(),
+            Some("v1")
+        );
     }
 
     #[test]

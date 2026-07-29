@@ -425,6 +425,32 @@ pub enum StructOp {
         target_end: usize,
         /// Exact target serialization observed when the gesture began.
         target_expected: String,
+        /// Absorb callout and code leaves too, rather than refusing the merge.
+        ///
+        /// Ordinary combining joins prose only, so a callout or fenced block
+        /// stays its own addressable section. Setting this merges them anyway:
+        /// bytes are preserved exactly, but those leaves stop being separate
+        /// sections, which is why the caller must ask for it by name.
+        #[serde(default)]
+        allow_mixed: bool,
+    },
+    /// Merge a contiguous run of sibling regions into one logical section.
+    ///
+    /// One guarded reduction rather than repeated pairwise merges: each pairwise
+    /// combine rewrites the tree and invalidates every later region's offsets,
+    /// so a chained run would be applying stale preimages after the first step.
+    CombineRun {
+        /// Container holding the run.
+        path: Vec<usize>,
+        /// First child index of the run.
+        start: usize,
+        /// One past the run.
+        end: usize,
+        /// Exact serialization of the run when the gesture began.
+        expected: String,
+        /// Absorb callout and code leaves too. See `CombineRegions`.
+        #[serde(default)]
+        allow_mixed: bool,
     },
     /// Remove one logical `:::section` wrapper while preserving its children.
     UncombineSection {
@@ -911,6 +937,7 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
             target_start,
             target_end,
             target_expected,
+            allow_mixed,
         } => combine_regions(
             cst,
             RegionPreimage {
@@ -925,7 +952,15 @@ fn apply_op_inner(cst: &mut Cst, op: &StructOp) -> bool {
                 end: *target_end,
                 expected: target_expected,
             },
+            *allow_mixed,
         ),
+        StructOp::CombineRun {
+            path,
+            start,
+            end,
+            expected,
+            allow_mixed,
+        } => combine_run(cst, path, *start, *end, expected, *allow_mixed),
         StructOp::UncombineSection { path } => uncombine_section(cst, path),
     }
 }
@@ -942,6 +977,7 @@ fn combine_regions(
     cst: &mut Cst,
     source_ref: RegionPreimage<'_>,
     target_ref: RegionPreimage<'_>,
+    allow_mixed: bool,
 ) -> bool {
     if source_ref.start >= source_ref.end
         || target_ref.start >= target_ref.end
@@ -952,13 +988,19 @@ fn combine_regions(
         return false;
     }
     let style = line_style_at(cst, target_ref.path);
-    let Some(source) = combine_snapshot(cst, source_ref) else {
+    let Some(source) = combine_snapshot(cst, source_ref, allow_mixed) else {
         return false;
     };
-    let Some(target) = combine_snapshot(cst, target_ref) else {
+    let Some(target) = combine_snapshot(cst, target_ref, allow_mixed) else {
         return false;
     };
-    let target_node = combined_target_node(target, source.children, &style);
+    let source_precedes_target = region_precedes(
+        source_ref.path,
+        source_ref.start,
+        target_ref.path,
+        target_ref.start,
+    );
+    let target_node = combined_target_node(target, source.children, &style, source_precedes_target);
 
     if source_ref.path != target_ref.path {
         // Neither region may own the other's parent container. Apart from being
@@ -1056,7 +1098,11 @@ struct CombineSnapshot {
     wrapper: Option<Node>,
 }
 
-fn combine_snapshot(cst: &Cst, region: RegionPreimage<'_>) -> Option<CombineSnapshot> {
+fn combine_snapshot(
+    cst: &Cst,
+    region: RegionPreimage<'_>,
+    allow_mixed: bool,
+) -> Option<CombineSnapshot> {
     let children = children_at(cst, region.path)?;
     if region.end > children.len() {
         return None;
@@ -1065,7 +1111,7 @@ fn combine_snapshot(cst: &Cst, region: RegionPreimage<'_>) -> Option<CombineSnap
     if !region_matches(nodes, region.expected) {
         return None;
     }
-    if is_plain_region(nodes) {
+    if is_plain_region(nodes) || (allow_mixed && is_mixed_region(nodes)) {
         return Some(CombineSnapshot {
             children: nodes.to_vec(),
             wrapper: None,
@@ -1074,7 +1120,9 @@ fn combine_snapshot(cst: &Cst, region: RegionPreimage<'_>) -> Option<CombineSnap
     let [section @ Node::Container { name, children, .. }] = nodes else {
         return None;
     };
-    if name != "section" || !is_plain_section_content(children) {
+    if name != "section"
+        || !(is_plain_section_content(children) || (allow_mixed && is_mixed_region(children)))
+    {
         return None;
     }
     Some(CombineSnapshot {
@@ -1083,12 +1131,42 @@ fn combine_snapshot(cst: &Cst, region: RegionPreimage<'_>) -> Option<CombineSnap
     })
 }
 
+/// Document order of two regions.
+///
+/// A region's parent path followed by its first child index is exactly the
+/// position of its first node in the tree, so comparing those sequences
+/// lexicographically orders any two regions at any depth.
+fn region_precedes(
+    left_path: &[usize],
+    left_start: usize,
+    right_path: &[usize],
+    right_start: usize,
+) -> bool {
+    let left = left_path.iter().copied().chain(std::iter::once(left_start));
+    let right = right_path
+        .iter()
+        .copied()
+        .chain(std::iter::once(right_start));
+    left.cmp(right) == std::cmp::Ordering::Less
+}
+
 fn combined_target_node(
     mut target: CombineSnapshot,
     source_children: Vec<Node>,
     style: &LineStyle,
+    source_precedes_target: bool,
 ) -> Node {
-    target.children.extend(source_children);
+    // Merged content keeps the document's order, not the order in which the two
+    // regions happened to be named. Combining downward names the *later* region
+    // as the target; appending there would move the earlier content beneath it,
+    // and uncombining would then strand that content at the bottom.
+    if source_precedes_target {
+        let mut merged = source_children;
+        merged.append(&mut target.children);
+        target.children = merged;
+    } else {
+        target.children.extend(source_children);
+    }
     if let Some(mut wrapper) = target.wrapper {
         if let Node::Container { children, .. } = &mut wrapper {
             *children = target.children;
@@ -1098,6 +1176,46 @@ fn combined_target_node(
     } else {
         new_section_styled(target.children, style)
     }
+}
+
+/// Wrap `children[start..end]` in one section, preserving their order and bytes.
+fn combine_run(
+    cst: &mut Cst,
+    path: &[usize],
+    start: usize,
+    end: usize,
+    expected: &str,
+    allow_mixed: bool,
+) -> bool {
+    // A run of fewer than two regions is already one section; treating it as a
+    // change would wrap a lone region in a redundant wrapper.
+    if end <= start + 1 {
+        return false;
+    }
+    let style = line_style_at(cst, path);
+    let Some(children) = children_at_mut(cst, path) else {
+        return false;
+    };
+    if end > children.len() {
+        return false;
+    }
+    let run = &children[start..end];
+    if !region_matches(run, expected) {
+        return false; // structure changed underneath the gesture — abort
+    }
+    // A run needs at least two pieces of content to be worth merging; the
+    // pairwise predicate deliberately requires exactly one per side, which is
+    // the opposite question.
+    let mergeable = match plain_content_count(run) {
+        Some(count) => count > 1,
+        None => allow_mixed && mixed_content_count(run).is_some_and(|count| count > 1),
+    };
+    if !mergeable {
+        return false;
+    }
+    let merged = new_section_styled(run.to_vec(), &style);
+    children.splice(start..end, [merged]);
+    true
 }
 
 fn uncombine_section(cst: &mut Cst, path: &[usize]) -> bool {
@@ -1126,6 +1244,26 @@ fn uncombine_section(cst: &mut Cst, path: &[usize]) -> bool {
 
 fn is_plain_region(nodes: &[Node]) -> bool {
     plain_content_count(nodes) == Some(1)
+}
+
+/// Leaves a mixed merge may absorb: prose, callouts, and fenced code, but never
+/// a container — merging one would dissolve structure the user built, and its
+/// bytes could not be restored by uncombining.
+fn mixed_content_count(nodes: &[Node]) -> Option<usize> {
+    let mut content = 0;
+    for node in nodes {
+        let Node::Leaf { text, .. } = node else {
+            return None;
+        };
+        if !text.trim().is_empty() {
+            content += 1;
+        }
+    }
+    Some(content)
+}
+
+fn is_mixed_region(nodes: &[Node]) -> bool {
+    mixed_content_count(nodes).is_some_and(|count| count > 0)
 }
 
 fn is_plain_section_content(nodes: &[Node]) -> bool {
@@ -1769,23 +1907,45 @@ fn node_line_style(nodes: &[Node]) -> Option<LineStyle> {
 }
 
 fn set_attr_token(attrs: &str, key: &str, value: Option<&str>) -> String {
-    let mut tokens: Vec<String> = attrs
-        .split_whitespace()
-        .filter(|tok| tok.split_once('=').is_none_or(|(k, _)| k != key))
-        .map(str::to_string)
-        .collect();
-    if let Some(v) = value {
-        // Keep a replaced key at its original position when possible.
-        let pos = attrs
-            .split_whitespace()
-            .position(|tok| tok.split_once('=').is_some_and(|(k, _)| k == key));
-        let token = format!("{key}={v}");
-        match pos {
-            Some(p) if p <= tokens.len() => tokens.insert(p, token),
-            _ => tokens.push(token),
+    let added = value.map_or(0, |value| key.len() + value.len() + 2);
+    let mut out = String::with_capacity(attrs.len() + added);
+    let mut replaced = false;
+    // O(n) in attribute bytes, with output-only auxiliary space.
+    for token in attrs.split_whitespace() {
+        let matches = token.split_once('=').is_some_and(|(found, _)| found == key);
+        if matches {
+            if !replaced {
+                if let Some(value) = value {
+                    push_attr_assignment(&mut out, key, value);
+                }
+                replaced = true;
+            }
+        } else {
+            push_attr_token(&mut out, token);
         }
     }
-    tokens.join(" ")
+    if !replaced {
+        if let Some(value) = value {
+            push_attr_assignment(&mut out, key, value);
+        }
+    }
+    out
+}
+
+fn push_attr_token(out: &mut String, token: &str) {
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(token);
+}
+
+fn push_attr_assignment(out: &mut String, key: &str, value: &str) {
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(key);
+    out.push('=');
+    out.push_str(value);
 }
 
 /// Rewrite a tab's title and open line, preserving its form.
@@ -2490,6 +2650,7 @@ mod tests {
                 target_start: 0,
                 target_end: 2,
                 target_expected: "Alpha\n\n".into(),
+                allow_mixed: false,
             },
         );
         assert!(changed);
@@ -2510,12 +2671,16 @@ mod tests {
                 target_start: 0,
                 target_end: 1,
                 target_expected: "Target\n".into(),
+                allow_mixed: false,
             },
         );
         assert!(changed);
+        // The source lives in tab A, which precedes tab B, so it stays first.
+        // This expectation previously read `Target` then `Source`, pinning a
+        // silent reordering of the user's text.
         assert_eq!(
             out,
-            ":::tabs\n:::tab A\n:::\n:::tab B\n:::section\nTarget\n\nSource\n:::\n:::\n:::\n"
+            ":::tabs\n:::tab A\n:::\n:::tab B\n:::section\nSource\n\nTarget\n:::\n:::\n:::\n"
         );
     }
 
@@ -2533,6 +2698,7 @@ mod tests {
                 target_start: 0,
                 target_end: 2,
                 target_expected: "Target\n\n".into(),
+                allow_mixed: false,
             },
         );
         assert!(changed);
@@ -2556,10 +2722,13 @@ mod tests {
                 target_start: 2,
                 target_end: 3,
                 target_expected: ":::section\nAlpha\n\nBeta\n:::\n".into(),
+                allow_mixed: false,
             },
         );
         assert!(changed);
-        assert_eq!(out, ":::section\nAlpha\n\nBeta\n\nGamma\n:::\n");
+        // `Gamma` is the first node in the block, so combining it into the
+        // section below must leave it above that section's content.
+        assert_eq!(out, ":::section\nGamma\n\nAlpha\n\nBeta\n:::\n");
     }
 
     #[test]
@@ -2576,10 +2745,13 @@ mod tests {
                 target_start: 2,
                 target_end: 3,
                 target_expected: ":::section\nAlpha\n:::\n".into(),
+                allow_mixed: false,
             },
         );
         assert!(ok);
-        assert_eq!(out, "::::::section\nAlpha\n\nGamma\n:::::\nmore\n::::::\n");
+        // Same ordering rule, with a fence that has to grow past a literal
+        // closer inside the merged content.
+        assert_eq!(out, "::::::section\nGamma\n:::::\nmore\n\nAlpha\n::::::\n");
         assert_eq!(parse_block_impl(&out).children.len(), 1);
     }
 
@@ -2596,6 +2768,7 @@ mod tests {
                 target_start: 0,
                 target_end: 2,
                 target_expected: "stale\n".into(),
+                allow_mixed: false,
             },
             StructOp::CombineRegions {
                 source_path: vec![],
@@ -2606,6 +2779,7 @@ mod tests {
                 target_start: 0,
                 target_end: 2,
                 target_expected: "Alpha\n\n".into(),
+                allow_mixed: false,
             },
         ] {
             assert_eq!(apply(prose, op), (false, prose.to_string()));
@@ -2624,6 +2798,7 @@ mod tests {
                     target_start: 0,
                     target_end: 2,
                     target_expected: "Alpha\n\n".into(),
+                    allow_mixed: false,
                 },
             ),
             (false, code.to_string())
@@ -2642,10 +2817,240 @@ mod tests {
                     target_start: 0,
                     target_end: 2,
                     target_expected: "Alpha\n\n".into(),
+                    allow_mixed: false,
                 },
             ),
             (false, callout.to_string())
         );
+    }
+
+    #[test]
+    fn mixed_combine_absorbs_a_callout_without_losing_bytes() {
+        let src = "Alpha\n\n> [!note]\n> Beta\n";
+        // Refused by default: a callout stays its own addressable section.
+        let plain = StructOp::CombineRegions {
+            source_path: vec![],
+            source_start: 0,
+            source_end: 2,
+            source_expected: "Alpha\n\n".into(),
+            target_path: vec![],
+            target_start: 2,
+            target_end: 3,
+            target_expected: "> [!note]\n> Beta\n".into(),
+            allow_mixed: false,
+        };
+        assert_eq!(apply(src, plain), (false, src.to_string()));
+
+        let mixed = StructOp::CombineRegions {
+            source_path: vec![],
+            source_start: 0,
+            source_end: 2,
+            source_expected: "Alpha\n\n".into(),
+            target_path: vec![],
+            target_start: 2,
+            target_end: 3,
+            target_expected: "> [!note]\n> Beta\n".into(),
+            allow_mixed: true,
+        };
+        let (changed, out) = apply(src, mixed);
+        assert!(changed, "an explicit mixed combine absorbs the callout");
+        assert!(out.contains("Alpha"), "prose survives: {out}");
+        assert!(
+            out.contains("> [!note]"),
+            "callout markers survive verbatim: {out}"
+        );
+        assert!(
+            out.contains("> Beta"),
+            "callout body survives verbatim: {out}"
+        );
+        assert!(
+            out.starts_with(":::section"),
+            "the result is one section: {out}"
+        );
+
+        // And it is still exactly reversible.
+        let (split, restored) = apply(&out, StructOp::UncombineSection { path: vec![0] });
+        assert!(split);
+        assert_eq!(restored, src, "uncombine restores the original bytes");
+    }
+
+    #[test]
+    fn mixed_combine_still_refuses_a_container() {
+        // Absorbing a tabs/grid group would dissolve structure the user built,
+        // and uncombining could not put it back.
+        let src = "Alpha\n\n:::tabs\n:::tab A\nBody\n:::\n:::\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 0,
+                source_end: 2,
+                source_expected: "Alpha\n\n".into(),
+                target_path: vec![],
+                target_start: 2,
+                target_end: 3,
+                target_expected: ":::tabs\n:::tab A\nBody\n:::\n:::\n".into(),
+                allow_mixed: true,
+            },
+        );
+        assert!(!changed, "a container is never absorbed");
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn combining_downward_keeps_document_order() {
+        // "Combine with next" names the LATER region as the target. Appending
+        // there put the earlier content underneath, so the text silently
+        // reordered and uncombining then stranded it at the bottom.
+        let src = "Alpha\n\nBeta\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRegions {
+                source_path: vec![],
+                source_start: 0,
+                source_end: 2,
+                source_expected: "Alpha\n\n".into(),
+                target_path: vec![],
+                target_start: 2,
+                target_end: 3,
+                target_expected: "Beta\n".into(),
+                allow_mixed: false,
+            },
+        );
+        assert!(changed);
+        let alpha = out.find("Alpha");
+        let beta = out.find("Beta");
+        assert!(
+            alpha.is_some() && beta.is_some() && alpha < beta,
+            "the earlier region stays earlier after a downward combine: {out}"
+        );
+    }
+
+    #[test]
+    fn combine_then_uncombine_restores_the_original_order() {
+        for (
+            source_start,
+            source_end,
+            source_expected,
+            target_start,
+            target_end,
+            target_expected,
+        ) in [
+            // Combining downward (source is the earlier region)...
+            (0usize, 2usize, "Alpha\n\n", 2usize, 3usize, "Beta\n"),
+            // ...and upward (source is the later region).
+            (2, 3, "Beta\n", 0, 2, "Alpha\n\n"),
+        ] {
+            let src = "Alpha\n\nBeta\n";
+            let (combined, merged) = apply(
+                src,
+                StructOp::CombineRegions {
+                    source_path: vec![],
+                    source_start,
+                    source_end,
+                    source_expected: source_expected.into(),
+                    target_path: vec![],
+                    target_start,
+                    target_end,
+                    target_expected: target_expected.into(),
+                    allow_mixed: false,
+                },
+            );
+            assert!(
+                combined,
+                "combining {source_expected:?} should change the block"
+            );
+            let (split, restored) = apply(&merged, StructOp::UncombineSection { path: vec![0] });
+            assert!(split, "the merged section should uncombine");
+            assert_eq!(
+                restored, src,
+                "uncombine is the exact inverse of combine, in both directions"
+            );
+        }
+    }
+
+    #[test]
+    fn combine_run_merges_a_whole_run_in_one_reduction() {
+        let src = "Alpha\n\nBeta\n\nGamma\n";
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRun {
+                path: vec![],
+                start: 0,
+                end: 5,
+                expected: src.into(),
+                allow_mixed: false,
+            },
+        );
+        assert!(changed);
+        assert_eq!(out, ":::section\nAlpha\n\nBeta\n\nGamma\n:::\n");
+
+        // Exactly reversible, like any other combine.
+        let (split, restored) = apply(&out, StructOp::UncombineSection { path: vec![0] });
+        assert!(split);
+        assert_eq!(restored, src);
+    }
+
+    #[test]
+    fn combine_run_refuses_a_stale_or_degenerate_range() {
+        let src = "Alpha\n\nBeta\n";
+        for op in [
+            // Stale preimage: the document moved under the gesture.
+            StructOp::CombineRun {
+                path: vec![],
+                start: 0,
+                end: 3,
+                expected: "Something else\n".into(),
+                allow_mixed: false,
+            },
+            // A single region is already one section.
+            StructOp::CombineRun {
+                path: vec![],
+                start: 0,
+                end: 1,
+                expected: "Alpha\n".into(),
+                allow_mixed: false,
+            },
+            // Past the end of the container.
+            StructOp::CombineRun {
+                path: vec![],
+                start: 0,
+                end: 99,
+                expected: src.into(),
+                allow_mixed: false,
+            },
+        ] {
+            assert_eq!(apply(src, op), (false, src.to_string()));
+        }
+    }
+
+    #[test]
+    fn combine_run_absorbs_mixed_leaves_only_when_asked() {
+        let src = "Alpha\n\n> [!note]\n> Beta\n\nGamma\n";
+        let plain = StructOp::CombineRun {
+            path: vec![],
+            start: 0,
+            end: 5,
+            expected: src.into(),
+            allow_mixed: false,
+        };
+        assert_eq!(apply(src, plain), (false, src.to_string()));
+
+        let (changed, out) = apply(
+            src,
+            StructOp::CombineRun {
+                path: vec![],
+                start: 0,
+                end: 5,
+                expected: src.into(),
+                allow_mixed: true,
+            },
+        );
+        assert!(changed);
+        assert!(out.contains("> [!note]"), "callout bytes survive: {out}");
+        let (split, restored) = apply(&out, StructOp::UncombineSection { path: vec![0] });
+        assert!(split);
+        assert_eq!(restored, src, "a mixed run round-trips exactly");
     }
 
     #[test]
@@ -2750,6 +3155,13 @@ mod tests {
         );
         assert_eq!(title_attr("A {icon=rocket}", "cols"), None);
         assert_eq!(title_attr("A", "icon"), None);
+    }
+
+    #[test]
+    fn attr_rewrite_keeps_first_position_and_collapses_duplicate_keys() {
+        let attrs = "a=1 key=old b=2 key=stale";
+        assert_eq!(set_attr_token(attrs, "key", Some("new")), "a=1 key=new b=2");
+        assert_eq!(set_attr_token(attrs, "key", None), "a=1 b=2");
     }
 
     // --- reducer -----------------------------------------------------------

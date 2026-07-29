@@ -53,54 +53,64 @@ pub fn diff_impl(base: &str, other: &str, granularity: &str, context: usize) -> 
         "word" => TextDiff::from_words(base, other),
         _ => TextDiff::from_lines(base, other),
     };
+    let refinement = match granularity {
+        "line-char" => Some(char_spans as fn(&str, &str) -> SpanPair),
+        "line-word" => Some(word_spans as fn(&str, &str) -> SpanPair),
+        _ => None,
+    };
     let similarity = f64::from(diff.ratio());
     let mut hunks = Vec::new();
     for group in diff.grouped_ops(context) {
         let mut changes = Vec::new();
         for op in &group {
-            for change in diff.iter_inline_changes(op) {
-                let tag = match change.tag() {
-                    ChangeTag::Equal => "equal",
-                    ChangeTag::Delete => "delete",
-                    ChangeTag::Insert => "insert",
-                };
-                let mut value = String::new();
-                let mut inline = Vec::new();
-                for (emph, s) in change.iter_strings_lossy() {
-                    value.push_str(&s);
-                    inline.push(Span {
-                        tag: if emph { "emph" } else { "same" }.into(),
-                        text: s.into_owned(),
+            if refinement.is_some() {
+                // Custom line refinement is unconditional, whereas `similar`'s
+                // inline matcher applies a similarity cutoff. Building only the
+                // line rows here avoids performing and allocating a discarded
+                // inline diff before Mica's own pass below.
+                changes.extend(diff.iter_changes(op).map(|change| DiffChange {
+                    tag: change_tag(change.tag()).into(),
+                    value: change.to_string_lossy().into_owned(),
+                    inline: Vec::new(),
+                }));
+            } else {
+                for change in diff.iter_inline_changes(op) {
+                    let mut value = String::new();
+                    let mut inline = Vec::new();
+                    for (emph, s) in change.iter_strings_lossy() {
+                        value.push_str(&s);
+                        inline.push(Span {
+                            tag: if emph { "emph" } else { "same" }.into(),
+                            text: s.into_owned(),
+                        });
+                    }
+                    changes.push(DiffChange {
+                        tag: change_tag(change.tag()).into(),
+                        value,
+                        inline,
                     });
                 }
-                changes.push(DiffChange {
-                    tag: tag.into(),
-                    value,
-                    inline,
-                });
             }
         }
         hunks.push(Hunk { changes });
     }
-    match granularity {
-        // Our own pairing refines UNCONDITIONALLY — similar's built-in inline
-        // emphasis (the plain `line` mode) skips pairs below a similarity
-        // threshold, which reads as "highlighting doesn't work" on real edits.
-        "line-char" => {
-            hunks = hunks
-                .into_iter()
-                .map(|h| refine_hunk(h, char_spans))
-                .collect()
+    // Our own pairing refines UNCONDITIONALLY — similar's built-in inline
+    // emphasis (the plain `line` mode) skips pairs below a similarity
+    // threshold, which reads as "highlighting doesn't work" on real edits.
+    if let Some(spans) = refinement {
+        for hunk in &mut hunks {
+            refine_hunk(hunk, spans);
         }
-        "line-word" => {
-            hunks = hunks
-                .into_iter()
-                .map(|h| refine_hunk(h, word_spans))
-                .collect()
-        }
-        _ => {}
     }
     DiffResult { hunks, similarity }
+}
+
+fn change_tag(tag: ChangeTag) -> &'static str {
+    match tag {
+        ChangeTag::Equal => "equal",
+        ChangeTag::Delete => "delete",
+        ChangeTag::Insert => "insert",
+    }
 }
 
 /// Re-emphasize a hunk's changed lines with `spans`: pair the i-th deleted
@@ -108,8 +118,9 @@ pub fn diff_impl(base: &str, other: &str, granularity: &str, context: usize) -> 
 /// pair. Unpaired lines keep no emphasis (the row itself is colored).
 type SpanPair = (Vec<Span>, Vec<Span>);
 
-fn refine_hunk(hunk: Hunk, spans: fn(&str, &str) -> SpanPair) -> Hunk {
-    let mut out: Vec<DiffChange> = Vec::new();
+fn refine_hunk(hunk: &mut Hunk, spans: fn(&str, &str) -> SpanPair) {
+    let changes = std::mem::take(&mut hunk.changes);
+    let mut out: Vec<DiffChange> = Vec::with_capacity(changes.len());
     let mut dels: Vec<DiffChange> = Vec::new();
     let mut inss: Vec<DiffChange> = Vec::new();
     let flush =
@@ -132,7 +143,7 @@ fn refine_hunk(hunk: Hunk, spans: fn(&str, &str) -> SpanPair) -> Hunk {
             out.append(&mut d);
             out.append(&mut i);
         };
-    for c in hunk.changes {
+    for c in changes {
         match c.tag.as_str() {
             "delete" => dels.push(c),
             "insert" => inss.push(c),
@@ -145,7 +156,7 @@ fn refine_hunk(hunk: Hunk, spans: fn(&str, &str) -> SpanPair) -> Hunk {
         }
     }
     flush(&mut out, &mut dels, &mut inss);
-    Hunk { changes: out }
+    hunk.changes = out;
 }
 
 /// Character-level spans for one old/new line pair (adjacent runs merged).

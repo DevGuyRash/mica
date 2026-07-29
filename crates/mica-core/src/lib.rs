@@ -11,6 +11,7 @@
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+mod checkpoints;
 mod diff;
 mod edit;
 mod migrate;

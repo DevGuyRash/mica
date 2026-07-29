@@ -297,7 +297,25 @@ pub fn resolve_note(note: &str, vault: Option<&Path>) -> Result<NoteRef> {
 /// let notes = mica_cli::vault::vault_notes(std::path::Path::new(".")).unwrap();
 /// ```
 pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
-    let mut notes = Vec::new();
+    walk_vault(vault, true, false).map(|inventory| inventory.notes)
+}
+
+pub(crate) struct VaultInventory {
+    pub(crate) notes: Vec<PathBuf>,
+    pub(crate) sidecars: Vec<PathBuf>,
+}
+
+pub(crate) fn vault_inventory(vault: &Path) -> Result<VaultInventory> {
+    walk_vault(vault, true, true)
+}
+
+fn walk_vault(vault: &Path, include_notes: bool, include_sidecars: bool) -> Result<VaultInventory> {
+    let mut result = VaultInventory {
+        notes: Vec::new(),
+        sidecars: Vec::new(),
+    };
+    // Per vault command: one O(entries) traversal plus stable O(n log n)
+    // output ordering; stack and results occupy O(directories + matches).
     let root = std::fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
@@ -314,20 +332,28 @@ pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
                 continue;
             }
             if file_type.is_dir() {
-                if name.starts_with('.') || name.ends_with(".mica") {
-                    continue; // .obsidian, hidden dirs, sidecars
+                if name.starts_with('.') {
+                    continue;
+                }
+                if name.ends_with(".mica") {
+                    if include_sidecars {
+                        result.sidecars.push(path);
+                    }
+                    continue;
                 }
                 stack.push(path);
             } else if file_type.is_file()
+                && include_notes
                 && name.to_ascii_lowercase().ends_with(".md")
                 && !name.starts_with('.')
             {
-                notes.push(path);
+                result.notes.push(path);
             }
         }
     }
-    notes.sort();
-    Ok(notes)
+    result.notes.sort();
+    result.sidecars.sort();
+    Ok(result)
 }
 
 /// Sidecar directories under `vault` (folders ending in `.mica`).
@@ -348,31 +374,7 @@ pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
 /// let sidecars = mica_cli::vault::vault_sidecars(std::path::Path::new(".")).unwrap();
 /// ```
 pub fn vault_sidecars(vault: &Path) -> Result<Vec<PathBuf>> {
-    let mut sidecars = Vec::new();
-    let root = std::fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).map_err(io_ctx(dir.display().to_string()))?;
-        for entry in entries {
-            let entry = entry.map_err(io_ctx(dir.display().to_string()))?;
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let file_type = entry
-                .file_type()
-                .map_err(io_ctx(path.display().to_string()))?;
-            if file_type.is_symlink() || !file_type.is_dir() || name.starts_with('.') {
-                continue;
-            }
-            if name.ends_with(".mica") {
-                sidecars.push(path);
-            } else {
-                stack.push(path);
-            }
-        }
-    }
-    sidecars.sort();
-    Ok(sidecars)
+    walk_vault(vault, false, true).map(|inventory| inventory.sidecars)
 }
 
 fn contained_note(abs: PathBuf, vault: PathBuf) -> Result<NoteRef> {
@@ -552,6 +554,9 @@ mod tests {
 
         assert!(vault_notes(&vault).expect("walk notes").is_empty());
         assert!(vault_sidecars(&vault).expect("walk sidecars").is_empty());
+        let inventory = vault_inventory(&vault).expect("walk combined inventory");
+        assert!(inventory.notes.is_empty());
+        assert!(inventory.sidecars.is_empty());
         assert!(matches!(
             resolve_note(
                 vault.join("escape.md").to_str().expect("UTF-8 path"),
@@ -559,5 +564,24 @@ mod tests {
             ),
             Err(CliError::BadArgs(_))
         ));
+    }
+
+    #[test]
+    fn combined_inventory_matches_individual_sorted_walks() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let vault = temp.path().join("vault");
+        std::fs::create_dir_all(vault.join(".obsidian")).expect("vault marker");
+        std::fs::create_dir_all(vault.join("Folder/B.mica")).expect("sidecar");
+        std::fs::create_dir_all(vault.join("A.mica")).expect("sidecar");
+        std::fs::write(vault.join("Folder/B.md"), "b").expect("note");
+        std::fs::write(vault.join("A.md"), "a").expect("note");
+
+        let inventory = vault_inventory(&vault).expect("combined inventory");
+
+        assert_eq!(inventory.notes, vault_notes(&vault).expect("notes"));
+        assert_eq!(
+            inventory.sidecars,
+            vault_sidecars(&vault).expect("sidecars")
+        );
     }
 }

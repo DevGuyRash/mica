@@ -164,17 +164,10 @@ pub fn normalize_sections(
 
     for note in &scope.notes {
         let doc = engine::read_doc(&note.abs)?;
-        let scanned_spans = scan_impl(&doc);
-        let spans: Vec<_> = scanned_spans
-            .iter()
-            .filter(|span| span.closed)
-            .cloned()
-            .collect();
-        let unclosed_spans: Vec<_> = scanned_spans
-            .iter()
-            .filter(|span| !span.closed)
-            .cloned()
-            .collect();
+        // Per note: partition the scanner output in one O(blocks) pass without
+        // cloning spans; the two result vectors together remain O(blocks).
+        let (spans, unclosed_spans): (Vec<_>, Vec<_>) =
+            scan_impl(&doc).into_iter().partition(|span| span.closed);
         let (pending_journal, journal_error) =
             match sidecar::read_section_normalization_journal(&note.abs) {
                 Ok(journal) => (journal.filter(|journal| journal.status == "pending"), None),
@@ -298,9 +291,15 @@ pub fn normalize_sections(
         let mut planned_events = Vec::new();
         let mut ledger_preimage = None;
         if history {
-            match sidecar::read_ledger(&note.abs) {
-                Ok(ledger) => {
-                    match plan_history(&note.abs, &ledger, &mut objects, &mut note_report) {
+            match sidecar::read_ledger_report(&note.abs) {
+                Ok(ledger_read) => {
+                    match plan_history(
+                        &note.abs,
+                        &ledger_read.events,
+                        ledger_read.bad_lines,
+                        &mut objects,
+                        &mut note_report,
+                    ) {
                         Ok(events) => planned_events = events,
                         Err(error) => note_report.conflicts.push(NormalizationConflict {
                             path: note_report.path.clone(),
@@ -310,7 +309,7 @@ pub fn normalize_sections(
                             detail: error.to_string(),
                         }),
                     }
-                    ledger_preimage = Some(ledger);
+                    ledger_preimage = Some(ledger_read.events);
                 }
                 Err(error) => note_report.conflicts.push(NormalizationConflict {
                     path: note_report.path.clone(),
@@ -464,6 +463,15 @@ pub(crate) fn inspect_normalization_journal(
     current: Option<&str>,
     journal: &sidecar::SectionNormalizationJournal,
 ) -> Result<NormalizationJournalInspection> {
+    inspect_normalization_journal_with_ledger(note, current, journal, None)
+}
+
+pub(crate) fn inspect_normalization_journal_with_ledger(
+    note: &vault::NoteRef,
+    current: Option<&str>,
+    journal: &sidecar::SectionNormalizationJournal,
+    ledger_read: Option<&sidecar::LedgerRead>,
+) -> Result<NormalizationJournalInspection> {
     let report_path = note.vault_rel();
     let mut conflicts = Vec::new();
     if journal.note != note.vault_rel() {
@@ -542,19 +550,26 @@ pub(crate) fn inspect_normalization_journal(
     }
 
     if !journal.events.is_empty() {
-        let bad_lines = sidecar::ledger_bad_lines(&sidecar::ledger_path(&note.abs))?;
-        if bad_lines > 0 {
+        let owned_ledger;
+        let ledger_read = if let Some(ledger_read) = ledger_read {
+            ledger_read
+        } else {
+            owned_ledger = sidecar::read_ledger_report(&note.abs)?;
+            &owned_ledger
+        };
+        if ledger_read.bad_lines > 0 {
             conflicts.push(NormalizationConflict {
                 path: report_path.clone(),
                 block: None,
                 target: None,
                 kind: "bad-ledger-lines".to_string(),
                 detail: format!(
-                    "the history ledger has {bad_lines} invalid line(s); repair them before resuming"
+                    "the history ledger has {} invalid line(s); repair them before resuming",
+                    ledger_read.bad_lines
                 ),
             });
         }
-        let missing = match sidecar::classify_event_batch(&note.abs, &journal.events) {
+        let missing = match sidecar::classify_event_batch_in(&ledger_read.events, &journal.events) {
             Ok(status) => status.missing,
             Err(error) => {
                 conflicts.push(NormalizationConflict {
@@ -588,18 +603,31 @@ pub(crate) fn inspect_normalization_journal(
                 detail: error.to_string(),
             });
         }
-        let ledger = sidecar::read_ledger(&note.abs)?;
+        let ledger = &ledger_read.events;
         let mut prospective = ledger.clone();
         prospective.extend(missing);
         match resolve_ledger_impl(&prospective) {
-            Ok(resolution) => validate_recovery_replacements(
-                &note.abs,
-                journal,
-                &ledger,
-                &resolution.replacements,
-                &report_path,
-                &mut conflicts,
-            ),
+            Ok(resolution) => {
+                if journal.status == "pending" {
+                    validate_recovery_replacements(
+                        &note.abs,
+                        journal,
+                        ledger,
+                        &resolution.replacements,
+                        &report_path,
+                        &mut conflicts,
+                    );
+                } else {
+                    validate_completed_replacements(
+                        &note.abs,
+                        journal,
+                        ledger,
+                        &resolution.replacements,
+                        &report_path,
+                        &mut conflicts,
+                    );
+                }
+            }
             Err(error) => conflicts.push(NormalizationConflict {
                 path: report_path.clone(),
                 block: None,
@@ -703,6 +731,131 @@ fn read_recovery_object(
             None
         }
     }
+}
+
+fn validate_completed_replacements(
+    note: &std::path::Path,
+    journal: &sidecar::SectionNormalizationJournal,
+    ledger: &[Event],
+    resolved: &[mica_core::ResolvedReplacement],
+    report_path: &str,
+    conflicts: &mut Vec<NormalizationConflict>,
+) {
+    let by_event: BTreeMap<&str, &mica_core::ResolvedReplacement> = resolved
+        .iter()
+        .map(|replacement| (replacement.event.as_str(), replacement))
+        .collect();
+    let add_by_eid: BTreeMap<&str, (&str, &str)> = ledger
+        .iter()
+        .filter_map(|event| {
+            if let Event::AddVersion {
+                eid, block, hash, ..
+            } = event
+            {
+                Some((eid.as_str(), (block.as_str(), hash.as_str())))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut cache = BTreeMap::new();
+    for intended in &journal.events {
+        let Event::ReplaceVersion {
+            eid,
+            block,
+            target,
+            hash,
+            ..
+        } = intended
+        else {
+            continue;
+        };
+        let Some(replacement) = by_event.get(eid.as_str()) else {
+            conflicts.push(NormalizationConflict {
+                path: report_path.to_string(),
+                block: Some(block.clone()),
+                target: Some(target.clone()),
+                kind: "normalization-replacement-unresolved".to_string(),
+                detail: format!("completed normalization event {eid} is not resolvable"),
+            });
+            continue;
+        };
+        if replacement.replacement != *hash {
+            conflicts.push(NormalizationConflict {
+                path: report_path.to_string(),
+                block: Some(block.clone()),
+                target: Some(target.clone()),
+                kind: "normalization-replacement-mismatch".to_string(),
+                detail: format!("completed normalization event {eid} resolves to another object"),
+            });
+            continue;
+        }
+        let Some((target_block, original_hash)) = add_by_eid.get(target.as_str()) else {
+            continue;
+        };
+        if *target_block != block {
+            continue;
+        }
+        let predecessor = ledger
+            .iter()
+            .filter(|event| event_order_key(event) < event_order_key(intended))
+            .filter_map(|event| {
+                if let Event::ReplaceVersion {
+                    target: candidate_target,
+                    hash,
+                    ..
+                } = event
+                {
+                    (candidate_target == target).then_some((event_order_key(event), hash.as_str()))
+                } else {
+                    None
+                }
+            })
+            .max_by(|left, right| left.0.cmp(&right.0))
+            .map_or(*original_hash, |(_, hash)| hash)
+            .to_string();
+        let predecessor_content = load_history_object(
+            note,
+            &predecessor,
+            Some(block),
+            Some(target),
+            &mut cache,
+            conflicts,
+            report_path,
+        );
+        let intended_content = load_history_object(
+            note,
+            hash,
+            Some(block),
+            Some(target),
+            &mut cache,
+            conflicts,
+            report_path,
+        );
+        if let (Some(predecessor_content), Some(intended_content)) =
+            (predecessor_content, intended_content)
+        {
+            let exact = matches!(
+                normalize_section_impl(&predecessor_content),
+                Ok(SectionNormalization::Wrapped(expected)) if expected == intended_content
+            );
+            if !exact {
+                conflicts.push(NormalizationConflict {
+                    path: report_path.to_string(),
+                    block: Some(block.clone()),
+                    target: Some(target.clone()),
+                    kind: "normalization-replacement-invalid".to_string(),
+                    detail: format!(
+                        "completed normalization event {eid} is not the exact normalized predecessor object"
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn event_order_key(event: &Event) -> (u64, &str) {
+    (event_timestamp(event), event_identity_ref(event))
 }
 
 fn validate_recovery_replacements(
@@ -871,10 +1024,10 @@ fn validate_recovery_replacements(
 fn plan_history(
     note: &std::path::Path,
     ledger: &[Event],
+    bad_lines: usize,
     objects: &mut BTreeMap<String, String>,
     report: &mut NoteNormalizationReport,
 ) -> Result<Vec<Event>> {
-    let bad_lines = sidecar::ledger_bad_lines(&sidecar::ledger_path(note))?;
     if bad_lines > 0 {
         report.conflicts.push(NormalizationConflict {
             path: report.path.clone(),
@@ -1219,7 +1372,11 @@ fn event_identity_ref(event: &Event) -> &str {
         Event::AddVersion { eid, .. }
         | Event::ReplaceVersion { eid, .. }
         | Event::SetHead { eid, .. }
-        | Event::Label { eid, .. } => eid,
+        | Event::Label { eid, .. }
+        | Event::Checkpoint { eid, .. }
+        | Event::MoveHead { eid, .. }
+        | Event::VersionLabel { eid, .. }
+        | Event::VersionVisibility { eid, .. } => eid,
     }
 }
 
@@ -1228,7 +1385,11 @@ fn event_timestamp(event: &Event) -> u64 {
         Event::AddVersion { ts, .. }
         | Event::ReplaceVersion { ts, .. }
         | Event::SetHead { ts, .. }
-        | Event::Label { ts, .. } => *ts,
+        | Event::Label { ts, .. }
+        | Event::Checkpoint { ts, .. }
+        | Event::MoveHead { ts, .. }
+        | Event::VersionLabel { ts, .. }
+        | Event::VersionVisibility { ts, .. } => *ts,
     }
 }
 
@@ -2080,5 +2241,78 @@ mod tests {
             .expect_err("inactive intended event cannot complete");
 
         assert!(error.to_string().contains("not the active intended result"));
+    }
+
+    #[test]
+    fn completed_journal_allows_a_later_valid_replacement() {
+        let (_directory, _ctx, note) = fixture("plain note\n");
+        let raw = "raw\n";
+        let normalized = ":::section\nraw\n:::\n";
+        let later = ":::section\n:::section\nraw\n:::\n:::\n";
+        let raw_hash = hash_content_impl(raw);
+        let normalized_hash = hash_content_impl(normalized);
+        let later_hash = hash_content_impl(later);
+        for (hash, content) in [
+            (raw_hash.clone(), raw),
+            (normalized_hash.clone(), normalized),
+            (later_hash.clone(), later),
+        ] {
+            crate::sidecar::write_object(&note, &hash, content).expect("seed history object");
+        }
+        let intended = Event::ReplaceVersion {
+            eid: "replace-intended".to_string(),
+            ts: 2,
+            block: "demo".to_string(),
+            target: "add-raw".to_string(),
+            hash: normalized_hash,
+        };
+        crate::sidecar::append_events(
+            &note,
+            &[
+                Event::AddVersion {
+                    eid: "add-raw".to_string(),
+                    ts: 1,
+                    block: "demo".to_string(),
+                    hash: raw_hash,
+                    label: None,
+                    origin: None,
+                    parent: None,
+                },
+                intended.clone(),
+                Event::ReplaceVersion {
+                    eid: "replace-later".to_string(),
+                    ts: 3,
+                    block: "demo".to_string(),
+                    target: "add-raw".to_string(),
+                    hash: later_hash,
+                },
+            ],
+        )
+        .expect("seed superseding ledger");
+        let note_hash = hash_content_impl("plain note\n");
+        crate::sidecar::write_object(&note, &note_hash, "plain note\n")
+            .expect("seed whole note object");
+        let journal = sidecar::SectionNormalizationJournal {
+            format: 1,
+            status: "complete".to_string(),
+            note: "Note.md".to_string(),
+            original: note_hash.clone(),
+            normalized: note_hash,
+            history: true,
+            events: vec![intended],
+        };
+        let note_ref = vault::NoteRef {
+            abs: note,
+            vault: _directory.path().to_path_buf(),
+        };
+
+        let inspection =
+            inspect_normalization_journal(&note_ref, None, &journal).expect("inspect journal");
+
+        assert!(
+            inspection.conflicts.is_empty(),
+            "{:?}",
+            inspection.conflicts
+        );
     }
 }

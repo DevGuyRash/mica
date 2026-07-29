@@ -77,17 +77,20 @@ pub fn state(note: &Path) -> Result<BTreeMap<String, BlockState>> {
 /// ```
 pub fn snapshot_note(note: &NoteRef, force: bool, stamp_ids: bool) -> Result<Vec<SnapshotAction>> {
     let doc = read_doc(&note.abs)?;
-    let mut prepared = doc.clone();
+    // Per watched file: O(document bytes + blocks) time and O(blocks) scan
+    // space. A second O(document bytes) allocation occurs only when ids need
+    // stamping; already-prepared notes retain the file buffer as the authority.
+    let mut prepared = Cow::Borrowed(doc.as_str());
     let mut blocks = scan_impl(&prepared);
     if !blocks.iter().any(|b| b.closed) {
         return Ok(Vec::new());
     }
     if stamp_ids && blocks.iter().any(|b| b.closed && b.id().is_none()) {
-        prepared = ensure_ids_impl(&prepared);
+        prepared = Cow::Owned(ensure_ids_impl(&prepared));
         blocks = scan_impl(&prepared);
     }
     validate_unique_block_ids(&blocks)?;
-    if prepared != doc {
+    if prepared.as_ref() != doc {
         fsutil::atomic_write_if_unchanged(&note.abs, doc.as_bytes(), prepared.as_bytes())?;
     }
     snapshot_exact(note, &prepared, &blocks, force)
@@ -143,7 +146,13 @@ fn snapshot_exact_classified(
             }
             let content = &doc[b.content_start..b.content_end];
             let hash = hash_content_impl(content);
-            let head = st.get(id).and_then(|s| s.head.as_deref());
+            let block_state = st.get(id);
+            let head = block_state.and_then(|s| s.raw_head.as_deref().or(s.head.as_deref()));
+            let head_version_id = block_state.and_then(|s| {
+                s.raw_head_version_id
+                    .as_deref()
+                    .or(s.head_version_id.as_deref())
+            });
             if head == Some(hash.as_str()) {
                 actions.push(SnapshotAction {
                     block: id.to_string(),
@@ -162,7 +171,7 @@ fn snapshot_exact_classified(
                 (Some(_), Some(c)) => HeadRef::Content(c),
             };
             if should_snapshot_impl(content, head_ref, force) {
-                write_version(note, id, &hash, content, &mut events)?;
+                write_version(note, id, &hash, content, head_version_id, None, &mut events)?;
                 actions.push(SnapshotAction {
                     block: id.to_string(),
                     hash: Some(hash),
@@ -187,7 +196,7 @@ fn snapshot_exact_classified(
     let (actions, events) = prepared;
     append_events_recovering(&note.abs, &events)?;
     if !events.is_empty() {
-        refresh_manifest(note, doc).map_err(SnapshotFailure::after_or_unknown_commit)?;
+        refresh_manifest(note, doc, blocks).map_err(SnapshotFailure::after_or_unknown_commit)?;
     }
     Ok(actions)
 }
@@ -357,37 +366,44 @@ fn validate_unique_block_ids(blocks: &[mica_core::BlockSpan]) -> Result<()> {
     )))
 }
 
-/// Store one version: object write + add-version/set-head events.
+/// Store one logical checkpoint and move HEAD to it.
 fn write_version(
     note: &NoteRef,
     id: &str,
     hash: &str,
     content: &str,
+    parent: Option<&str>,
+    source: Option<&str>,
     events: &mut Vec<Event>,
 ) -> Result<()> {
     sidecar::write_object(&note.abs, hash, content)?;
     let ts = now_ms();
-    events.push(Event::AddVersion {
-        eid: new_id_impl(),
+    let version_id = new_id_impl();
+    events.push(Event::Checkpoint {
+        eid: version_id.clone(),
         ts,
         block: id.to_string(),
         hash: hash.to_string(),
-        label: None,
-        origin: None,
-        parent: None,
+        parent: parent.map(ToOwned::to_owned),
+        source: source.map(ToOwned::to_owned),
+        cause: Some(if source.is_some() {
+            "restore".to_string()
+        } else {
+            "snapshot".to_string()
+        }),
     });
-    events.push(Event::SetHead {
+    events.push(Event::MoveHead {
         eid: new_id_impl(),
         ts,
         block: id.to_string(),
-        hash: hash.to_string(),
+        target: Some(version_id),
     });
     Ok(())
 }
 
-/// Rewrite the manifest from the current doc (block names) + frontmatter id.
-fn refresh_manifest(note: &NoteRef, doc: &str) -> Result<()> {
-    let blocks: Vec<(String, String)> = scan_impl(doc)
+/// Rewrite the manifest from an already-scanned current doc.
+fn refresh_manifest(note: &NoteRef, doc: &str, spans: &[mica_core::BlockSpan]) -> Result<()> {
+    let blocks: Vec<(String, String)> = spans
         .iter()
         .filter_map(|b| {
             b.id().map(|id| {
@@ -439,18 +455,18 @@ pub fn frontmatter_mica_id(doc: &str) -> Option<String> {
     })
 }
 
-/// Rewrite block `block_id`'s content to a stored version, snapshotting the
-/// current state first, and record `set-head`.
+/// Restore stored bytes as a new logical checkpoint.
 ///
 /// Purpose: the `restore` command.
 ///
 /// # Arguments
 /// * `note` - resolved note
 /// * `block_id` - target block
+/// * `source_version_id` - stable identity of the checkpoint being restored
 /// * `hash` - stored version to restore
 ///
 /// # Returns
-/// `()` on success.
+/// Whether a forward checkpoint was created.
 ///
 /// # Panics
 /// None.
@@ -458,35 +474,125 @@ pub fn frontmatter_mica_id(doc: &str) -> Option<String> {
 /// # Examples
 /// ```no_run
 /// # let note: mica_cli::vault::NoteRef = todo!();
-/// mica_cli::engine::restore(&note, "id", "b3:00").unwrap();
+/// mica_cli::engine::restore_as_checkpoint(&note, "id", "version-id", "b3:00").unwrap();
 /// ```
-pub fn restore(note: &NoteRef, block_id: &str, hash: &str) -> Result<()> {
+pub fn restore_as_checkpoint(
+    note: &NoteRef,
+    block_id: &str,
+    source_version_id: &str,
+    hash: &str,
+) -> Result<bool> {
     let Some(content) = sidecar::read_object(&note.abs, hash)? else {
         return Err(CliError::NotFound(format!(
             "version object {hash} is missing from the sidecar — run `mica doctor`"
         )));
     };
+    let current = read_doc(&note.abs)?;
+    let current_block = scan_impl(&current)
+        .into_iter()
+        .find(|block| block.closed && block.id() == Some(block_id))
+        .ok_or_else(|| CliError::NotFound(format!("block {block_id} not found in the note")))?;
+    if current[current_block.content_start..current_block.content_end] == content {
+        return Ok(false);
+    }
+    let before = state(&note.abs)?;
+    let previous_head = before.get(block_id).and_then(|block| {
+        block
+            .raw_head_version_id
+            .clone()
+            .or_else(|| block.head_version_id.clone())
+    });
     let published = mutate_exact(note, |doc| {
         let terminated = terminate(&content, preferred_line_ending(doc));
         let next = replace_block_content_impl(doc, block_id, terminated.as_ref())
             .ok_or_else(|| CliError::NotFound(format!("block {block_id} not found in the note")))?;
         Ok(next)
     })?;
+    let hash = hash_content_impl(&content);
+    let mut events = Vec::with_capacity(2);
+    write_version(
+        note,
+        block_id,
+        &hash,
+        &content,
+        previous_head.as_deref(),
+        Some(source_version_id),
+        &mut events,
+    )?;
+    commit_published_events(note, &published, &events)?;
+    Ok(true)
+}
+
+/// Reset the live block and HEAD to one existing checkpoint.
+pub fn reset_head(
+    note: &NoteRef,
+    block_id: &str,
+    target_version_id: &str,
+    hash: &str,
+) -> Result<bool> {
+    let Some(content) = sidecar::read_object(&note.abs, hash)? else {
+        return Err(CliError::NotFound(format!(
+            "version object {hash} is missing from the sidecar — run `mica doctor`"
+        )));
+    };
+    let current = read_doc(&note.abs)?;
+    let current_block = scan_impl(&current)
+        .into_iter()
+        .find(|block| block.closed && block.id() == Some(block_id))
+        .ok_or_else(|| CliError::NotFound(format!("block {block_id} not found in the note")))?;
+    let same_content = current[current_block.content_start..current_block.content_end] == content;
+    let before = state(&note.abs)?;
+    let same_head = before.get(block_id).and_then(|block| {
+        block
+            .raw_head_version_id
+            .as_deref()
+            .or(block.head_version_id.as_deref())
+    }) == Some(target_version_id);
+    if same_content && same_head {
+        return Ok(false);
+    }
+    let published = mutate_exact(note, |doc| {
+        let terminated = terminate(&content, preferred_line_ending(doc));
+        replace_block_content_impl(doc, block_id, terminated.as_ref())
+            .ok_or_else(|| CliError::NotFound(format!("block {block_id} not found in the note")))
+    })?;
     commit_published_events(
         note,
         &published,
-        &[Event::SetHead {
+        &[Event::MoveHead {
             eid: new_id_impl(),
             ts: now_ms(),
             block: block_id.to_string(),
-            hash: hash.to_string(),
+            target: Some(target_version_id.to_string()),
         }],
-    )
+    )?;
+    Ok(true)
+}
+
+/// Append visibility events for logical checkpoints.
+pub fn set_versions_visible(
+    note: &NoteRef,
+    block_id: &str,
+    version_ids: &[String],
+    visible: bool,
+) -> Result<()> {
+    let ts = now_ms();
+    let events = version_ids
+        .iter()
+        .map(|target| Event::VersionVisibility {
+            eid: new_id_impl(),
+            ts,
+            block: block_id.to_string(),
+            target: target.clone(),
+            visible,
+        })
+        .collect::<Vec<_>>();
+    sidecar::append_events(&note.abs, &events)
 }
 
 /// Replace block content wholesale (the `set` command): snapshot before,
 /// write, snapshot after. Edits observed before the final guarded publish are
-/// preserved; see [`mutate_exact`] for the unavoidable final CAS limitation.
+/// preserved; see `mutate_exact` for the unavoidable final CAS limitation.
 ///
 /// Purpose: scripted content updates with the plugin's safety contract.
 ///
@@ -537,14 +643,14 @@ pub fn set_content(note: &NoteRef, block_id: &str, content: &str) -> Result<()> 
 /// # let note: mica_cli::vault::NoteRef = todo!();
 /// mica_cli::engine::label(&note, "id", "b3:00", "v1.0").unwrap();
 /// ```
-pub fn label(note: &NoteRef, block_id: &str, hash: &str, label: &str) -> Result<()> {
+pub fn label(note: &NoteRef, block_id: &str, version_id: &str, label: &str) -> Result<()> {
     sidecar::append_events(
         &note.abs,
-        &[Event::Label {
+        &[Event::VersionLabel {
             eid: new_id_impl(),
             ts: now_ms(),
             block: block_id.to_string(),
-            hash: hash.to_string(),
+            target: version_id.to_string(),
             label: if label.is_empty() {
                 None
             } else {
@@ -637,6 +743,12 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, ["old\n", "new\n"]);
+        assert_eq!(versions[0].parent_version_id, None);
+        assert_eq!(
+            versions[1].parent_version_id.as_deref(),
+            Some(versions[0].version_id.as_str()),
+            "ordinary snapshots preserve their actual lineage"
+        );
     }
 
     #[test]
@@ -664,10 +776,111 @@ mod tests {
     fn invalid_restore_object_has_no_snapshot_side_effect() {
         let (_dir, note) = note_fixture("```mica id=a\nbody\n```\n");
         assert!(matches!(
-            restore(&note, "a", "b3:not-a-digest"),
+            restore_as_checkpoint(&note, "a", "missing-version", "b3:not-a-digest"),
             Err(CliError::Corrupt(_))
         ));
         assert!(!sidecar::sidecar_dir(&note.abs).exists());
+    }
+
+    #[test]
+    fn restore_remove_and_reset_use_checkpoint_identity() {
+        let (_dir, note) = note_fixture("```mica id=a\nold\n```\n");
+        set_content(&note, "a", "new").expect("create initial and changed checkpoints");
+        let initial = state(&note.abs).expect("initial state")["a"].clone();
+        assert_eq!(initial.versions.len(), 2);
+        let old = initial.versions[0].clone();
+        let new = initial.versions[1].clone();
+
+        assert!(
+            restore_as_checkpoint(&note, "a", &old.version_id, &old.hash)
+                .expect("restore as checkpoint")
+        );
+        let restored = state(&note.abs).expect("restored state")["a"].clone();
+        assert_eq!(restored.versions.len(), 3);
+        let forward = restored
+            .versions
+            .last()
+            .expect("forward restore checkpoint");
+        assert_eq!(forward.hash, old.hash);
+        assert_eq!(
+            forward.parent_version_id.as_deref(),
+            Some(new.version_id.as_str())
+        );
+        assert_eq!(
+            forward.source_version_id.as_deref(),
+            Some(old.version_id.as_str())
+        );
+        assert_eq!(
+            restored.head_version_id.as_deref(),
+            Some(forward.version_id.as_str())
+        );
+        assert!(
+            !restore_as_checkpoint(&note, "a", &old.version_id, &old.hash)
+                .expect("identical restore is a no-op")
+        );
+
+        set_versions_visible(&note, "a", std::slice::from_ref(&new.version_id), false)
+            .expect("remove middle checkpoint");
+        let hidden = state(&note.abs).expect("hidden state")["a"].clone();
+        assert_eq!(hidden.versions.len(), 2);
+        assert_eq!(hidden.removed_versions.len(), 1);
+        assert_eq!(
+            hidden.versions[1].effective_parent_version_id.as_deref(),
+            Some(old.version_id.as_str())
+        );
+
+        assert!(reset_head(&note, "a", &old.version_id, &old.hash).expect("reset logical head"));
+        let reset = state(&note.abs).expect("reset state")["a"].clone();
+        assert_eq!(
+            reset.head_version_id.as_deref(),
+            Some(old.version_id.as_str())
+        );
+        assert_eq!(
+            read_doc(&note.abs).expect("live note"),
+            "```mica id=a\nold\n```\n"
+        );
+    }
+
+    #[test]
+    fn hidden_raw_head_stays_clean_and_parents_the_next_checkpoint() {
+        let (_dir, note) = note_fixture("```mica id=a\nold\n```\n");
+        set_content(&note, "a", "new").expect("create initial and changed checkpoints");
+        let initial = state(&note.abs).expect("initial state")["a"].clone();
+        let hidden = initial.versions[1].version_id.clone();
+
+        set_versions_visible(&note, "a", std::slice::from_ref(&hidden), false)
+            .expect("hide current checkpoint");
+        let removed = state(&note.abs).expect("removed state")["a"].clone();
+        assert_eq!(
+            removed.head_version_id,
+            Some(initial.versions[0].version_id.clone())
+        );
+        assert_eq!(
+            removed.raw_head_version_id.as_deref(),
+            Some(hidden.as_str())
+        );
+        assert_eq!(
+            removed.raw_head.as_deref(),
+            Some(initial.versions[1].hash.as_str())
+        );
+
+        let unchanged = snapshot_note(&note, false, false).expect("snapshot unchanged live bytes");
+        assert!(
+            unchanged
+                .iter()
+                .all(|action| action.skipped.as_deref() == Some("unchanged")),
+            "hiding the current checkpoint must not manufacture a dirty working copy"
+        );
+
+        std::fs::write(&note.abs, "```mica id=a\nnewer\n```\n").expect("edit live note");
+        snapshot_note(&note, false, false).expect("snapshot next edit");
+        let next = state(&note.abs).expect("next state")["a"].clone();
+        let newest = next.versions.last().expect("new visible checkpoint");
+        assert_eq!(newest.parent_version_id.as_deref(), Some(hidden.as_str()));
+        assert_eq!(
+            newest.effective_parent_version_id.as_deref(),
+            Some(initial.versions[0].version_id.as_str())
+        );
     }
 
     #[test]

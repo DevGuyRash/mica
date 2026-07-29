@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 /// their exact bytes still round-trip.
 const MAX_STRUCTURAL_DEPTH: usize = 128;
 
+/// Keep the common many-short-lines case allocation-free without reserving
+/// memory proportional to bytes for adversarial or generated long lines.
+const MAX_LINE_START_PREALLOC: usize = 4_096;
+
 /// Parsed content of one block: an ordered list of top-level nodes.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Cst {
@@ -73,7 +77,8 @@ struct Src<'a> {
 
 impl<'a> Src<'a> {
     fn new(text: &'a str) -> Self {
-        let mut starts = Vec::with_capacity(text.len() / 32 + 2);
+        let estimated_lines = text.len() / 32 + 2;
+        let mut starts = Vec::with_capacity(estimated_lines.min(MAX_LINE_START_PREALLOC));
         starts.push(0);
         // match_indices uses std's SIMD-accelerated byte search.
         starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
@@ -455,6 +460,17 @@ mod tests {
             serialize_impl(&parse_block_impl(src)),
             src,
             "round-trip mismatch"
+        );
+    }
+
+    #[test]
+    fn single_long_line_does_not_reserve_offsets_for_phantom_lines() {
+        let content = "x".repeat(1024 * 1024);
+        let src = Src::new(&content);
+        assert_eq!(src.line_count(), 1);
+        assert!(
+            src.starts.capacity() <= MAX_LINE_START_PREALLOC,
+            "one physical line should not reserve offsets proportional to its byte length"
         );
     }
 
