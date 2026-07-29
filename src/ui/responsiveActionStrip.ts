@@ -27,6 +27,8 @@ type WidthSubscriber = () => void;
 const widthSubscribers = new Map<Element, Set<WidthSubscriber>>();
 const mountedLayouts = new Set<WidthSubscriber>();
 let sharedObserver: ResizeObserver | null = null;
+let sharedStyleObserver: MutationObserver | null = null;
+let styleObserverRebuildQueued = false;
 
 function observer(): ResizeObserver {
 	sharedObserver ??= new ResizeObserver((entries) => {
@@ -35,12 +37,37 @@ function observer(): ResizeObserver {
 	return sharedObserver;
 }
 
+function styleObserver(): MutationObserver {
+	sharedStyleObserver ??= new MutationObserver((entries) => {
+		for (const entry of entries)
+			for (const subscriber of widthSubscribers.get(entry.target as Element) ?? []) subscriber();
+	});
+	return sharedStyleObserver;
+}
+
+function rebuildStyleObserver(): void {
+	if (styleObserverRebuildQueued) return;
+	styleObserverRebuildQueued = true;
+	queueMicrotask(() => {
+		styleObserverRebuildQueued = false;
+		sharedStyleObserver?.disconnect();
+		if (!widthSubscribers.size) {
+			sharedStyleObserver = null;
+			return;
+		}
+		const current = styleObserver();
+		for (const target of widthSubscribers.keys())
+			current.observe(target, { attributes: true, attributeFilter: ["style"] });
+	});
+}
+
 function observeWidth(target: Element, subscriber: WidthSubscriber): () => void {
 	let subscribers = widthSubscribers.get(target);
 	if (!subscribers) {
 		subscribers = new Set();
 		widthSubscribers.set(target, subscribers);
 		observer().observe(target);
+		styleObserver().observe(target, { attributes: true, attributeFilter: ["style"] });
 	}
 	subscribers.add(subscriber);
 	return () => {
@@ -49,9 +76,11 @@ function observeWidth(target: Element, subscriber: WidthSubscriber): () => void 
 		if (current?.size) return;
 		widthSubscribers.delete(target);
 		sharedObserver?.unobserve(target);
-		if (widthSubscribers.size) return;
-		sharedObserver?.disconnect();
-		sharedObserver = null;
+		rebuildStyleObserver();
+		if (!widthSubscribers.size) {
+			sharedObserver?.disconnect();
+			sharedObserver = null;
+		}
 	};
 }
 
@@ -75,6 +104,7 @@ export function mountResponsiveActionStrip(
 	let forceMeasure = true;
 	let attachmentRetries = 0;
 	let settlePasses = 2;
+	const initialActions = [...getActions()];
 
 	const menu = mountActionMenu(
 		root,
@@ -85,9 +115,7 @@ export function mountResponsiveActionStrip(
 	);
 	menu.button.dataset.micaResponsiveRole = "overflow";
 	menu.button.style.display = "none";
-	const initialActionIds = getActions()
-		.map((action) => action.id)
-		.join(" ");
+	const initialActionIds = initialActions.map((action) => action.id).join(" ");
 	root.dataset.micaActionStrip = initialActionIds;
 	menu.button.dataset.micaActions = initialActionIds;
 	menu.button.dataset.micaOverflowActions = initialActionIds;
@@ -119,18 +147,15 @@ export function mountResponsiveActionStrip(
 		button.disabled = Boolean(action.disabled);
 		button.toggleClass("is-disabled", Boolean(action.disabled));
 		button.toggleClass("is-danger", Boolean(action.danger));
+		button.toggleClass("is-on", action.checked === true);
 		if (action.checked === undefined) button.removeAttribute("aria-pressed");
-		else {
-			button.setAttribute("aria-pressed", String(action.checked));
-			button.toggleClass("is-on", action.checked);
-		}
+		else button.setAttribute("aria-pressed", String(action.checked));
 	};
 
 	// Establish an immediately usable optimistic layout before the widget is
 	// attached. Wide strips start with their direct actions and no ellipsis;
 	// menu-only strips start with only their menu. The measured pass can then
 	// move actions without a transient missing-controls state.
-	const initialActions = [...getActions()];
 	overflowIds = new Set(
 		options.menuOnly
 			? initialActions.map((action) => action.id)
@@ -178,16 +203,17 @@ export function mountResponsiveActionStrip(
 			menu.button.style.display = "inline-flex";
 		}
 		const menuWidth = menu.button.getBoundingClientRect().width || menu.button.offsetWidth || 30;
-		const candidates: ResponsiveActionCandidate[] = actions.map((action) => ({
-			id: action.id,
-			width:
-				directButtons.get(action.id)?.getBoundingClientRect().width ||
-				directButtons.get(action.id)?.offsetWidth ||
-				menuWidth,
-			directPriority: action.directPriority,
-			overflowOnly: action.overflowOnly,
-			pinned: action.pinned,
-		}));
+		const candidates: ResponsiveActionCandidate[] = [];
+		for (const action of actions) {
+			const button = directButtons.get(action.id);
+			candidates.push({
+				id: action.id,
+				width: button?.getBoundingClientRect().width || button?.offsetWidth || menuWidth,
+				directPriority: action.directPriority,
+				overflowOnly: action.overflowOnly,
+				pinned: action.pinned,
+			});
+		}
 		const available = Math.max(0, options.source.clientWidth - (options.reservedWidth?.() ?? 0));
 		const packing = packResponsiveActions(candidates, available, gap, menuWidth, options.menuOnly);
 		const directIds = new Set(packing.direct);

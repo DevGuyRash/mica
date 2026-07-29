@@ -1,17 +1,8 @@
 import { browser, expect } from "@wdio/globals";
+import { clickLatestMenuItem as clickMenuItem, seedAndOpenNote } from "../helpers";
 
 async function seedAndOpen(path: string, content: string): Promise<void> {
-	await browser.executeObsidian(
-		async ({ app, obsidian }, filePath, source) => {
-			let file = app.vault.getAbstractFileByPath(filePath);
-			if (!file) file = await app.vault.create(filePath, source);
-			if (!(file instanceof obsidian.TFile)) throw new Error(`not a file: ${filePath}`);
-			else await app.vault.modify(file, source);
-			await app.workspace.getLeaf(false).openFile(file, { state: { mode: "source", source: false } });
-		},
-		path,
-		content,
-	);
+	await seedAndOpenNote(path, content, { overwriteExisting: true });
 }
 
 async function documentSource(): Promise<string> {
@@ -20,35 +11,8 @@ async function documentSource(): Promise<string> {
 	});
 }
 
-async function clickLatestMenuItem(title: string): Promise<void> {
-	await browser.waitUntil(
-		() =>
-			browser.executeObsidian(
-				(_, expected) =>
-					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
-						(element) => element.textContent?.trim() === expected,
-					) ||
-					Array.from(document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`)).some(
-						(button) =>
-							!button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
-					),
-				title,
-			),
-		{ timeout: 8000, timeoutMsg: `menu item never appeared: ${title}` },
-	);
-	await browser.executeObsidian((_, expected) => {
-		const menus = Array.from(document.querySelectorAll<HTMLElement>("body > .menu"));
-		const item = Array.from(menus.at(-1)?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-			(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
-		);
-		if (item) item.click();
-		else
-			Array.from(document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`))
-				.find(
-					(button) => !button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
-				)
-				?.click();
-	}, title);
+function clickLatestMenuItem(title: string): Promise<void> {
+	return clickMenuItem(title, true);
 }
 
 async function expectOneLogicalEditor(expected: string): Promise<void> {
@@ -293,6 +257,38 @@ describe("structured sections", function () {
 		);
 	});
 
+	it("merges a whole run of sections in one action, and uncombines it exactly", async function () {
+		const original = "Alpha para\n\nBeta para\n\nGamma para\n";
+		await seedAndOpen("CombineRun.md", `Intro.\n\n\`\`\`mica id=combine-run\n${original}\`\`\`\n`);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 3),
+			{ timeout: 8000, timeoutMsg: "the three regions never rendered" },
+		);
+		// The run action is offered from the first region, naming how far it reaches.
+		await browser.executeObsidian(() => {
+			const first = document.querySelector<HTMLElement>(".mica-lp .mica-region");
+			first?.querySelector<HTMLButtonElement>(".mica-entity-menu")?.click();
+		});
+		await clickLatestMenuItem("Combine the next 3 sections");
+		await browser.waitUntil(
+			async () => (await documentSource()).includes(":::section\nAlpha para\n\nBeta para\n\nGamma para\n:::\n"),
+			{ timeout: 8000, timeoutMsg: "the run did not merge into one section in document order" },
+		);
+		// One reduction, so one undo-able step, and exactly reversible.
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-logical-section"))),
+			{ timeout: 8000, timeoutMsg: "the merged run did not render as one region" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-logical-section .mica-entity-menu") as HTMLElement).click();
+		});
+		await clickLatestMenuItem("Uncombine section");
+		await browser.waitUntil(async () => (await documentSource()).includes(original), {
+			timeout: 8000,
+			timeoutMsg: "uncombining the run did not restore the original bytes",
+		});
+	});
+
 	it("combines after dwell with a themeable full-target indicator and can uncombine", async function () {
 		await seedAndOpen(
 			"CombineSections.md",
@@ -312,8 +308,8 @@ describe("structured sections", function () {
 				nextIcon: next?.querySelector("svg")?.innerHTML ?? "",
 			};
 		});
-		expect(combineControls.previousLabel).toBe("Combine with previous section");
-		expect(combineControls.nextLabel).toBe("Combine with next section");
+		expect(combineControls.previousLabel).toBe("Combine with section above");
+		expect(combineControls.nextLabel).toBe("Combine with section below");
 		expect(combineControls.previousIcon.length).toBeGreaterThan(0);
 		expect(combineControls.nextIcon.length).toBeGreaterThan(0);
 		expect(combineControls.previousIcon).not.toBe(combineControls.nextIcon);
@@ -361,9 +357,12 @@ describe("structured sections", function () {
 		expect(feedback.sameBox).toBe(true);
 		expect(feedback.plus).toContain("+");
 		expect(feedback.themed).toBe(true);
+		// Alpha is written before Beta, so combining them keeps Alpha first no
+		// matter which one was dragged onto which. This previously asserted the
+		// reverse, pinning a silent reordering of the user's prose.
 		await browser.waitUntil(
-			async () => (await documentSource()).includes(":::section\nBeta paragraph\n\nAlpha paragraph\n:::\n"),
-			{ timeout: 8000, timeoutMsg: "the compatible sections did not combine" },
+			async () => (await documentSource()).includes(":::section\nAlpha paragraph\n\nBeta paragraph\n:::\n"),
+			{ timeout: 8000, timeoutMsg: "the compatible sections did not combine in document order" },
 		);
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-logical-section"))),

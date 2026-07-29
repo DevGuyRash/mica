@@ -180,10 +180,14 @@ async function resumePendingMigration(
 	const resumable = await ensureHeadEventsInJournal(plugin, file, journal, migrated);
 	await appendEvents(vault, file, resumable.events);
 	await completeMigrationJournal(plugin, file, resumable);
-	const versionsImported = resumable.events.filter(
-		(event) => event.type === "add-version" && event.origin?.startsWith("migrated:"),
-	).length;
-	const blocks = scanBlocksView(migrated).filter((block) => block.closed && block.id).length;
+	let versionsImported = 0;
+	for (const event of resumable.events) {
+		if (event.type === "add-version" && event.origin?.startsWith("migrated:")) versionsImported += 1;
+	}
+	let blocks = 0;
+	for (const block of scanBlocksView(migrated)) {
+		if (block.closed && block.id) blocks += 1;
+	}
 	return { backup: resumable.original, blocks, versionsImported };
 }
 
@@ -196,9 +200,10 @@ async function ensureHeadEventsInJournal(
 	journal: MigrationJournal,
 	migrated: string,
 ): Promise<MigrationJournal> {
-	const existingHeads = new Set(
-		journal.events.filter((event) => event.type === "set-head").map((event) => `${event.block}\0${event.hash}`),
-	);
+	const existingHeads = new Set<string>();
+	for (const event of journal.events) {
+		if (event.type === "set-head") existingHeads.add(`${event.block}\0${event.hash}`);
+	}
 	const staged = await stageHeadEvents(plugin, file, migrated);
 	const missing: MigrationLedgerEvent[] = [];
 	for (let index = 0; index < staged.length; index += 2) {

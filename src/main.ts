@@ -20,6 +20,8 @@ import type { BlockUi } from "./ui/blockShell";
 import { setActionMenuTrigger } from "./ui/actionMenu";
 import { normalizeCustomToolConfig } from "./ui/customToolConfig";
 import { invalidateResponsiveActionStrips } from "./ui/responsiveActionStrip";
+import { normalizeHiddenSectionActions } from "./ui/sectionActionPrefs";
+import { normalizeDockActionLayout } from "./ui/dockConfig";
 
 /**
  * Mica plugin entry point. Wires the WASM core, the three-mode renderer, the
@@ -37,9 +39,14 @@ export default class MicaPlugin extends Plugin {
 		await initCore();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
 		const customConfig = normalizeCustomToolConfig(this.settings.customTools ?? [], this.settings.toolbarLayout);
+		const sectionActionConfig = normalizeHiddenSectionActions(this.settings.hiddenSectionActions);
+		const dockActionLayout = normalizeDockActionLayout(this.settings.dockActionLayout);
+		const dockConfigChanged = JSON.stringify(dockActionLayout) !== JSON.stringify(this.settings.dockActionLayout);
 		this.settings.customTools = customConfig.customTools;
 		this.settings.toolbarLayout = customConfig.toolbarLayout;
-		if (customConfig.changed) await this.saveSettings();
+		this.settings.hiddenSectionActions = sectionActionConfig.hidden;
+		this.settings.dockActionLayout = dockActionLayout;
+		if (customConfig.changed || sectionActionConfig.changed || dockConfigChanged) await this.saveSettings();
 		this.applyStyleVars();
 		this.applyToolbarConfig();
 		this.engine = new VersionEngine(this);
@@ -180,12 +187,15 @@ export default class MicaPlugin extends Plugin {
 		b.removeAttribute("data-mica-density");
 		b.removeAttribute("data-mica-tabstyle");
 		b.removeAttribute("data-mica-grip");
+		b.removeAttribute("data-mica-dock-surface");
 		for (const k of [
 			"--mica-accent",
 			"--mica-radius",
 			"--mica-tab-gap",
 			"--mica-content-max-height",
 			"--mica-editor-max-height",
+			"--mica-long-dock-custom-background",
+			"--mica-long-dock-custom-foreground",
 		]) {
 			b.style.removeProperty(k);
 		}
@@ -248,6 +258,7 @@ export default class MicaPlugin extends Plugin {
 		b.setAttribute("data-mica-density", s.density);
 		b.setAttribute("data-mica-tabstyle", s.tabStyle);
 		b.setAttribute("data-mica-grip", s.dragHandlePosition);
+		b.setAttribute("data-mica-dock-surface", s.dockSurface);
 		setEditorBehavior(s.editorClickOutside);
 		setActionMenuTrigger(s.actionMenuTrigger);
 		setEditorViewPrefs({
@@ -275,6 +286,8 @@ export default class MicaPlugin extends Plugin {
 		set("--mica-tab-gap", `${s.tabGapPx}px`);
 		set("--mica-content-max-height", s.limitContentHeight ? `${s.contentMaxHeightPx}px` : "none");
 		set("--mica-editor-max-height", `${s.editorMaxHeightPx}px`);
+		set("--mica-long-dock-custom-background", s.dockCustomBackground);
+		set("--mica-long-dock-custom-foreground", s.dockCustomForeground);
 	}
 
 	private async reconcileOnLoad(): Promise<void> {
@@ -307,8 +320,12 @@ export default class MicaPlugin extends Plugin {
 		const file = this.app.workspace.getActiveFile();
 		if (!file) return;
 		try {
-			await this.engine.snapshot(file);
-			new Notice("Mica: versions saved.");
+			const result = await this.engine.snapshot(file, true);
+			new Notice(
+				result.versionsCreated
+					? `Mica: saved ${result.versionsCreated} version${result.versionsCreated === 1 ? "" : "s"}.`
+					: "Mica: no versions saved — there were no changes.",
+			);
 		} catch (error) {
 			new Notice(`Mica: could not save versions — ${error instanceof Error ? error.message : String(error)}`);
 		}

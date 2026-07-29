@@ -1,7 +1,12 @@
 import { getIcon, getIconIds, Modal, setIcon, type App } from "obsidian";
+import { exactPackIconCandidate, findIconPack, packIconId, splitPackIconId, type IconPack } from "../icons/iconPacks";
+import { iconPackCatalog, loadPackIcon } from "../icons/iconPackRuntime";
+import { setMicaIcon } from "../icons/setMicaIcon";
 
 export interface IconPickerOptions {
 	app: App;
+	/** Opt-in packs to offer alongside Obsidian's built-in icons. */
+	enabledPacks?: readonly string[];
 	title?: string;
 	/** Icon currently assigned to the object, if any. */
 	current?: string | null;
@@ -28,12 +33,16 @@ export class IconPickerModal extends Modal {
 	private searchIndex: Array<readonly [id: string, normalized: string]> = [];
 	private filteredIds: string[] = [];
 	private renderedIds: string[] = [];
+	private renderedButtons: HTMLButtonElement[] = [];
 	private visibleCount = ICON_BATCH_SIZE;
 	private query = "";
 	private searchEl: HTMLInputElement | null = null;
 	private gridEl: HTMLElement | null = null;
 	private statusEl: HTMLElement | null = null;
 	private renderFrame: number | null = null;
+	private enabledPackIds = new Set<string>();
+	private lifecycleGeneration = 0;
+	private commitGeneration = 0;
 
 	constructor(private readonly options: IconPickerOptions) {
 		super(options.app);
@@ -41,6 +50,9 @@ export class IconPickerModal extends Modal {
 	}
 
 	onOpen(): void {
+		const generation = ++this.lifecycleGeneration;
+		this.commitGeneration++;
+		this.enabledPackIds = new Set(this.options.enabledPacks ?? []);
 		this.modalEl.addClass("mica-icon-picker-modal");
 		this.titleEl.setText(this.options.title ?? "Choose an icon");
 
@@ -48,6 +60,9 @@ export class IconPickerModal extends Modal {
 		// made opening the picker needlessly expensive; validate only at commit.
 		this.iconIds = [...new Set(getIconIds().map(String))].sort((a, b) => a.localeCompare(b));
 		this.searchIndex = this.iconIds.map((id) => [id, id.toLocaleLowerCase()] as const);
+		// Enabled packs load in the background; the built-in catalog is usable
+		// immediately rather than waiting on a network round trip.
+		void this.appendEnabledPacks(generation);
 
 		const root = this.contentEl.createDiv({ cls: "mica-icon-picker" });
 		const searchRow = root.createDiv({ cls: "mica-icon-picker-search" });
@@ -100,12 +115,38 @@ export class IconPickerModal extends Modal {
 	}
 
 	onClose(): void {
+		this.lifecycleGeneration++;
+		this.commitGeneration++;
 		if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
 		this.renderFrame = null;
 		this.contentEl.empty();
 		this.searchEl = null;
 		this.gridEl = null;
 		this.statusEl = null;
+		this.renderedButtons = [];
+	}
+
+	/**
+	 * Fold every enabled pack's catalog into the searchable list.
+	 *
+	 * Packs with no whole-set payload publish no catalog, so they contribute
+	 * nothing here and are reached by typing their `pack:name` id directly.
+	 */
+	private async appendEnabledPacks(generation: number): Promise<void> {
+		const added: string[] = [];
+		for (const packId of this.enabledPackIds) {
+			if (generation !== this.lifecycleGeneration) return;
+			const pack = findIconPack(packId);
+			if (!pack) continue;
+			const catalog = await iconPackCatalog(pack);
+			if (generation !== this.lifecycleGeneration) return;
+			for (const icon of catalog) added.push(packIconId(pack.id, icon));
+		}
+		// The modal may have closed while a pack was downloading.
+		if (generation !== this.lifecycleGeneration || !added.length || !this.gridEl) return;
+		this.iconIds = [...new Set([...this.iconIds, ...added])].sort((left, right) => left.localeCompare(right));
+		this.searchIndex = this.iconIds.map((id) => [id, id.toLocaleLowerCase()] as const);
+		this.renderIcons();
 	}
 
 	/** Coalesce fast typing into one bounded SVG render per animation frame. */
@@ -120,14 +161,27 @@ export class IconPickerModal extends Modal {
 	private renderIcons(): void {
 		if (!this.gridEl || !this.statusEl) return;
 		const needle = this.query.trim().toLocaleLowerCase();
-		this.filteredIds = needle
-			? this.searchIndex.filter(([, normalized]) => normalized.includes(needle)).map(([id]) => id)
-			: [...this.iconIds];
+		if (needle) {
+			const matches: string[] = [];
+			const exactPackCandidate = exactPackIconCandidate(this.query, this.enabledPackIds);
+			let foundExactPackCandidate = false;
+			for (const [id, normalized] of this.searchIndex) {
+				if (!normalized.includes(needle)) continue;
+				matches.push(id);
+				if (id === exactPackCandidate) foundExactPackCandidate = true;
+			}
+			if (exactPackCandidate && !foundExactPackCandidate) matches.push(exactPackCandidate);
+			this.filteredIds = matches;
+		} else {
+			// Background pack loading replaces, rather than mutates, this array.
+			this.filteredIds = this.iconIds;
+		}
 		this.renderedIds = this.filteredIds.slice(0, this.visibleCount);
 		if (this.current && this.filteredIds.includes(this.current) && !this.renderedIds.includes(this.current)) {
 			this.renderedIds = [this.current, ...this.renderedIds.slice(0, -1)];
 		}
 		this.gridEl.empty();
+		this.renderedButtons = [];
 		const total = this.filteredIds.length;
 		this.statusEl.setText(
 			total <= this.renderedIds.length
@@ -161,10 +215,11 @@ export class IconPickerModal extends Modal {
 					"data-icon-id": id,
 				},
 			});
-			setIcon(button.createSpan({ cls: "mica-icon-picker-glyph" }), id);
+			setMicaIcon(button.createSpan({ cls: "mica-icon-picker-glyph" }), id, this.enabledPackIds);
 			button.createSpan({ cls: "mica-icon-picker-name", text: id });
 			button.addEventListener("click", () => this.commit(id));
 			button.addEventListener("keydown", (event) => this.onIconKeydown(event, index));
+			this.renderedButtons.push(button);
 		}
 		if (this.renderedIds.length < total) {
 			const more = this.gridEl.createEl("button", {
@@ -215,34 +270,72 @@ export class IconPickerModal extends Modal {
 	}
 
 	private columnCount(): number {
-		if (!this.gridEl) return 1;
-		const buttons = [...this.gridEl.querySelectorAll<HTMLButtonElement>(".mica-icon-picker-option")];
-		if (buttons.length < 2) return 1;
-		const firstTop = buttons[0]?.offsetTop;
-		const nextRow = buttons.findIndex((button) => button.offsetTop !== firstTop);
-		return nextRow > 0 ? nextRow : buttons.length;
+		if (this.renderedButtons.length < 2) return 1;
+		const firstTop = this.renderedButtons[0]?.offsetTop;
+		const nextRow = this.renderedButtons.findIndex((button) => button.offsetTop !== firstTop);
+		return nextRow > 0 ? nextRow : this.renderedButtons.length;
 	}
 
 	private focusIcon(index: number): void {
-		if (!this.gridEl || index < 0) return;
-		const buttons = [...this.gridEl.querySelectorAll<HTMLButtonElement>(".mica-icon-picker-option")];
-		const target = buttons[index];
+		if (index < 0) return;
+		const target = this.renderedButtons[index];
 		if (!target) return;
-		for (const button of buttons) button.tabIndex = button === target ? 0 : -1;
+		for (const button of this.renderedButtons) button.tabIndex = button === target ? 0 : -1;
 		target.focus();
 		target.scrollIntoView({ block: "nearest", inline: "nearest" });
 	}
 
 	private commit(icon: string | null): void {
-		// Validate at the commit boundary; themes/plugins can replace Obsidian's
-		// icon registry while this modal is open.
-		if (icon !== null && !getIcon(icon)) {
-			this.query = icon;
-			if (this.searchEl) this.searchEl.value = icon;
-			this.renderIcons();
-			this.statusEl?.setText(`“${icon}” is no longer available.`);
+		const generation = ++this.commitGeneration;
+		if (icon === null) {
+			this.finishCommit(null);
 			return;
 		}
+
+		const parts = splitPackIconId(icon);
+		if (parts) {
+			const pack = findIconPack(parts.packId);
+			if (!pack || !this.enabledPackIds.has(pack.id)) {
+				this.reportUnavailable(icon);
+				return;
+			}
+			void this.commitPack(icon, pack, parts.icon, generation);
+			return;
+		}
+
+		// Validate at the commit boundary; themes/plugins can replace Obsidian's
+		// icon registry while this modal is open.
+		if (!getIcon(icon)) {
+			this.reportUnavailable(icon);
+			return;
+		}
+		this.finishCommit(icon);
+	}
+
+	private async commitPack(icon: string, pack: IconPack, name: string, generation: number): Promise<void> {
+		let available = false;
+		try {
+			available = Boolean(await loadPackIcon(pack, name));
+		} catch {
+			// The loader owns network fallbacks; any unexpected failure still
+			// leaves selection closed rather than publishing an unvalidated id.
+		}
+		if (generation !== this.commitGeneration || !this.gridEl) return;
+		if (!available) {
+			this.reportUnavailable(icon);
+			return;
+		}
+		this.finishCommit(icon);
+	}
+
+	private reportUnavailable(icon: string): void {
+		this.query = icon;
+		if (this.searchEl) this.searchEl.value = icon;
+		this.renderIcons();
+		this.statusEl?.setText(`“${icon}” is no longer available.`);
+	}
+
+	private finishCommit(icon: string | null): void {
 		this.options.onChoose(icon);
 		this.close();
 	}

@@ -153,7 +153,7 @@ function buildToolbarOnce(
 	let horizontalPadding = 0;
 	// Widths remain cached during ordinary resizes. Obsidian's css-change event
 	// invalidates them when a theme changes font metrics or control density.
-	const widths: number[] = [];
+	const measured = pieces.map((piece) => ({ kind: piece.kind, width: 0 }));
 	const relayout = (force = false): void => {
 		if (relayoutQueued) return;
 		relayoutQueued = true;
@@ -172,8 +172,10 @@ function buildToolbarOnce(
 				for (const piece of pieces) piece.el.style.display = "";
 				restorePieceOrder();
 				more.style.display = "";
-				widths.length = 0;
-				for (const piece of pieces) widths.push(outerWidth(piece.el));
+				for (let i = 0; i < pieces.length; i++) {
+					const width = outerWidth(pieces[i].el);
+					measured[i].width = width;
+				}
 				moreWidth = outerWidth(more);
 				const computed = getComputedStyle(bar);
 				gap = Number.parseFloat(computed.columnGap || computed.gap) || 0;
@@ -181,12 +183,7 @@ function buildToolbarOnce(
 					(Number.parseFloat(computed.paddingLeft) || 0) + (Number.parseFloat(computed.paddingRight) || 0);
 				geometryDirty = false;
 			}
-			const packing = packToolbarEntries(
-				pieces.map((piece, i) => ({ kind: piece.kind, width: widths[i] })),
-				Math.max(0, clientWidth - horizontalPadding),
-				moreWidth,
-				gap,
-			);
+			const packing = packToolbarEntries(measured, Math.max(0, clientWidth - horizontalPadding), moreWidth, gap);
 			hidden.length = 0;
 			pieces.forEach((piece, i) => {
 				piece.el.style.display = packing.direct[i] ? "" : "none";

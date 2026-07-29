@@ -47,6 +47,18 @@ export type StructOp =
 			targetStart: number;
 			targetEnd: number;
 			targetExpected: string;
+			/** Absorb callout and code leaves too. Off by default so those stay
+			 * their own addressable sections unless the user asks otherwise. */
+			allowMixed?: boolean;
+	  }
+	| {
+			/** Merge a contiguous run of sibling regions in one reduction. */
+			op: "combineRun";
+			path: number[];
+			start: number;
+			end: number;
+			expected: string;
+			allowMixed?: boolean;
 	  }
 	| { op: "uncombineSection"; path: number[] };
 

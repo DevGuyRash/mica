@@ -11,7 +11,16 @@ export const MAX_FUTURE_EVENT_SKEW_MS = 86_400_000; // 24 hours
 
 const HASH_PATTERN = /^b3:(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 
-const LEDGER_EVENT_TYPES = new Set(["add-version", "replace-version", "set-head", "label"]);
+const LEDGER_EVENT_TYPES = new Set([
+	"add-version",
+	"replace-version",
+	"set-head",
+	"label",
+	"checkpoint",
+	"move-head",
+	"version-label",
+	"version-visibility",
+]);
 
 /** Raised when valid JSON names a ledger event type this reader cannot safely
  * interpret. This is a format-compatibility failure, not a torn record. */
@@ -22,19 +31,19 @@ export class UnknownLedgerEventTypeError extends Error {
 	}
 }
 
-export type InvalidLedgerEventField = "eid" | "ts" | "block" | "hash" | "target";
+export type InvalidLedgerEventField =
+	"eid" | "ts" | "block" | "hash" | "target" | "parent" | "source" | "cause" | "visible";
 
 /** Raised when a syntactically valid replacement record cannot be interpreted
  * safely. Unlike malformed JSON, this record advertises a storage contract and
  * therefore represents sidecar corruption rather than a recoverable torn tail. */
 export class InvalidLedgerEventError extends Error {
-	readonly eventType = "replace-version";
-
 	constructor(
+		readonly eventType: string,
 		readonly field: InvalidLedgerEventField,
 		readonly reason: string,
 	) {
-		super(`Mica: invalid replace-version event: ${field} ${reason}`);
+		super(`Mica: invalid ${eventType} event: ${field} ${reason}`);
 		this.name = "InvalidLedgerEventError";
 	}
 }
@@ -58,22 +67,39 @@ export function isLedgerEvent(value: unknown): value is LedgerEvent {
 
 export function isLedgerEventAt(value: unknown, nowMs: number): value is LedgerEvent {
 	if (!isRecord(value)) return false;
-	if (typeof value.eid !== "string" || typeof value.block !== "string") return false;
-	if (value.type === "replace-version" && (!value.eid.length || !value.block.length)) return false;
+	if (typeof value.eid !== "string" || !value.eid.length || typeof value.block !== "string" || !value.block.length)
+		return false;
 	const latest = latestEventTimestamp(nowMs);
 	if (!Number.isSafeInteger(value.ts) || (value.ts as number) < 0 || (value.ts as number) > latest) {
 		return false;
 	}
-	if (!isObjectHash(value.hash)) return false;
 	switch (value.type) {
 		case "add-version":
-			return optionalString(value.label) && optionalString(value.origin) && optionalHash(value.parent);
+			return (
+				isObjectHash(value.hash) &&
+				optionalString(value.label) &&
+				optionalString(value.origin) &&
+				optionalHash(value.parent)
+			);
 		case "replace-version":
-			return typeof value.target === "string" && value.target.length > 0;
+			return isObjectHash(value.hash) && typeof value.target === "string" && value.target.length > 0;
 		case "set-head":
-			return true;
+			return isObjectHash(value.hash);
 		case "label":
-			return optionalString(value.label);
+			return isObjectHash(value.hash) && optionalString(value.label);
+		case "checkpoint":
+			return (
+				isObjectHash(value.hash) &&
+				optionalId(value.parent) &&
+				optionalId(value.source) &&
+				optionalString(value.cause)
+			);
+		case "move-head":
+			return optionalId(value.target);
+		case "version-label":
+			return typeof value.target === "string" && value.target.length > 0 && optionalString(value.label);
+		case "version-visibility":
+			return typeof value.target === "string" && value.target.length > 0 && typeof value.visible === "boolean";
 		default:
 			return false;
 	}
@@ -114,7 +140,7 @@ export function parseLedgerDocument(text: string): ParsedLedger {
 				value = undefined;
 			}
 			assertKnownLedgerEventType(value);
-			assertValidReplacementLedgerEventAt(value, now);
+			assertValidTypedLedgerEventAt(value, now);
 			if (isLedgerEventAt(value, now)) {
 				const previous = byEid.get(value.eid);
 				if (previous && !sameLedgerEvent(previous, value)) {
@@ -145,7 +171,8 @@ export interface BatchStatus {
 /** Match append recovery by immutable event identity, while rejecting an eid
  * that was already used for different data. */
 export function classifyEventBatch(existing: readonly LedgerEvent[], intended: readonly LedgerEvent[]): BatchStatus {
-	const byEid = new Map(existing.map((event) => [event.eid, event]));
+	const byEid = new Map<string, LedgerEvent>();
+	for (const event of existing) byEid.set(event.eid, event);
 	const present: LedgerEvent[] = [];
 	const missing: LedgerEvent[] = [];
 	const conflictEids: string[] = [];
@@ -162,7 +189,7 @@ export function validateEventBatch(events: readonly LedgerEvent[]): void {
 	const byEid = new Map<string, LedgerEvent>();
 	const now = Date.now();
 	for (const event of events) {
-		assertValidReplacementLedgerEventAt(event, now);
+		assertValidTypedLedgerEventAt(event, now);
 		if (!isLedgerEventAt(event, now)) throw new Error("Mica: refusing to append an invalid ledger event");
 		const previous = byEid.get(event.eid);
 		if (previous && !sameLedgerEvent(previous, event)) {
@@ -196,7 +223,6 @@ export function remintOrderedLedgerEventIds(
 	newEventId: () => string,
 ): LedgerEvent[] {
 	const eids = orderedEvents.map(() => newEventId()).sort(compareAscii);
-	const minted = new Set<string>();
 	const remintedBySource = new Map<string, string>();
 	for (let index = 0; index < orderedEvents.length; index++) {
 		const event = orderedEvents[index];
@@ -204,21 +230,39 @@ export function remintOrderedLedgerEventIds(
 		if (remintedBySource.has(event.eid)) {
 			throw new Error(`Mica: cannot remint history with duplicate source eid ${JSON.stringify(event.eid)}`);
 		}
-		if (minted.has(eid)) throw new Error(`Mica: event id generator produced duplicate eid ${JSON.stringify(eid)}`);
+		if (index > 0 && eids[index - 1] === eid) {
+			throw new Error(`Mica: event id generator produced duplicate eid ${JSON.stringify(eid)}`);
+		}
 		remintedBySource.set(event.eid, eid);
-		minted.add(eid);
 	}
+	const remintRef = (event: LedgerEvent, target: string): string => {
+		const reminted = remintedBySource.get(target);
+		if (!reminted) {
+			throw new Error(`Mica: event ${JSON.stringify(event.eid)} has absent target ${JSON.stringify(target)}`);
+		}
+		return reminted;
+	};
 	return orderedEvents.map((event) => {
 		const eid = remintedBySource.get(event.eid);
 		if (!eid) throw new Error(`Mica: missing reminted eid for ${JSON.stringify(event.eid)}`);
-		if (event.type !== "replace-version") return { ...event, eid };
-		const target = remintedBySource.get(event.target);
-		if (!target) {
-			throw new Error(
-				`Mica: replacement event ${JSON.stringify(event.eid)} has absent target ${JSON.stringify(event.target)}`,
-			);
+		switch (event.type) {
+			case "replace-version":
+				return { ...event, eid, target: remintRef(event, event.target) };
+			case "checkpoint":
+				return {
+					...event,
+					eid,
+					parent: event.parent ? remintRef(event, event.parent) : event.parent,
+					source: event.source ? remintRef(event, event.source) : event.source,
+				};
+			case "move-head":
+				return { ...event, eid, target: event.target ? remintRef(event, event.target) : event.target };
+			case "version-label":
+			case "version-visibility":
+				return { ...event, eid, target: remintRef(event, event.target) };
+			default:
+				return { ...event, eid };
 		}
-		return { ...event, eid, target };
 	});
 }
 
@@ -227,27 +271,37 @@ function compareAscii(left: string, right: string): number {
 }
 
 function sameLedgerEvent(left: LedgerEvent, right: LedgerEvent): boolean {
-	if (
-		left.type !== right.type ||
-		left.eid !== right.eid ||
-		left.ts !== right.ts ||
-		left.block !== right.block ||
-		left.hash !== right.hash
-	) {
+	if (left.type !== right.type || left.eid !== right.eid || left.ts !== right.ts || left.block !== right.block) {
 		return false;
 	}
 	if (left.type === "add-version" && right.type === "add-version") {
 		return (
+			left.hash === right.hash &&
 			(left.label ?? null) === (right.label ?? null) &&
 			(left.origin ?? null) === (right.origin ?? null) &&
 			(left.parent ?? null) === (right.parent ?? null)
 		);
 	}
 	if (left.type === "replace-version" && right.type === "replace-version") {
-		return left.target === right.target;
+		return left.hash === right.hash && left.target === right.target;
 	}
-	if (left.type === "label" && right.type === "label") return (left.label ?? null) === (right.label ?? null);
-	return left.type === "set-head" && right.type === "set-head";
+	if (left.type === "label" && right.type === "label")
+		return left.hash === right.hash && (left.label ?? null) === (right.label ?? null);
+	if (left.type === "checkpoint" && right.type === "checkpoint") {
+		return (
+			left.hash === right.hash &&
+			(left.parent ?? null) === (right.parent ?? null) &&
+			(left.source ?? null) === (right.source ?? null) &&
+			(left.cause ?? null) === (right.cause ?? null)
+		);
+	}
+	if (left.type === "move-head" && right.type === "move-head")
+		return (left.target ?? null) === (right.target ?? null);
+	if (left.type === "version-label" && right.type === "version-label")
+		return left.target === right.target && (left.label ?? null) === (right.label ?? null);
+	if (left.type === "version-visibility" && right.type === "version-visibility")
+		return left.target === right.target && left.visible === right.visible;
+	return left.type === "set-head" && right.type === "set-head" && left.hash === right.hash;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -262,24 +316,58 @@ function optionalHash(value: unknown): boolean {
 	return value === undefined || value === null || isObjectHash(value);
 }
 
-function assertValidReplacementLedgerEventAt(value: unknown, nowMs: number): void {
-	if (!isRecord(value) || value.type !== "replace-version") return;
+function optionalId(value: unknown): boolean {
+	return value === undefined || value === null || (typeof value === "string" && value.length > 0);
+}
+
+function assertValidTypedLedgerEventAt(value: unknown, nowMs: number): void {
+	if (!isRecord(value) || typeof value.type !== "string" || !LEDGER_EVENT_TYPES.has(value.type)) return;
+	const invalid = (field: InvalidLedgerEventField, reason: string): never => {
+		throw new InvalidLedgerEventError(value.type as string, field, reason);
+	};
 	if (typeof value.eid !== "string" || value.eid.length === 0) {
-		throw new InvalidLedgerEventError("eid", "must be a non-empty string");
+		invalid("eid", "must be a non-empty string");
 	}
 	if (
 		!Number.isSafeInteger(value.ts) ||
 		(value.ts as number) < 0 ||
 		(value.ts as number) > latestEventTimestamp(nowMs)
 	) {
-		throw new InvalidLedgerEventError("ts", "must be an accepted non-negative integer timestamp");
+		invalid("ts", "must be an accepted non-negative integer timestamp");
 	}
 	if (typeof value.block !== "string" || value.block.length === 0) {
-		throw new InvalidLedgerEventError("block", "must be a non-empty string");
+		invalid("block", "must be a non-empty string");
 	}
-	if (!isObjectHash(value.hash)) throw new InvalidLedgerEventError("hash", "must be a valid object hash");
-	if (typeof value.target !== "string" || value.target.length === 0) {
-		throw new InvalidLedgerEventError("target", "must be a non-empty string");
+	switch (value.type) {
+		case "add-version":
+			if (!isObjectHash(value.hash)) invalid("hash", "must be a valid object hash");
+			if (!optionalHash(value.parent)) invalid("parent", "must be a valid object hash when present");
+			break;
+		case "replace-version":
+		case "set-head":
+		case "label":
+			if (!isObjectHash(value.hash)) invalid("hash", "must be a valid object hash");
+			if (value.type === "replace-version" && (typeof value.target !== "string" || value.target.length === 0))
+				invalid("target", "must be a non-empty string");
+			break;
+		case "checkpoint":
+			if (!isObjectHash(value.hash)) invalid("hash", "must be a valid object hash");
+			if (!optionalId(value.parent)) invalid("parent", "must be a non-empty string when present");
+			if (!optionalId(value.source)) invalid("source", "must be a non-empty string when present");
+			if (!optionalString(value.cause)) invalid("cause", "must be a string when present");
+			break;
+		case "move-head":
+			if (!optionalId(value.target)) invalid("target", "must be a non-empty string when present");
+			break;
+		case "version-label":
+			if (typeof value.target !== "string" || value.target.length === 0)
+				invalid("target", "must be a non-empty string");
+			break;
+		case "version-visibility":
+			if (typeof value.target !== "string" || value.target.length === 0)
+				invalid("target", "must be a non-empty string");
+			if (typeof value.visible !== "boolean") invalid("visible", "must be a boolean");
+			break;
 	}
 }
 

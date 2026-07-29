@@ -45,13 +45,19 @@ async function gatherSidecars(plugin: MicaPlugin): Promise<IndexedSidecar[]> {
 	const sidecars: IndexedSidecar[] = [];
 	for (const folder of sidecarFolders(plugin)) {
 		const events = await readEventsAt(plugin.app.vault, `${folder.path}/ledger.jsonl`);
-		sidecars.push({ folder, blocks: new Set(events.map((event) => event.block)), hasEvents: events.length > 0 });
+		const blocks = new Set<string>();
+		for (const event of events) blocks.add(event.block);
+		sidecars.push({ folder, blocks, hasEvents: events.length > 0 });
 	}
 	return sidecars;
 }
 
 function sidecarRefs(sidecars: readonly IndexedSidecar[]): SidecarRef[] {
-	return sidecars.flatMap(({ folder, blocks }) => [...blocks].map((block) => ({ block, sidecar: folder.path })));
+	const refs: SidecarRef[] = [];
+	for (const { folder, blocks } of sidecars) {
+		for (const block of blocks) refs.push({ block, sidecar: folder.path });
+	}
+	return refs;
 }
 
 export interface RepairReport {
@@ -245,7 +251,11 @@ async function forkBlock(
 
 		if (events.length && keeper instanceof TFile) {
 			await ensureSidecar(vault, copy);
-			for (const hash of new Set(events.map((event) => event.hash))) {
+			const hashes = new Set<string>();
+			for (const event of events) {
+				if ("hash" in event && typeof event.hash === "string") hashes.add(event.hash);
+			}
+			for (const hash of hashes) {
 				const body = await requireObject(vault, keeper, hash);
 				await writeObject(vault, copy, hash, body);
 			}

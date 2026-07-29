@@ -7,6 +7,40 @@ export interface CopyOptions {
 	lineNumberScope?: "content" | "output";
 }
 
+/** The settings subset that controls every Mica clipboard projection. Keeping
+ * this structural avoids coupling the pure serializer to the full plugin
+ * settings object while giving every copy surface one canonical adapter. */
+export interface CopyPreferences {
+	copyIncludeMicaSyntax: boolean;
+	copyIncludeOuterContainer: boolean;
+	copyIncludeLineNumbers: boolean;
+	copyLineNumberScope: "content" | "output";
+}
+
+export type CopyTarget = { nodes: readonly MicaNode[] } | { text: string };
+
+export const DEFAULT_COPY_OPTIONS: Readonly<CopyOptions> = {
+	includeMicaSyntax: false,
+	includeOuterContainer: false,
+	includeLineNumbers: false,
+	lineNumberScope: "content",
+};
+
+/** Read preferences at activation time so open widgets and docks always honor
+ * an on-the-fly settings change without being rebuilt. */
+export function copyOptionsFromSettings(settings: CopyPreferences): CopyOptions {
+	return {
+		includeMicaSyntax: settings.copyIncludeMicaSyntax,
+		includeOuterContainer: settings.copyIncludeOuterContainer,
+		includeLineNumbers: settings.copyIncludeLineNumbers,
+		lineNumberScope: settings.copyLineNumberScope,
+	};
+}
+
+export function clipboardText(target: CopyTarget, options: CopyOptions): string {
+	return "nodes" in target ? copyNodes(target.nodes, options) : copyText(target.text, options);
+}
+
 interface ProjectionSegment {
 	text: string;
 	content: boolean;
@@ -61,7 +95,7 @@ function flattenedSegments(nodes: readonly MicaNode[]): ProjectionSegment[] {
 	const fragments: string[] = [];
 	collectFlattenedLeaves(nodes, fragments);
 	if (fragments.length === 0) return [{ text: "", content: true }];
-	const eol = detectEol(fragments.join(""));
+	const eol = detectFragmentsEol(fragments);
 	const parts = [fragments[0]];
 	for (const fragment of fragments.slice(1)) {
 		const previous = parts[parts.length - 1];
@@ -81,20 +115,23 @@ function collectFlattenedLeaves(nodes: readonly MicaNode[], fragments: string[])
 }
 
 function wrapSegments(segments: readonly ProjectionSegment[]): ProjectionSegment[] {
-	const text = segments.map((segment) => segment.text).join("");
 	let longestRun = 0;
 	let run = 0;
-	for (const char of text) {
-		if (char === "`") {
-			run++;
-			longestRun = Math.max(longestRun, run);
-		} else {
-			run = 0;
+	let length = 0;
+	for (const segment of segments) {
+		length += segment.text.length;
+		for (const char of segment.text) {
+			if (char === "`") {
+				run++;
+				longestRun = Math.max(longestRun, run);
+			} else {
+				run = 0;
+			}
 		}
 	}
 	const fence = "`".repeat(Math.max(3, longestRun + 1));
-	const eol = detectEol(text);
-	const separator = text.length > 0 && !endsWithEol(text) ? eol : "";
+	const eol = detectSegmentsEol(segments);
+	const separator = length > 0 && !segmentsEndWithEol(segments) ? eol : "";
 	return [
 		{ text: `${fence}mica${eol}`, content: false },
 		...segments,
@@ -149,8 +186,40 @@ function physicalLines(text: string): { text: string; hasEol: boolean }[] {
 	return lines;
 }
 
-function detectEol(text: string): "\n" | "\r\n" | "\r" {
-	return (text.match(/\r\n|\r|\n/)?.[0] as "\n" | "\r\n" | "\r" | undefined) ?? "\n";
+function detectFragmentsEol(fragments: readonly string[]): "\n" | "\r\n" | "\r" {
+	return detectTextPartsEol(fragments);
+}
+
+function detectSegmentsEol(segments: readonly ProjectionSegment[]): "\n" | "\r\n" | "\r" {
+	return detectTextPartsEol(segments);
+}
+
+/** Find the first physical EOL across adjacent parts, including a CR/LF pair
+ * split at a structural segment boundary, without joining the full payload. */
+function detectTextPartsEol(parts: readonly (string | ProjectionSegment)[]): "\n" | "\r\n" | "\r" {
+	let trailingCr = false;
+	for (const part of parts) {
+		const text = typeof part === "string" ? part : part.text;
+		if (trailingCr) {
+			if (!text) continue;
+			return text.startsWith("\n") ? "\r\n" : "\r";
+		}
+		const match = /\r\n|\r|\n/.exec(text);
+		if (!match) continue;
+		if (match[0] === "\r" && match.index === text.length - 1) {
+			trailingCr = true;
+			continue;
+		}
+		return match[0] as "\n" | "\r\n" | "\r";
+	}
+	return trailingCr ? "\r" : "\n";
+}
+
+function segmentsEndWithEol(segments: readonly ProjectionSegment[]): boolean {
+	for (let index = segments.length - 1; index >= 0; index--) {
+		if (segments[index].text) return endsWithEol(segments[index].text);
+	}
+	return false;
 }
 
 const endsWithEol = (text: string): boolean => text.endsWith("\n") || text.endsWith("\r");

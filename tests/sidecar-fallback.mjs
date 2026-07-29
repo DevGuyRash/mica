@@ -163,6 +163,23 @@ try {
 		true,
 	);
 	assert.equal(manifestVault.processCalls, 1, "a block-name change must refresh the manifest");
+	assert.equal(
+		await sidecar.writeManifest(manifestVault, note, {
+			...firstManifest,
+			blocks: { first: "One", second: "Two" },
+			updated: 4,
+		}),
+		true,
+	);
+	assert.equal(
+		await sidecar.writeManifest(manifestVault, note, {
+			...firstManifest,
+			blocks: { second: "Two", first: "One" },
+			updated: 5,
+		}),
+		true,
+		"block order is semantic and must still trigger a manifest refresh",
+	);
 } finally {
 	if (compressionDescriptor) Object.defineProperty(globalThis, "CompressionStream", compressionDescriptor);
 	else delete globalThis.CompressionStream;

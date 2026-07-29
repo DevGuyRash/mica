@@ -70,8 +70,7 @@ export function parseCallout(source: string): ParsedCallout | null {
 	const suffix = source.slice(suffixStart);
 	if (prefix.trim().length > 0 || suffix.trim().length > 0) return null;
 
-	let bodySource = "";
-	for (const bodyLine of bodyLines) bodySource += bodyLine.content + bodyLine.line.eol;
+	const bodySource = bodyLines.map((bodyLine) => bodyLine.content + bodyLine.line.eol).join("");
 	const bodyEndEol = bodyLines.at(-1)?.line.eol ?? "";
 	const body = bodyEndEol ? bodySource.slice(0, -bodyEndEol.length) : bodySource;
 
@@ -138,13 +137,13 @@ function quoteBody(body: string, indent: string, finalEol: "" | "\n" | "\r\n"): 
 	if (body.endsWith("\n")) {
 		lines.push({ start: body.length, end: body.length, contentEnd: body.length, eol: "" });
 	}
-	let quoted = "";
+	const quoted: string[] = [];
 	for (const line of lines) {
 		const content = lineText(body, line);
-		quoted += `${indent}>${content ? ` ${content}` : ""}${line.eol}`;
+		quoted.push(`${indent}>${content ? ` ${content}` : ""}${line.eol}`);
 	}
-	if (!lines.at(-1)?.eol) quoted += finalEol;
-	return quoted;
+	if (!lines.at(-1)?.eol) quoted.push(finalEol);
+	return quoted.join("");
 }
 
 function firstEol(source: string): "\n" | "\r\n" | null {

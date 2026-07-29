@@ -1,7 +1,17 @@
 import { getIcon, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { ICON_PACKS, requiredAttribution } from "./icons/iconPacks";
+import { forgetIconPack } from "./icons/iconPackRuntime";
 import { builtinTools, DEFAULT_TOOLBAR_LAYOUT, type CustomTool } from "./ui/toolSpec";
 import type MicaPlugin from "./main";
 import { OBSIDIAN_CALLOUT_TYPES } from "./wasm/bridge";
+import { SECTION_ACTION_OPTIONS, type SectionActionPreferenceId } from "./ui/sectionActionPrefs";
+import {
+	DEFAULT_DOCK_ACTION_LAYOUT,
+	DOCK_ACTION_OPTIONS,
+	type DockActionId,
+	type DockCopyTargetMode,
+	type DockSurfaceMode,
+} from "./ui/dockConfig";
 
 export type MicaTabStyle = "underline" | "connected" | "pill";
 export type MicaDensity = "comfortable" | "compact";
@@ -30,10 +40,22 @@ export interface MicaSettings {
 	diffRefine: "none" | "word" | "char";
 	/** Exclude mica layout lines (`:::`, `tab:`) from diffs. */
 	diffHideSyntax: boolean;
+	/** Opt-in icon packs, by id. Empty means Obsidian's built-in icons only. */
+	enabledIconPacks: string[];
 	/** Collapse runs of spaces/tabs before diffing. */
 	diffIgnoreWs: boolean;
 	defaultDiffMode: "inline" | "side-by-side" | "patch";
 	showVersionChip: boolean;
+	/** Keep navigation and version status reachable inside exceptionally tall blocks. */
+	longBlockControls: "contextual" | "jumps-only" | "off";
+	/** How the traveling dock chooses the clipboard scope. */
+	dockCopyTargetMode: DockCopyTargetMode;
+	/** Ordered actions shown by the traveling dock. */
+	dockActionLayout: DockActionId[];
+	/** Floating dock surface treatment; header/footer placements keep normal chrome. */
+	dockSurface: DockSurfaceMode;
+	dockCustomBackground: string;
+	dockCustomForeground: string;
 	reconcileOnLoad: boolean;
 	/** Auto-stamp a stable id on `mica` blocks so versioning + inline editing just work. */
 	autoAddIds: boolean;
@@ -68,6 +90,8 @@ export interface MicaSettings {
 	/** Promote rendered-entity actions while they fit, or keep them in the ellipsis. */
 	entityActionLayout: "responsive" | "menu-only";
 	showTabActionMenuOnHover: boolean;
+	/** Section action groups suppressed from direct controls and section menus. */
+	hiddenSectionActions: SectionActionPreferenceId[];
 	/** What clicking outside an inline editor does. */
 	editorClickOutside: "nothing" | "cancel" | "save";
 	/** Draw structural outlines (tabs, sections, cells) by default; per-block
@@ -107,8 +131,16 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	diffRefine: "word",
 	diffHideSyntax: true,
 	diffIgnoreWs: false,
+	// Nothing is downloaded until the user asks for a pack.
+	enabledIconPacks: [],
 	defaultDiffMode: "inline",
 	showVersionChip: true,
+	longBlockControls: "contextual",
+	dockCopyTargetMode: "contextual",
+	dockActionLayout: [...DEFAULT_DOCK_ACTION_LAYOUT],
+	dockSurface: "frosted",
+	dockCustomBackground: "#20252b",
+	dockCustomForeground: "#f1f3f5",
 	reconcileOnLoad: true,
 	autoAddIds: true,
 	limitContentHeight: false,
@@ -128,6 +160,7 @@ export const DEFAULT_SETTINGS: MicaSettings = {
 	actionMenuTrigger: "click",
 	entityActionLayout: "responsive",
 	showTabActionMenuOnHover: true,
+	hiddenSectionActions: [],
 	editorClickOutside: "nothing",
 	showOutlines: false,
 	saveShortcut: "mod-enter",
@@ -165,6 +198,12 @@ export const SETTING_LIFECYCLES = {
 	diffIgnoreWs: "next-open",
 	defaultDiffMode: "next-open",
 	showVersionChip: "open-widget-rerender",
+	longBlockControls: "open-widget-rerender",
+	dockCopyTargetMode: "open-widget-rerender",
+	dockActionLayout: "open-widget-rerender",
+	dockSurface: "immediate-runtime",
+	dockCustomBackground: "immediate-runtime",
+	dockCustomForeground: "immediate-runtime",
 	reconcileOnLoad: "next-startup",
 	autoAddIds: "read-at-use",
 	limitContentHeight: "immediate-runtime",
@@ -184,6 +223,7 @@ export const SETTING_LIFECYCLES = {
 	actionMenuTrigger: "immediate-runtime",
 	entityActionLayout: "open-widget-rerender",
 	showTabActionMenuOnHover: "open-widget-rerender",
+	hiddenSectionActions: "open-widget-rerender",
 	editorClickOutside: "immediate-runtime",
 	showOutlines: "immediate-runtime",
 	saveShortcut: "next-open",
@@ -199,6 +239,9 @@ export const SETTING_LIFECYCLES = {
 	toolbarDefaults: "toolbar-rerender",
 	customTools: "toolbar-rerender",
 	foldState: "read-at-use",
+	// Pack membership is consulted whenever an icon is resolved, so a toggle
+	// takes effect on the next lookup without reopening anything.
+	enabledIconPacks: "read-at-use",
 } as const satisfies Record<keyof MicaSettings, SettingLifecycle>;
 
 /** Apply the declared lifecycle first, then persist the already-mutated value. */
@@ -374,6 +417,39 @@ export class MicaSettingTab extends PluginSettingTab {
 			);
 
 		// ---------- Appearance ----------
+		new Setting(containerEl).setHeading().setName("Icon packs");
+		new Setting(containerEl).setDesc(
+			"Obsidian's built-in icons are always available. Extra packs are downloaded from jsDelivr the first time you use one, and only while enabled.",
+		);
+		for (const pack of ICON_PACKS) {
+			const size = pack.approxBytes
+				? `${Math.round(pack.approxBytes / 1024)} KB, loaded once`
+				: "loaded one icon at a time";
+			const credit = pack.license.attribution ? " · credit shown with the icons" : "";
+			new Setting(containerEl)
+				.setName(pack.name)
+				.setDesc(`${pack.license.spdx} · ${size}${credit}${pack.license.note ? ` · ${pack.license.note}` : ""}`)
+				.addToggle((toggle) =>
+					toggle.setValue(s.enabledIconPacks.includes(pack.id)).onChange(async (on) => {
+						const next = new Set(s.enabledIconPacks);
+						if (on) next.add(pack.id);
+						else {
+							next.delete(pack.id);
+							// Disabling releases whatever the pack had loaded.
+							forgetIconPack(pack.id);
+						}
+						s.enabledIconPacks = [...next];
+						await commitSetting(this.micaPlugin, "enabledIconPacks");
+						this.display();
+					}),
+				);
+		}
+		const credits = requiredAttribution(s.enabledIconPacks);
+		if (credits.length)
+			new Setting(containerEl)
+				.setName("Attribution")
+				.setDesc(`${credits.join(" · ")} — required by these packs' licences.`);
+
 		new Setting(containerEl).setHeading().setName("Appearance");
 
 		new Setting(containerEl)
@@ -541,6 +617,14 @@ export class MicaSettingTab extends PluginSettingTab {
 				}),
 			);
 
+		const sectionActionsSetting = new Setting(containerEl)
+			.setClass("mica-setting-stack")
+			.setName("Section actions")
+			.setDesc(
+				"Choose which commands appear on text, callout, code, and combined sections. Drag and drop is always available and is not part of this list.",
+			);
+		this.renderSectionActionEditor(sectionActionsSetting.controlEl);
+
 		new Setting(containerEl)
 			.setName("Animations")
 			.setDesc(
@@ -562,6 +646,92 @@ export class MicaSettingTab extends PluginSettingTab {
 					await commit("showVersionChip");
 				}),
 			);
+
+		new Setting(containerEl)
+			.setName("Controls for long blocks")
+			.setDesc(
+				"Keep navigation and version status reachable while scrolling a very tall Mica block, show only jump controls, or leave controls at the block edges.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("contextual", "Contextual status dock")
+					.addOption("jumps-only", "Jump controls only")
+					.addOption("off", "Off")
+					.setValue(s.longBlockControls)
+					.onChange(async (value) => {
+						s.longBlockControls = value as MicaSettings["longBlockControls"];
+						await commit("longBlockControls");
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Dock clipboard target")
+			.setDesc(
+				"Follow the stable reading context, always copy the whole block, or change scope only through the dock picker.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("contextual", "Follow reading context")
+					.addOption("block", "Always copy the whole block")
+					.addOption("manual", "Manual scope only")
+					.setValue(s.dockCopyTargetMode)
+					.onChange(async (value) => {
+						s.dockCopyTargetMode = value as DockCopyTargetMode;
+						await commit("dockCopyTargetMode");
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Floating dock surface")
+			.setDesc(
+				"Choose an opaque Obsidian surface, the current frosted treatment, a block-accent tint, or custom colors.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("theme", "Theme surface")
+					.addOption("frosted", "Frosted glass")
+					.addOption("accent", "Block accent")
+					.addOption("custom", "Custom colors")
+					.setValue(s.dockSurface)
+					.onChange(async (value) => {
+						s.dockSurface = value as DockSurfaceMode;
+						await commit("dockSurface");
+						this.display();
+					}),
+			);
+
+		if (s.dockSurface === "custom") {
+			new Setting(containerEl)
+				.setName("Custom dock colors")
+				.setDesc("Background and foreground for the floating dock. The preview warns when contrast is low.")
+				.addColorPicker((picker) =>
+					picker.setValue(s.dockCustomBackground).onChange(async (value) => {
+						s.dockCustomBackground = value;
+						await commit("dockCustomBackground");
+						this.paintDockContrast(containerEl);
+					}),
+				)
+				.addColorPicker((picker) =>
+					picker.setValue(s.dockCustomForeground).onChange(async (value) => {
+						s.dockCustomForeground = value;
+						await commit("dockCustomForeground");
+						this.paintDockContrast(containerEl);
+					}),
+				);
+			const preview = containerEl.createDiv({ cls: "mica-dock-settings-preview" });
+			preview.createSpan({ text: "Scope · Active tab" });
+			const contrast = preview.createSpan({ cls: "mica-dock-contrast", attr: { "aria-live": "polite" } });
+			contrast.dataset.micaDockContrast = "1";
+			this.paintDockContrast(containerEl);
+		}
+
+		const dockActions = new Setting(containerEl)
+			.setName("Traveling dock actions")
+			.setDesc(
+				"Choose and order block-wide controls. Hidden actions remain available from their normal block or entity controls.",
+			);
+		dockActions.settingEl.addClass("mica-setting-stack");
+		this.renderDockActionEditor(dockActions.controlEl);
 
 		new Setting(containerEl)
 			.setName("Structural outlines")
@@ -807,6 +977,233 @@ export class MicaSettingTab extends PluginSettingTab {
 						this.display();
 					}),
 			);
+	}
+
+	/** A compact two-pane chooser. Preferences hide action groups rather than
+	 * storing a whitelist, so future actions remain discoverable by default. */
+	private renderSectionActionEditor(containerEl: HTMLElement): void {
+		const s = this.micaPlugin.settings;
+		const hidden = new Set<SectionActionPreferenceId>(s.hiddenSectionActions);
+		const root = containerEl.createDiv({ cls: "mica-ribbon-editor mica-section-action-editor" });
+		let selectedHidden: SectionActionPreferenceId | null = null;
+		let selectedShown: SectionActionPreferenceId | null = null;
+
+		const save = async (): Promise<void> => {
+			s.hiddenSectionActions = SECTION_ACTION_OPTIONS.map((option) => option.id).filter((id) => hidden.has(id));
+			await commitSetting(this.micaPlugin, "hiddenSectionActions");
+		};
+
+		const paint = (): void => {
+			root.empty();
+			const makePane = (
+				title: string,
+				options: readonly (typeof SECTION_ACTION_OPTIONS)[number][],
+				selected: SectionActionPreferenceId | null,
+				onSelect: (id: SectionActionPreferenceId) => void,
+				onActivate: (id: SectionActionPreferenceId) => void,
+			): void => {
+				const pane = root.createDiv({ cls: "mica-ribbon-pane" });
+				pane.createDiv({ cls: "mica-ribbon-title", text: title });
+				const list = pane.createDiv({ cls: "mica-ribbon-list" });
+				for (const option of options) {
+					const row = list.createEl("button", {
+						cls: `clickable-icon mica-ribbon-item ${selected === option.id ? "is-selected" : ""}`,
+						attr: { type: "button" },
+					});
+					setIcon(row.createSpan({ cls: "mica-ribbon-ico" }), option.icon);
+					row.createSpan({ text: option.label });
+					row.addEventListener("click", () => onSelect(option.id));
+					row.addEventListener("dblclick", () => onActivate(option.id));
+				}
+				if (!options.length)
+					list.createDiv({
+						cls: "mica-section-action-empty",
+						text: title === "Hidden" ? "No actions hidden" : "Only drag and drop remains",
+					});
+			};
+
+			makePane(
+				"Hidden",
+				SECTION_ACTION_OPTIONS.filter((option) => hidden.has(option.id)),
+				selectedHidden,
+				(id) => {
+					selectedHidden = id;
+					selectedShown = null;
+					paint();
+				},
+				(id) => {
+					hidden.delete(id);
+					selectedHidden = null;
+					void save().then(paint);
+				},
+			);
+
+			const mid = root.createDiv({ cls: "mica-ribbon-mid" });
+			const midButton = (icon: string, label: string, run: () => void): void => {
+				const button = mid.createEl("button", {
+					cls: "clickable-icon mica-ribbon-btn",
+					attr: { type: "button", "aria-label": label },
+				});
+				setIcon(button, icon);
+				button.addEventListener("click", () => {
+					run();
+					void save().then(paint);
+				});
+			};
+			midButton("chevron-right", "Show selected action", () => {
+				if (selectedHidden) hidden.delete(selectedHidden);
+				selectedHidden = null;
+			});
+			midButton("chevron-left", "Hide selected action", () => {
+				if (selectedShown) hidden.add(selectedShown);
+				selectedShown = null;
+			});
+			midButton("chevrons-right", "Show every section action", () => {
+				hidden.clear();
+				selectedHidden = null;
+			});
+			midButton("chevrons-left", "Hide every optional section action", () => {
+				for (const option of SECTION_ACTION_OPTIONS) hidden.add(option.id);
+				selectedShown = null;
+			});
+			midButton("rotate-ccw", "Reset section actions", () => {
+				hidden.clear();
+				selectedHidden = null;
+				selectedShown = null;
+			});
+
+			makePane(
+				"Shown on sections",
+				SECTION_ACTION_OPTIONS.filter((option) => !hidden.has(option.id)),
+				selectedShown,
+				(id) => {
+					selectedShown = id;
+					selectedHidden = null;
+					paint();
+				},
+				(id) => {
+					hidden.add(id);
+					selectedShown = null;
+					void save().then(paint);
+				},
+			);
+		};
+		paint();
+	}
+
+	private renderDockActionEditor(containerEl: HTMLElement): void {
+		const s = this.micaPlugin.settings;
+		const root = containerEl.createDiv({ cls: "mica-ribbon-editor mica-dock-action-editor" });
+		let selectedAvailable: DockActionId | null = null;
+		let selectedCurrent = -1;
+
+		const save = async (): Promise<void> => {
+			await commitSetting(this.micaPlugin, "dockActionLayout");
+		};
+		const paint = (): void => {
+			root.empty();
+			const available = root.createDiv({ cls: "mica-ribbon-pane" });
+			available.createDiv({ cls: "mica-ribbon-title", text: "Available controls" });
+			const availableList = available.createDiv({ cls: "mica-ribbon-list" });
+			for (const option of DOCK_ACTION_OPTIONS.filter((item) => !s.dockActionLayout.includes(item.id))) {
+				const row = availableList.createEl("button", {
+					cls: `clickable-icon mica-ribbon-item ${selectedAvailable === option.id ? "is-selected" : ""}`,
+					attr: { type: "button" },
+				});
+				setIcon(row.createSpan({ cls: "mica-ribbon-ico" }), option.icon);
+				row.createSpan({ text: option.label });
+				row.addEventListener("click", () => {
+					selectedAvailable = option.id;
+					selectedCurrent = -1;
+					paint();
+				});
+				row.addEventListener("dblclick", () => {
+					s.dockActionLayout.push(option.id);
+					selectedAvailable = null;
+					void save().then(paint);
+				});
+			}
+
+			const middle = root.createDiv({ cls: "mica-ribbon-mid" });
+			const middleButton = (icon: string, label: string, run: () => void): void => {
+				const button = middle.createEl("button", {
+					cls: "clickable-icon mica-ribbon-btn",
+					attr: { type: "button", "aria-label": label },
+				});
+				setIcon(button, icon);
+				button.addEventListener("click", () => {
+					run();
+					void save().then(paint);
+				});
+			};
+			middleButton("chevron-right", "Add selected control", () => {
+				if (selectedAvailable) s.dockActionLayout.push(selectedAvailable);
+				selectedAvailable = null;
+			});
+			middleButton("chevron-left", "Remove selected control", () => {
+				if (selectedCurrent >= 0) s.dockActionLayout.splice(selectedCurrent, 1);
+				selectedCurrent = -1;
+			});
+			middleButton("rotate-ccw", "Reset dock controls", () => {
+				s.dockActionLayout = [...DEFAULT_DOCK_ACTION_LAYOUT];
+				selectedAvailable = null;
+				selectedCurrent = -1;
+			});
+
+			const current = root.createDiv({ cls: "mica-ribbon-pane" });
+			current.createDiv({ cls: "mica-ribbon-title", text: "Your dock (in order)" });
+			const currentList = current.createDiv({ cls: "mica-ribbon-list" });
+			s.dockActionLayout.forEach((id, index) => {
+				const option = DOCK_ACTION_OPTIONS.find((item) => item.id === id);
+				if (!option) return;
+				const row = currentList.createEl("button", {
+					cls: `clickable-icon mica-ribbon-item ${selectedCurrent === index ? "is-selected" : ""}`,
+					attr: { type: "button" },
+				});
+				setIcon(row.createSpan({ cls: "mica-ribbon-ico" }), option.icon);
+				row.createSpan({ text: option.label });
+				row.addEventListener("click", () => {
+					selectedCurrent = index;
+					selectedAvailable = null;
+					paint();
+				});
+			});
+			const order = current.createDiv({ cls: "mica-ribbon-order" });
+			const orderButton = (icon: string, label: string, delta: -1 | 1): void => {
+				const button = order.createEl("button", {
+					cls: "clickable-icon mica-ribbon-btn",
+					attr: { type: "button", "aria-label": label },
+				});
+				setIcon(button, icon);
+				button.addEventListener("click", () => {
+					const next = selectedCurrent + delta;
+					if (selectedCurrent < 0 || next < 0 || next >= s.dockActionLayout.length) return;
+					[s.dockActionLayout[selectedCurrent], s.dockActionLayout[next]] = [
+						s.dockActionLayout[next],
+						s.dockActionLayout[selectedCurrent],
+					];
+					selectedCurrent = next;
+					void save().then(paint);
+				});
+			};
+			orderButton("arrow-up", "Move selected control up", -1);
+			orderButton("arrow-down", "Move selected control down", 1);
+		};
+		paint();
+	}
+
+	private paintDockContrast(containerEl: HTMLElement): void {
+		const preview = containerEl.querySelector<HTMLElement>(".mica-dock-settings-preview");
+		const status = containerEl.querySelector<HTMLElement>("[data-mica-dock-contrast]");
+		if (!preview || !status) return;
+		const { dockCustomBackground: background, dockCustomForeground: foreground } = this.micaPlugin.settings;
+		preview.style.background = background;
+		preview.style.color = foreground;
+		const ratio = contrastRatio(background, foreground);
+		status.setText(
+			ratio === null ? "Invalid color" : `${ratio.toFixed(1)}:1${ratio < 4.5 ? " · low contrast" : ""}`,
+		);
+		status.toggleClass("is-warning", ratio !== null && ratio < 4.5);
 	}
 
 	/**
@@ -1118,4 +1515,24 @@ class CustomToolModal extends Modal {
 	onClose(): void {
 		this.contentEl.empty();
 	}
+}
+
+function contrastRatio(background: string, foreground: string): number | null {
+	const bg = relativeLuminance(background);
+	const fg = relativeLuminance(foreground);
+	if (bg === null || fg === null) return null;
+	const lighter = Math.max(bg, fg);
+	const darker = Math.min(bg, fg);
+	return (lighter + 0.05) / (darker + 0.05);
+}
+
+function relativeLuminance(color: string): number | null {
+	const match = color.trim().match(/^#([\da-f]{6})$/i);
+	if (!match) return null;
+	const hex = match[1];
+	const channel = (start: number): number => {
+		const value = Number.parseInt(hex.slice(start, start + 2), 16) / 255;
+		return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+	};
+	return channel(0) * 0.2126 + channel(2) * 0.7152 + channel(4) * 0.0722;
 }

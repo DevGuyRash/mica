@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { copyNodes, copyText } from "../src/ui/copyPayload.ts";
+import {
+	clipboardText,
+	copyNodes,
+	copyOptionsFromSettings,
+	copyText,
+	DEFAULT_COPY_OPTIONS,
+} from "../src/ui/copyPayload.ts";
+import { resolveExactCopySelection } from "../src/ui/copySelection.ts";
 import type { MicaNode } from "../src/wasm/bridge.ts";
 
 const leaf = (text: string): MicaNode => ({ kind: "leaf", text, is_code: false });
@@ -26,6 +33,26 @@ const plain = "  alpha  \r\n\r\n> [!note] Keep\r\n> body\r\n";
 const syntax =
 	":::grid {cols=2}\r\n:::cell\r\n  alpha  \r\n\r\n:::\r\n:::cell\r\n> [!note] Keep\r\n> body\r\n:::\r\n:::\r\n";
 
+assert.deepEqual(
+	copyOptionsFromSettings({
+		copyIncludeMicaSyntax: true,
+		copyIncludeOuterContainer: false,
+		copyIncludeLineNumbers: true,
+		copyLineNumberScope: "output",
+	}),
+	{
+		includeMicaSyntax: true,
+		includeOuterContainer: false,
+		includeLineNumbers: true,
+		lineNumberScope: "output",
+	},
+);
+assert.equal(
+	clipboardText({ nodes: [grid] }, DEFAULT_COPY_OPTIONS),
+	plain,
+	"all copy surfaces should share the default structural projection",
+);
+
 assert.equal(copyNodes([grid], { includeMicaSyntax: false, includeOuterContainer: false }), plain);
 assert.equal(copyNodes([grid], { includeMicaSyntax: true, includeOuterContainer: false }), syntax);
 assert.equal(
@@ -47,6 +74,24 @@ assert.equal(
 	"exact \t bytes\r\n",
 );
 assert.equal(copyText("", { includeMicaSyntax: false, includeOuterContainer: true }), "```mica\n```");
+
+const splitBoundaries: MicaNode = {
+	kind: "container",
+	name: "section",
+	title: "",
+	colons: 3,
+	open_line: ":::section``",
+	children: [leaf("``body\r")],
+	close_line: "\n:::",
+};
+assert.equal(
+	copyNodes([splitBoundaries], {
+		includeMicaSyntax: true,
+		includeOuterContainer: true,
+	}),
+	"`````mica\r\n:::section````body\r\n:::\r\n`````",
+	"fence and CRLF detection crosses structural segment boundaries without flattening source",
+);
 
 assert.equal(
 	copyText("alpha\n\nbeta\n", {
@@ -140,6 +185,77 @@ for (const includeMicaSyntax of [false, true]) {
 	}
 }
 assert.equal(matrix.size, 16);
+
+// A section action passes exactly this node, never its owning tab/grid. Prove
+// every clipboard projection excludes both siblings and all ancestor syntax.
+const exactSection: MicaNode = {
+	kind: "container",
+	name: "section",
+	title: "",
+	colons: 3,
+	open_line: ":::section\r\n",
+	children: [leaf("  selected\r\n\r\n"), cell("nested\r\n")],
+	close_line: ":::\r\n",
+};
+const sectionPlain = "  selected\r\n\r\nnested\r\n";
+const sectionSyntax = ":::section\r\n  selected\r\n\r\n:::cell\r\nnested\r\n:::\r\n:::\r\n";
+const exactSelection = {
+	path: [0, 0, 0],
+	expectedKind: exactSection.kind,
+	expectedName: "section",
+	expectedSource: sectionSyntax,
+} as const;
+const selectedTab: MicaNode = {
+	kind: "container",
+	name: "tab",
+	title: "Selected tab",
+	colons: 0,
+	open_line: "tab: Selected tab\r\n",
+	children: [exactSection, leaf("Unselected section\r\n")],
+	close_line: "",
+};
+const selectionRoot: MicaNode[] = [
+	{
+		kind: "container",
+		name: "tabs",
+		title: "",
+		colons: 0,
+		open_line: "",
+		children: [selectedTab, leaf("Sibling tab\r\n")],
+		close_line: "",
+	},
+];
+assert.equal(resolveExactCopySelection(selectionRoot, exactSelection), exactSection);
+assert.equal(
+	resolveExactCopySelection(selectionRoot, {
+		...exactSelection,
+		expectedSource: sectionSyntax.replace("selected", "stale"),
+	}),
+	null,
+	"a changed selection is rejected rather than falling back to its tab",
+);
+assert.equal(
+	resolveExactCopySelection(selectionRoot, { ...exactSelection, path: [0, 9] }),
+	null,
+	"a stale path never resolves an ancestor",
+);
+for (const includeMicaSyntax of [false, true]) {
+	for (const includeOuterContainer of [false, true]) {
+		for (const includeLineNumbers of [false, true]) {
+			for (const lineNumberScope of ["content", "output"] as const) {
+				const value = copyNodes([exactSection], {
+					includeMicaSyntax,
+					includeOuterContainer,
+					includeLineNumbers,
+					lineNumberScope,
+				});
+				assert.doesNotMatch(value, /Sibling tab|Unselected section|tab:|:::grid/);
+				if (!includeLineNumbers && !includeOuterContainer)
+					assert.equal(value, includeMicaSyntax ? sectionSyntax : sectionPlain);
+			}
+		}
+	}
+}
 
 const friendlyTabs: MicaNode[] = [
 	{

@@ -4,6 +4,7 @@ import { parseBlock, scanBlocksView, type BlockView } from "../wasm/bridge";
 import { renderCst, type ChipInfo } from "../ui/blockShell";
 import { getBlockUi } from "./blockUiState";
 import { noteBasenameFromPath, unnamedBlockOrdinals } from "../identity/blockLabel";
+import { copyOptionsFromSettings } from "../ui/copyPayload";
 
 interface CachedBlock {
 	block: BlockView;
@@ -62,14 +63,13 @@ export function registerReadingRenderer(plugin: MicaPlugin): void {
 					unnamedOrdinal: located?.unnamedOrdinal ?? 1,
 				},
 				headerMode: plugin.settings.blockHeaderMode,
-				copyOptions: () => ({
-					includeMicaSyntax: plugin.settings.copyIncludeMicaSyntax,
-					includeOuterContainer: plugin.settings.copyIncludeOuterContainer,
-					includeLineNumbers: plugin.settings.copyIncludeLineNumbers,
-					lineNumberScope: plugin.settings.copyLineNumberScope,
-				}),
+				copyOptions: () => copyOptionsFromSettings(plugin.settings),
 				entityActionLayout: plugin.settings.entityActionLayout,
 				showTabActionMenuOnHover: plugin.settings.showTabActionMenuOnHover,
+				longBlockControls: plugin.settings.longBlockControls,
+				dockCopyTargetMode: plugin.settings.dockCopyTargetMode,
+				dockActionLayout: plugin.settings.dockActionLayout,
+				hiddenSectionActions: new Set(plugin.settings.hiddenSectionActions),
 			});
 		} catch (e) {
 			// A render error must never blank the block — show it and keep the source.

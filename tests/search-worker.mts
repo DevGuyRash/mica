@@ -155,6 +155,28 @@ const zeroWidthPreview = await run({
 assert.deepEqual([...new Uint32Array(zeroWidthPreview.ranges!)], [0, 0, 2, 2]);
 assert.deepEqual(zeroWidthPreview.replacements, ["x", "x"]);
 
+for (const [label, doc, expectedRanges, expectedText] of [
+	["isolated high surrogate", "\ud800a", [0, 0, 1, 1], "|\ud800|a"],
+	["isolated low surrogate", "\udc00a", [0, 0, 1, 1], "|\udc00|a"],
+	["valid surrogate pair", "😀", [0, 0], "|😀"],
+] as const) {
+	const scan = await run({
+		id: 10,
+		type: "scan",
+		doc,
+		needle: "(?=.)",
+		regex: true,
+		flags: "gu",
+		matchCase: true,
+		global: true,
+		replacement: "|",
+	});
+	assert.deepEqual([...new Uint32Array(scan.ranges!)], expectedRanges, `${label} scan offsets`);
+	assert.deepEqual(scan.replacements, expectedRanges.length ? Array(expectedRanges.length / 2).fill("|") : []);
+	const replaced = await replace("(?=.)", doc, "|", "gu");
+	assert.equal(replaced.text, expectedText, `${label} replacement`);
+}
+
 const nonGlobalReplace = await run({
 	id: 9,
 	type: "replace",

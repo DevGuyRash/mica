@@ -1,20 +1,8 @@
 import { browser } from "@wdio/globals";
 import { Key } from "webdriverio";
+import { clickLatestMenuItem as clickMenuItem, seedAndOpenNote as seedAndOpen } from "../helpers";
 
 /** Round-5 features that MUTATE the document: column resize + wrap toggle. */
-
-async function seedAndOpen(path: string, content: string): Promise<void> {
-	await browser.executeObsidian(
-		async ({ app, obsidian }, p, c) => {
-			let f = app.vault.getAbstractFileByPath(p);
-			if (!f) f = await app.vault.create(p, c);
-			if (!(f instanceof obsidian.TFile)) throw new Error(`not a file: ${p}`);
-			await app.workspace.getLeaf(false).openFile(f, { state: { mode: "source", source: false } });
-		},
-		path,
-		content,
-	);
-}
 
 async function docContains(_pred: string): Promise<string> {
 	return browser.executeObsidian(({ app, obsidian }) => {
@@ -22,44 +10,8 @@ async function docContains(_pred: string): Promise<string> {
 	});
 }
 
-async function clickLatestMenuItem(title: string, allowDirect = true): Promise<void> {
-	await browser.waitUntil(
-		() =>
-			browser.executeObsidian(
-				(_, expected, mayUseDirect) =>
-					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
-						(element) => element.textContent?.trim() === expected,
-					) ||
-					(mayUseDirect &&
-						Array.from(
-							document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`),
-						).some(
-							(button) =>
-								!button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
-						)),
-				title,
-				allowDirect,
-			),
-		{ timeout: 8000, timeoutMsg: `menu item never appeared: ${title}` },
-	);
-	await browser.executeObsidian(
-		(_, expected, mayUseDirect) => {
-			const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-			const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-				(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
-			);
-			if (item) item.click();
-			else if (mayUseDirect)
-				Array.from(document.querySelectorAll<HTMLButtonElement>(`button[aria-label="${expected}"]`))
-					.find(
-						(button) =>
-							!button.hasClass("mica-responsive-more") && getComputedStyle(button).display !== "none",
-					)
-					?.click();
-		},
-		title,
-		allowDirect,
-	);
+function clickLatestMenuItem(title: string, allowDirect = true): Promise<void> {
+	return clickMenuItem(title, allowDirect);
 }
 
 describe("grid column resize + wrap toggle", function () {
@@ -73,6 +25,14 @@ describe("grid column resize + wrap toggle", function () {
 			{ timeout: 8000, timeoutMsg: "grid chrome fixture never rendered" },
 		);
 		await browser.$(".mica-lp .mica-cell").moveTo();
+		// Chrome occasionally drops :hover while Xvfb transfers focus into the
+		// Electron webview. Exercise the product's pointer-enter fallback too;
+		// real pointer movement and touch/stylus entry use this same listener.
+		await browser.executeObsidian(() => {
+			const wrap = document.querySelector<HTMLElement>(".mica-lp .mica-grid-wrap");
+			if (!wrap?.matches(":hover"))
+				wrap?.dispatchEvent(new PointerEvent("pointerenter", { bubbles: false, pointerType: "mouse" }));
+		});
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(() => {
@@ -87,15 +47,18 @@ describe("grid column resize + wrap toggle", function () {
 					const direct = Array.from(tools?.querySelectorAll<HTMLElement>("[data-mica-action]") ?? []).filter(
 						(button) => getComputedStyle(button).display !== "none",
 					);
+					const overflowIds = (more?.dataset.micaOverflowActions ?? "").split(" ").filter(Boolean);
 					return Boolean(
 						tools &&
 						getComputedStyle(tools).opacity === "1" &&
 						getComputedStyle(tools).pointerEvents !== "none" &&
 						drag &&
 						drag.getBoundingClientRect().width > 0 &&
-						direct.length === actionIds.length &&
 						more &&
-						getComputedStyle(more).display === "none",
+						direct.length + overflowIds.length === actionIds.length &&
+						(overflowIds.length
+							? getComputedStyle(more).display !== "none"
+							: getComputedStyle(more).display === "none"),
 					);
 				}),
 			{ timeout: 8000, timeoutMsg: "grid drag/actions were unavailable over cell content" },
@@ -755,14 +718,25 @@ describe("block navigator", function () {
 		expect(unfoldCenter.label).toBe("Unfold this tab group");
 		expect(Math.abs(unfoldCenter.x - foldCenter.x)).toBeLessThanOrEqual(4);
 		expect(Math.abs(unfoldCenter.y - foldCenter.y)).toBeLessThanOrEqual(4);
+		const hasHoverPointer = await browser.executeObsidian(
+			() => window.matchMedia("(hover: hover) and (pointer: fine)").matches,
+		);
 		await browser.$(".mica-lp .mica-head").moveTo();
 		await browser.waitUntil(
 			() =>
-				browser.executeObsidian(() => {
+				browser.executeObsidian((_, expectsHover) => {
 					const grip = document.querySelector<HTMLElement>(".mica-lp .mica-fold-grip")!;
-					return getComputedStyle(grip).opacity === "0" && getComputedStyle(grip).pointerEvents === "none";
-				}),
-			{ timeout: 2000, timeoutMsg: "the folded tab drag grip stayed visible after pointer leave" },
+					const style = getComputedStyle(grip);
+					return expectsHover
+						? style.opacity === "0" && style.pointerEvents === "none"
+						: style.opacity === "1" && style.pointerEvents === "auto";
+				}, hasHoverPointer),
+			{
+				timeout: 2000,
+				timeoutMsg: hasHoverPointer
+					? "the folded tab drag grip stayed visible after pointer leave"
+					: "the folded tab drag grip was not persistently reachable on touch",
+			},
 		);
 		await browser.$(".mica-lp .mica-fold-bar").moveTo();
 		await browser.waitUntil(
@@ -777,11 +751,17 @@ describe("block navigator", function () {
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
-					() =>
+					(_, expectsHover) =>
 						getComputedStyle(document.querySelector<HTMLElement>(".mica-lp .mica-fold-grip")!).opacity ===
-						"0",
+						(expectsHover ? "0" : "1"),
+					hasHoverPointer,
 				),
-			{ timeout: 2000, timeoutMsg: "the folded tab drag grip did not hide again" },
+			{
+				timeout: 2000,
+				timeoutMsg: hasHoverPointer
+					? "the folded tab drag grip did not hide again"
+					: "the folded tab drag grip stopped being reachable on touch",
+			},
 		);
 		// Navigator → click the buried callout's row.
 		await browser.executeObsidian(() => {

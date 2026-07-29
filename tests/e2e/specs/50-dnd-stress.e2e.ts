@@ -1,4 +1,5 @@
 import { browser, expect } from "@wdio/globals";
+import { seedAndOpenNote as seedAndOpen } from "../helpers";
 
 /**
  * Drag & drop stress suite. Every scenario drives the REAL pointer pipeline
@@ -12,19 +13,6 @@ import { browser, expect } from "@wdio/globals";
  *    item are excluded), so "drag below the next item" shows BELOW it;
  *  - Esc cancels without touching the note.
  */
-
-async function seedAndOpen(path: string, content: string): Promise<void> {
-	await browser.executeObsidian(
-		async ({ app, obsidian }, p, c) => {
-			let f = app.vault.getAbstractFileByPath(p);
-			if (!f) f = await app.vault.create(p, c);
-			if (!(f instanceof obsidian.TFile)) throw new Error(`not a file: ${p}`);
-			await app.workspace.getLeaf(false).openFile(f, { state: { mode: "source", source: false } });
-		},
-		path,
-		content,
-	);
-}
 
 async function waitForSelector(sel: string, min = 1): Promise<void> {
 	await browser.waitUntil(

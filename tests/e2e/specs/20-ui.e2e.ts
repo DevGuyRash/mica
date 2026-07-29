@@ -1,4 +1,5 @@
 import { browser, expect, $, $$ } from "@wdio/globals";
+import { clickLatestMenuItem, seedAndOpenNote } from "../helpers";
 
 // Friendly, closer-free `tab:` syntax — the primary way users write blocks.
 const NOTE = [
@@ -35,19 +36,7 @@ async function openNote(path: string, mode: "preview" | "live"): Promise<void> {
 // starts outside the block and the widget renders. Each interactive test gets
 // its own note so mutations don't bleed across tests.
 async function seedAndOpen(path: string, block: string, mode: "preview" | "live"): Promise<void> {
-	await browser.executeObsidian(
-		async ({ app, obsidian }, p, content, m) => {
-			let f = app.vault.getAbstractFileByPath(p);
-			if (!f) f = await app.vault.create(p, content);
-			if (!(f instanceof obsidian.TFile)) throw new Error(`not a file: ${p}`);
-			await app.workspace.getLeaf(false).openFile(f, {
-				state: m === "preview" ? { mode: "preview" } : { mode: "source", source: false },
-			});
-		},
-		path,
-		block,
-		mode,
-	);
+	await seedAndOpenNote(path, block, { mode });
 }
 
 /**
@@ -72,27 +61,6 @@ async function setAutoSave(enabled: boolean): Promise<void> {
 			await p.saveSettings();
 		}
 	}, enabled);
-}
-
-async function clickLatestMenuItem(title: string): Promise<void> {
-	await browser.waitUntil(
-		() =>
-			browser.executeObsidian(
-				(_, expected) =>
-					Array.from(document.querySelectorAll<HTMLElement>("body > .menu .menu-item-title")).some(
-						(element) => element.textContent?.trim() === expected,
-					),
-				title,
-			),
-		{ timeout: 8000, timeoutMsg: `menu item never appeared: ${title}` },
-	);
-	await browser.executeObsidian((_, expected) => {
-		const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu")).at(-1);
-		const item = Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item") ?? []).find(
-			(element) => element.querySelector(".menu-item-title")?.textContent?.trim() === expected,
-		);
-		item?.click();
-	}, title);
 }
 
 describe("rendering canaries (plugin-owned hooks only)", function () {
@@ -143,6 +111,35 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(res.activeIdx0).toBe(0); // first tab active by default
 		expect(res.activeIdx1).toBe(1); // clicking Two activates the second panel…
 		expect(res.activeText).toContain("second body"); // …and shows its content
+	});
+
+	it("reading mode preserves prompt placeholders and authored spacing", async function () {
+		const rendered = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const el = document.createElement("div");
+			document.body.appendChild(el);
+			const comp = new obsidian.Component();
+			comp.load();
+			await obsidian.MarkdownRenderer.render(
+				app,
+				"```mica id=rr-literal\n  WHEN <condition> THEN <action>\n<strong>real HTML</strong>\n```\n",
+				el,
+				"RR-literal.md",
+				comp,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			const paragraph = el.querySelector<HTMLElement>(".mica-md-inner p");
+			const result = {
+				text: paragraph?.textContent ?? "",
+				whiteSpace: paragraph ? getComputedStyle(paragraph).whiteSpace : "",
+				strong: Boolean(el.querySelector(".mica-md-inner strong")),
+			};
+			comp.unload();
+			el.remove();
+			return result;
+		});
+		expect(rendered.text).toContain("WHEN <condition> THEN <action>");
+		expect(rendered.whiteSpace).toBe("break-spaces");
+		expect(rendered.strong).toBe(true);
 	});
 
 	it("live preview replaces the fence with the Mica widget when the cursor is outside", async function () {
@@ -300,6 +297,42 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		);
 	});
 
+	it("contains long quick-editor text in a scrollable, vertically resizable surface", async function () {
+		const body = Array.from({ length: 80 }, (_, index) => `Line ${index + 1}: long editor content`).join("\n");
+		await seedAndOpen("QuickEditorOverflow.md", `Before\n\n\`\`\`mica id=qe-overflow\n${body}\n\`\`\`\n`, "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-md"))),
+			{ timeout: 8000, timeoutMsg: "long quick-editor fixture did not render" },
+		);
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-md") as HTMLElement).click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-qe-host .mica-mdeditor"))),
+			{ timeout: 8000, timeoutMsg: "quick editor did not open" },
+		);
+		const geometry = await browser.executeObsidian(() => {
+			const host = document.querySelector<HTMLElement>(".mica-qe-host .mica-mdeditor")!;
+			const editor = host.shadowRoot!.querySelector<HTMLElement>(".cm-editor")!;
+			const scroller = host.shadowRoot!.querySelector<HTMLElement>(".cm-scroller")!;
+			const hostRect = host.getBoundingClientRect();
+			const editorRect = editor.getBoundingClientRect();
+			return {
+				hostHeight: hostRect.height,
+				editorBottom: editorRect.bottom,
+				hostBottom: hostRect.bottom,
+				scrollable: scroller.scrollHeight > scroller.clientHeight,
+				resize: getComputedStyle(host).resize,
+				overflow: getComputedStyle(host).overflow,
+			};
+		});
+		expect(geometry.hostHeight).toBeLessThanOrEqual(401);
+		expect(geometry.editorBottom).toBeLessThanOrEqual(geometry.hostBottom + 1);
+		expect(geometry.scrollable).toBe(true);
+		expect(geometry.resize).toBe("vertical");
+		expect(geometry.overflow).toBe("hidden");
+	});
+
 	it("the footer is quiet on auto-save and offers Save version on manual", async function () {
 		await setAutoSave(true);
 		await seedAndOpen("Toggle.md", "Intro line.\n\n```mica id=tg-1\ntab: One\nbody\n```\n", "live");
@@ -317,6 +350,362 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		await browser.waitUntil(
 			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-save-now"))),
 			{ timeout: 8000, timeoutMsg: "manual mode did not surface the Save version button" },
+		);
+		await setAutoSave(true);
+	});
+
+	it("manual block saves are isolated and report unchanged content truthfully", async function () {
+		await setAutoSave(false);
+		await seedAndOpen(
+			"Targeted-save.md",
+			[
+				"Intro line.",
+				"",
+				"```mica id=save-a",
+				"first body",
+				"```",
+				"",
+				"```mica id=save-b",
+				"second body",
+				"```",
+				"",
+			].join("\n"),
+			"live",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-save-now").length === 2),
+			{ timeout: 8000, timeoutMsg: "both block-specific Save controls did not render" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelectorAll<HTMLButtonElement>(".mica-lp .mica-save-now")[0] ?? null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".notice")).some((notice) =>
+						notice.textContent?.includes("version saved"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the targeted save did not report success" },
+		);
+		const counts = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const file = app.vault.getAbstractFileByPath("Targeted-save.md");
+			const plugin = (
+				app as unknown as {
+					plugins: {
+						getPlugin(id: string): {
+							engine: {
+								state(
+									file: InstanceType<typeof obsidian.TFile>,
+								): Promise<Record<string, { versions: unknown[] }>>;
+							};
+						} | null;
+					};
+				}
+			).plugins.getPlugin("mica");
+			if (!(file instanceof obsidian.TFile) || !plugin) return null;
+			const state = await plugin.engine.state(file);
+			return [state["save-a"]?.versions.length ?? 0, state["save-b"]?.versions.length ?? 0];
+		});
+		expect(counts).toEqual([1, 0]);
+
+		await browser.executeObsidian(() => {
+			document.querySelectorAll(".notice").forEach((notice) => (notice as HTMLElement).remove());
+			(document.querySelectorAll<HTMLButtonElement>(".mica-lp .mica-save-now")[0] ?? null)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".notice")).some((notice) =>
+						notice.textContent?.includes("no version saved — there were no changes"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the unchanged block save still claimed success" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			document.querySelectorAll(".notice").forEach((notice) => (notice as HTMLElement).remove());
+			(app as unknown as { commands: { executeCommandById(id: string): boolean } }).commands.executeCommandById(
+				"mica:snapshot-now",
+			);
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".notice")).some((notice) =>
+						notice.textContent?.includes("saved 1 version"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the note-wide command did not report its exact saved count" },
+		);
+		await browser.executeObsidian(({ app }) => {
+			document.querySelectorAll(".notice").forEach((notice) => (notice as HTMLElement).remove());
+			(app as unknown as { commands: { executeCommandById(id: string): boolean } }).commands.executeCommandById(
+				"mica:snapshot-now",
+			);
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".notice")).some((notice) =>
+						notice.textContent?.includes("no versions saved — there were no changes"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the unchanged note-wide save still claimed success" },
+		);
+		await setAutoSave(true);
+	});
+
+	it("block-local Undo and Redo never touch a sibling block", async function () {
+		await seedAndOpen(
+			"Block-history.md",
+			[
+				"Intro line.",
+				"",
+				"```mica id=history-a",
+				"alpha before",
+				"```",
+				"",
+				"```mica id=history-b",
+				"beta remains",
+				"```",
+				"",
+			].join("\n"),
+			"live",
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp").length === 2),
+			{ timeout: 8000, timeoutMsg: "both history fixtures did not render" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-region") as HTMLElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor")),
+				),
+			{ timeout: 8000, timeoutMsg: "the block-local history editor did not open" },
+		);
+		await browser.executeObsidian(() => {
+			const editor = document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor") as unknown as {
+				micaEditor?: { setValue(value: string): void };
+			} | null;
+			editor?.micaEditor?.setValue("alpha after");
+			(
+				document.querySelector(
+					".mica-lp .mica-region.is-editing .mica-qe-bar button.mod-cta",
+				) as HTMLButtonElement | null
+			)?.click();
+		});
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-block-history-undo"))),
+			{ timeout: 8000, timeoutMsg: "the block-local Undo control did not appear" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-block-history-undo") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						app.workspace
+							.getActiveViewOfType(obsidian.MarkdownView)
+							?.editor.getValue()
+							.includes("alpha before") ?? false,
+				),
+			{ timeout: 8000, timeoutMsg: "Undo did not restore the current block" },
+		);
+		expect(
+			await browser.executeObsidian(
+				({ app, obsidian }) =>
+					app.workspace
+						.getActiveViewOfType(obsidian.MarkdownView)
+						?.editor.getValue()
+						.includes("beta remains") ?? false,
+			),
+		).toBe(true);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-block-history-redo"))),
+			{ timeout: 8000, timeoutMsg: "the block-local Redo control did not appear" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-block-history-redo") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						app.workspace
+							.getActiveViewOfType(obsidian.MarkdownView)
+							?.editor.getValue()
+							.includes("alpha after") ?? false,
+				),
+			{ timeout: 8000, timeoutMsg: "Redo did not restore the edited block" },
+		);
+	});
+
+	it("Revert to HEAD preserves the discarded working copy and offers recovery", async function () {
+		await setAutoSave(false);
+		await seedAndOpen("Revert-head.md", "Intro line.\n\n```mica id=revert-head\nstored body\n```\n", "live");
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-save-now"))),
+			{ timeout: 8000, timeoutMsg: "the initial version Save control did not render" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-save-now") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Array.from(document.querySelectorAll(".notice")).some((notice) =>
+						notice.textContent?.includes("version saved"),
+					),
+				),
+			{ timeout: 8000, timeoutMsg: "the initial HEAD was not saved" },
+		);
+		await browser.executeObsidian(() => {
+			document.querySelectorAll(".notice").forEach((notice) => (notice as HTMLElement).remove());
+			(document.querySelector(".mica-lp .mica-region") as HTMLElement | null)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor")),
+				),
+			{ timeout: 8000, timeoutMsg: "the revert fixture editor did not open" },
+		);
+		await browser.executeObsidian(() => {
+			const editor = document.querySelector(".mica-lp .mica-region.is-editing .mica-mdeditor") as unknown as {
+				micaEditor?: { setValue(value: string): void };
+			} | null;
+			editor?.micaEditor?.setValue("discarded working copy");
+			(
+				document.querySelector(
+					".mica-lp .mica-region.is-editing .mica-qe-bar button.mod-cta",
+				) as HTMLButtonElement | null
+			)?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector(".mica-lp .mica-revert-head:not([hidden])")),
+				),
+			{ timeout: 8000, timeoutMsg: "Revert to HEAD did not appear for the dirty block" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-revert-head") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						app.workspace
+							.getActiveViewOfType(obsidian.MarkdownView)
+							?.editor.getValue()
+							.includes("stored body") ?? false,
+				),
+			{ timeout: 8000, timeoutMsg: "Revert to HEAD did not restore the stored content" },
+		);
+		const recovery = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const file = app.vault.getAbstractFileByPath("Revert-head.md");
+			const plugin = (
+				app as unknown as {
+					plugins: {
+						getPlugin(id: string): {
+							engine: {
+								state(file: InstanceType<typeof obsidian.TFile>): Promise<
+									Record<
+										string,
+										{
+											rawHeadVersionId: string | null;
+											headVersionId: string | null;
+											versions: { versionId: string }[];
+										}
+									>
+								>;
+							};
+						} | null;
+					};
+				}
+			).plugins.getPlugin("mica");
+			if (!(file instanceof obsidian.TFile) || !plugin) return { count: -1, hidden: false };
+			const state = (await plugin.engine.state(file))["revert-head"];
+			const headId = state.rawHeadVersionId ?? state.headVersionId;
+			const recoveryVersion = state.versions.find((version) => version.versionId !== headId);
+			if (!recoveryVersion) return { count: state.versions.length, hidden: false };
+			await window.mica.versionsSetVisible("Revert-head.md", "revert-head", [recoveryVersion.versionId], false);
+			const removed = await window.mica.versionsRemoved("Revert-head.md", "revert-head");
+			return {
+				count: state.versions.length,
+				hidden: removed.some((version) => version.versionId === recoveryVersion.versionId),
+			};
+		});
+		expect(recovery.count).toBe(2);
+		expect(recovery.hidden).toBe(true);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".notice .mica-undo-btn") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						app.workspace
+							.getActiveViewOfType(obsidian.MarkdownView)
+							?.editor.getValue()
+							.includes("discarded working copy") ?? false,
+				),
+			{ timeout: 8000, timeoutMsg: "the revert recovery action did not restore the discarded working copy" },
+		);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-lp .mica-block-history-redo"))),
+			{ timeout: 8000, timeoutMsg: "notice Undo did not reconcile the block-local Redo entry" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-block-history-redo") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						app.workspace
+							.getActiveViewOfType(obsidian.MarkdownView)
+							?.editor.getValue()
+							.includes("stored body") ?? false,
+				),
+			{ timeout: 8000, timeoutMsg: "block-local Redo did not reapply Revert to HEAD" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".mica-lp .mica-block-history-undo") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(
+					({ app, obsidian }) =>
+						app.workspace
+							.getActiveViewOfType(obsidian.MarkdownView)
+							?.editor.getValue()
+							.includes("discarded working copy") ?? false,
+				),
+			{ timeout: 8000, timeoutMsg: "block-local Undo was not coherent after notice Undo and Redo" },
+		);
+		await openNote("Revert-head.md", "preview");
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() =>
+					Boolean(document.querySelector(".markdown-preview-view .mica-revert-head:not([hidden])")),
+				),
+			{ timeout: 8000, timeoutMsg: "Reading view did not expose Revert to HEAD for the dirty block" },
+		);
+		await browser.executeObsidian(() =>
+			(document.querySelector(".markdown-preview-view .mica-revert-head") as HTMLButtonElement | null)?.click(),
+		);
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(async ({ app, obsidian }) => {
+					const file = app.vault.getAbstractFileByPath("Revert-head.md");
+					return file instanceof obsidian.TFile && (await app.vault.read(file)).includes("stored body");
+				}),
+			{ timeout: 8000, timeoutMsg: "Reading-view Revert to HEAD did not restore the stored content" },
 		);
 		await setAutoSave(true);
 	});
@@ -578,12 +967,33 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				plugin.settings.copyLineNumberScope = previous.lineScope;
 				Object.defineProperty(clipboard, "writeText", { configurable: true, value: originalWrite });
 			}
-			const keyboardCopy = root.querySelector<HTMLElement>('[data-mica-action="copy-text"]');
+			// Responsive packing may move a specific copy action behind the
+			// overflow button as fonts and Chromium layout metrics change. Test
+			// the keyboard contract through a copy strip's currently reachable
+			// control instead of focusing a direct button that may be hidden.
+			const keyboardStrip = Array.from(
+				root.querySelectorAll<HTMLElement>(".mica-region-tools [data-mica-action-strip]"),
+			).find((candidate) =>
+				(candidate.dataset.micaActionStrip ?? "").split(" ").some((id) => id.startsWith("copy-")),
+			);
+			const keyboardCopy = Array.from(keyboardStrip?.querySelectorAll<HTMLElement>("button") ?? []).find(
+				(candidate) => {
+					const action = candidate.dataset.micaAction ?? "";
+					const overflow = (candidate.dataset.micaOverflowActions ?? "").split(" ");
+					return (
+						(action.startsWith("copy-") || overflow.some((id) => id.startsWith("copy-"))) &&
+						!(candidate as HTMLButtonElement).disabled &&
+						getComputedStyle(candidate).display !== "none" &&
+						getComputedStyle(candidate).visibility !== "hidden"
+					);
+				},
+			);
 			keyboardCopy?.focus();
 			// The toolbar intentionally fades in; wait past that visual transition
 			// before asserting the keyboard-revealed state.
-			await new Promise((resolve) => window.setTimeout(resolve, 160));
+			await new Promise((resolve) => window.setTimeout(resolve, 250));
 			const keyboardTools = keyboardCopy?.closest<HTMLElement>(".mica-region-tools");
+			const keyboardStyle = keyboardTools ? getComputedStyle(keyboardTools) : null;
 			return {
 				kinds,
 				outputs,
@@ -591,9 +1001,13 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 				sourceUnchanged: view.editor.getValue() === before,
 				activeUnchanged: (root.querySelector(".mica-tab-btn.is-active")?.textContent ?? "") === activeBefore,
 				editors: root.querySelectorAll(".mica-mdeditor").length,
-				keyboardVisible:
-					Boolean(keyboardCopy && document.activeElement === keyboardCopy) &&
-					Boolean(keyboardTools && getComputedStyle(keyboardTools).opacity === "1"),
+				keyboardState: {
+					found: Boolean(keyboardCopy),
+					active: Boolean(keyboardCopy && document.activeElement === keyboardCopy),
+					focusWithin: Boolean(keyboardTools?.matches(":focus-within")),
+					opacity: Number.parseFloat(keyboardStyle?.opacity ?? "0"),
+					pointerEvents: keyboardStyle?.pointerEvents ?? "",
+				},
 			};
 		});
 
@@ -623,7 +1037,11 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		expect(result.sourceUnchanged).toBe(true);
 		expect(result.activeUnchanged).toBe(true);
 		expect(result.editors).toBe(0);
-		expect(result.keyboardVisible).toBe(true);
+		expect(result.keyboardState.found).toBe(true);
+		expect(result.keyboardState.active).toBe(true);
+		expect(result.keyboardState.focusWithin).toBe(true);
+		expect(result.keyboardState.opacity).toBeGreaterThanOrEqual(0.99);
+		expect(result.keyboardState.pointerEvents).toBe("auto");
 	});
 
 	it("shows all clipboard projection settings and copy controls in Reading view", async function () {
@@ -706,6 +1124,79 @@ describe("rendering canaries (plugin-owned hooks only)", function () {
 		await browser.executeObsidian(({ app }) => {
 			(app as unknown as { setting: { close(): void } }).setting.close();
 		});
+	});
+
+	it("customizes section actions through the settings composer", async function () {
+		const previous = await browser.executeObsidian(async ({ app }) => {
+			type Plugin = {
+				settings: { hiddenSectionActions: string[] };
+				refreshViews(): void;
+				saveSettings(): Promise<void>;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			const old = [...plugin.settings.hiddenSectionActions];
+			plugin.settings.hiddenSectionActions = [];
+			plugin.refreshViews();
+			await plugin.saveSettings();
+			const setting = (app as unknown as { setting: { open(): void; openTabById(id: string): void } }).setting;
+			setting.open();
+			setting.openTabById("mica");
+			return old;
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(() => {
+					const setting = Array.from(document.querySelectorAll<HTMLElement>(".setting-item")).find(
+						(item) => item.querySelector(".setting-item-name")?.textContent?.trim() === "Section actions",
+					);
+					return (
+						setting?.querySelectorAll(".mica-section-action-editor .mica-ribbon-pane").length === 2 &&
+						Array.from(setting.querySelectorAll(".mica-ribbon-item")).some(
+							(item) => item.textContent?.trim() === "Delete section",
+						)
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "the section action composer did not render" },
+		);
+		await browser.executeObsidian(() => {
+			const setting = Array.from(document.querySelectorAll<HTMLElement>(".setting-item")).find(
+				(item) => item.querySelector(".setting-item-name")?.textContent?.trim() === "Section actions",
+			)!;
+			Array.from(setting.querySelectorAll<HTMLButtonElement>(".mica-ribbon-item"))
+				.find((item) => item.textContent?.trim() === "Delete section")
+				?.click();
+			setting.querySelector<HTMLButtonElement>('[aria-label="Hide selected action"]')?.click();
+		});
+		await browser.waitUntil(
+			() =>
+				browser.executeObsidian(({ app }) => {
+					const plugin = (
+						app as unknown as {
+							plugins: { getPlugin(id: string): { settings: { hiddenSectionActions: string[] } } };
+						}
+					).plugins.getPlugin("mica");
+					const hiddenPane = document.querySelector(".mica-section-action-editor .mica-ribbon-pane");
+					return (
+						plugin.settings.hiddenSectionActions.includes("delete") &&
+						Array.from(hiddenPane?.querySelectorAll(".mica-ribbon-item") ?? []).some(
+							(item) => item.textContent?.trim() === "Delete section",
+						)
+					);
+				}),
+			{ timeout: 8000, timeoutMsg: "the composer did not hide and persist the selected action" },
+		);
+		await browser.executeObsidian(async ({ app }, old) => {
+			type Plugin = {
+				settings: { hiddenSectionActions: string[] };
+				refreshViews(): void;
+				saveSettings(): Promise<void>;
+			};
+			const plugin = (app as unknown as { plugins: { getPlugin(id: string): Plugin } }).plugins.getPlugin("mica");
+			plugin.settings.hiddenSectionActions = old;
+			plugin.refreshViews();
+			await plugin.saveSettings();
+			(app as unknown as { setting: { close(): void } }).setting.close();
+		}, previous);
 	});
 
 	it("deleting the last tab removes the whole group", async function () {

@@ -355,6 +355,9 @@ const mdHighlight = HighlightStyle.define([
 const micaEditorTheme = EditorView.theme({
 	"&": {
 		height: "100%",
+		maxHeight: "100%",
+		minHeight: "0",
+		overflow: "hidden",
 		backgroundColor: "transparent",
 		fontSize: "var(--font-text-size, 16px)",
 		color: "var(--text-normal)",
@@ -362,6 +365,7 @@ const micaEditorTheme = EditorView.theme({
 	"&.cm-focused": { outline: "none" },
 	".cm-scroller": {
 		overflow: "auto",
+		minHeight: "0",
 		lineHeight: "1.55",
 		fontFamily: "var(--font-text, sans-serif)",
 	},

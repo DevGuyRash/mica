@@ -5,9 +5,29 @@ export type VersionScopeKind = "block" | "tabs" | "tab" | "grid" | "cell" | "sec
 export interface VersionScope {
 	key: string;
 	kind: VersionScopeKind;
+	family: VersionScopeKind | "section-family";
 	path: number[];
+	parentKey: string | null;
 	ancestry: string[];
+	/** Case-folded, for matching. An authored title for containers; a leaf's
+	 * first content line otherwise. Only the former is safe to show as a name. */
 	label: string;
+	/** `label` as the user actually wrote it. Matching folds case; display must
+	 * not — a tab called "Main" is not called "main". */
+	title: string;
+	/** Ancestor titles as authored, parallel to `ancestry`. */
+	titleAncestry: string[];
+	container: boolean;
+	shape: string;
+	/** Position among siblings of the same *family*, which deliberately groups
+	 * convertible kinds so a code→callout conversion stays trackable. Range
+	 * selection spans these; they are not what a user counts. */
+	siblingOrdinal: number;
+	siblingCount: number;
+	/** Position among siblings of the same visible kind. "Code block (2 of 3)"
+	 * has to mean the third code block, not the third of a mixed run. */
+	kindOrdinal: number;
+	kindCount: number;
 	start: number;
 	end: number;
 	fingerprintStart: number;
@@ -28,6 +48,14 @@ export interface ScopeLocator {
 	fingerprintText: string;
 	previousText: string | null;
 	nextText: string | null;
+	/** Display-only, and deliberately the *origin* version's position: when an
+	 * element cannot be resolved in a target snapshot, where it was is the only
+	 * honest thing to name it by. Resolution never reads these. */
+	container: boolean;
+	title: string;
+	titleAncestry: string[];
+	kindOrdinal: number;
+	kindCount: number;
 }
 export interface ScopeIndex {
 	source: string;
@@ -35,11 +63,20 @@ export interface ScopeIndex {
 	byKey: Map<string, VersionScope>;
 	bySignature: Map<string, VersionScope[]>;
 	byCompatible: Map<string, VersionScope[]>;
+	byFamily: Map<string, VersionScope[]>;
+	byParentFamily: Map<string, VersionScope[]>;
 }
 export type ScopeResolution =
-	| { kind: "exact"; scope: VersionScope; evidence: "fingerprint" | "compatible" | "manual" }
-	| { kind: "ambiguous"; candidates: VersionScope[]; truncated: boolean }
-	| { kind: "missing" };
+	| {
+			kind: "exact";
+			scope: VersionScope;
+			evidence: "fingerprint" | "compatible" | "manual" | "transition";
+			details?: string[];
+			transitionStatus?: "unchanged" | "changed" | "converted" | "combined" | "split";
+			composite?: VersionScope[];
+	  }
+	| { kind: "ambiguous"; candidates: VersionScope[]; truncated: boolean; details?: string[] }
+	| { kind: "missing"; disposition?: "added" | "removed" | "unmatched"; details?: string[] };
 
 const CONTAINER_KINDS = new Set<VersionScopeKind>(["tabs", "tab", "grid", "cell", "section"]);
 const MAX_COMPATIBLE_CANDIDATES = 64;
@@ -56,6 +93,15 @@ export function scopeKey(kind: VersionScopeKind, path: readonly number[], region
 	return `${kind}:${path.join(".")}${region ? `:${region[0]}-${region[1]}` : ""}`;
 }
 
+/** Canonical compound keys shared by index construction and consumers. */
+export function scopeSignatureKey(kind: VersionScopeKind, signature: string): string {
+	return JSON.stringify([kind, signature]);
+}
+
+export function scopeParentFamilyKey(parentKey: string | null, family: VersionScope["family"]): string {
+	return JSON.stringify([parentKey, family]);
+}
+
 export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 	if (source.length > MAX_SCOPE_INDEX_CODE_UNITS) throw new ScopeIndexTooLargeError(source.length);
 	const rangeHash = rollingRangeHasher(source);
@@ -63,8 +109,11 @@ export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 	const add = (
 		kind: VersionScopeKind,
 		path: number[],
+		parentKey: string | null,
 		ancestry: string[],
+		titleAncestry: string[],
 		label: string,
+		shape: string,
 		start: number,
 		end: number,
 		region?: [number, number],
@@ -74,9 +123,22 @@ export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 		scopes.push({
 			key: scopeKey(kind, path, region),
 			kind,
+			family: scopeFamily(kind),
 			path: [...path],
+			parentKey,
 			ancestry: [...ancestry],
+			titleAncestry: [...titleAncestry],
 			label: normalizeLabel(label),
+			title: displayTitle(label),
+			// A region marks a leaf unit carved out of a run of leaves; containers
+			// and the block root own a whole node and pass none. Only those carry
+			// an authored title, so this is what makes `label` safe to display.
+			container: region === undefined,
+			shape,
+			siblingOrdinal: 0,
+			siblingCount: 1,
+			kindOrdinal: 0,
+			kindCount: 1,
 			start,
 			end,
 			fingerprintStart,
@@ -88,11 +150,13 @@ export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 			nextKey: null,
 		});
 	};
-	add("block", [], [], "Block", 0, source.length);
+	add("block", [], null, [], [], "Block", "block", 0, source.length);
 	const walk = (
 		nodes: readonly MicaNode[],
 		parentPath: number[],
+		parentScopeKey: string,
 		ancestry: string[],
+		titleAncestry: string[],
 		offset: number,
 		insideLogicalSection = false,
 	): number => {
@@ -114,10 +178,18 @@ export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 					// Markdown body must not become a second scope with the same bytes;
 					// nested callouts/code remain independently inspectable.
 					if (!(insideLogicalSection && kind === "section")) {
-						add(kind, parentPath, ancestry, sectionLabel(unit.text, kind), unitStart, unitEnd, [
-							startIndex + unit.start,
-							startIndex + unit.end,
-						]);
+						add(
+							kind,
+							parentPath,
+							parentScopeKey,
+							ancestry,
+							titleAncestry,
+							sectionLabel(unit.text, kind),
+							`${scopeFamily(kind)}:${unit.text.split(/\r?\n/).length}`,
+							unitStart,
+							unitEnd,
+							[startIndex + unit.start, startIndex + unit.end],
+						);
 					}
 					local += unit.text.length;
 				}
@@ -128,11 +200,15 @@ export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 			const path = [...parentPath, index];
 			const kind = CONTAINER_KINDS.has(node.name as VersionScopeKind) ? (node.name as VersionScopeKind) : null;
 			const ownLabel = normalizeLabel(node.title) || node.name;
+			const ownTitle = displayTitle(node.title) || node.name;
+			const ownKey = kind ? scopeKey(kind, path) : parentScopeKey;
 			cursor += node.open_line.length;
 			cursor = walk(
 				node.children,
 				path,
+				ownKey,
 				[...ancestry, `${node.name}:${ownLabel}`],
+				[...titleAncestry, ownTitle],
 				cursor,
 				insideLogicalSection || node.name === "section",
 			);
@@ -140,37 +216,65 @@ export function buildScopeIndexFromCst(source: string, cst: Cst): ScopeIndex {
 			if (kind) {
 				const contentStart = start + node.open_line.length;
 				const contentEnd = cursor - node.close_line.length;
-				add(kind, path, ancestry, ownLabel, start, cursor, undefined, [contentStart, contentEnd]);
+				add(
+					kind,
+					path,
+					parentScopeKey,
+					ancestry,
+					titleAncestry,
+					node.title.trim() || node.name,
+					containerShape(node),
+					start,
+					cursor,
+					undefined,
+					[contentStart, contentEnd],
+				);
 			}
 			index++;
 		}
 		return cursor;
 	};
-	walk(cst.children, [], [], 0);
+	walk(cst.children, [], "block:", [], [], 0);
 
 	// Traversal emits each sibling group in source order. Link neighbors in one
 	// pass instead of sorting, preserving O(source + nodes) construction.
-	const lastSibling = new Map<string, VersionScope>();
+	const siblingGroups = new Map<string, VersionScope[]>();
+	const kindGroups = new Map<string, VersionScope[]>();
 	for (const scope of scopes) {
-		const group = tupleKey(scope.kind, "", scope.ancestry);
-		const previous = lastSibling.get(group);
-		if (previous) {
-			scope.previousSignature = previous.signature;
-			scope.previousKey = previous.key;
-			previous.nextSignature = scope.signature;
-			previous.nextKey = scope.key;
+		if (!scope.parentKey) continue;
+		pushIndex(siblingGroups, scopeParentFamilyKey(scope.parentKey, scope.family), scope);
+		pushIndex(kindGroups, JSON.stringify([scope.parentKey, scope.kind]), scope);
+	}
+	for (const peers of kindGroups.values())
+		for (const [ordinal, scope] of peers.entries()) {
+			scope.kindOrdinal = ordinal;
+			scope.kindCount = peers.length;
 		}
-		lastSibling.set(group, scope);
+	for (const siblings of siblingGroups.values()) {
+		for (const [ordinal, scope] of siblings.entries()) {
+			scope.siblingOrdinal = ordinal;
+			scope.siblingCount = siblings.length;
+			const previous = siblings[ordinal - 1];
+			const next = siblings[ordinal + 1];
+			scope.previousSignature = previous?.signature ?? null;
+			scope.previousKey = previous?.key ?? null;
+			scope.nextSignature = next?.signature ?? null;
+			scope.nextKey = next?.key ?? null;
+		}
 	}
 	const byKey = new Map<string, VersionScope>();
 	const bySignature = new Map<string, VersionScope[]>();
 	const byCompatible = new Map<string, VersionScope[]>();
+	const byFamily = new Map<string, VersionScope[]>();
+	const byParentFamily = new Map<string, VersionScope[]>();
 	for (const scope of scopes) {
 		byKey.set(scope.key, scope);
-		pushIndex(bySignature, signatureKey(scope.kind, scope.signature), scope);
+		pushIndex(bySignature, scopeSignatureKey(scope.kind, scope.signature), scope);
 		pushIndex(byCompatible, compatibleKey(scope), scope);
+		pushIndex(byFamily, scope.family, scope);
+		pushIndex(byParentFamily, scopeParentFamilyKey(scope.parentKey, scope.family), scope);
 	}
-	return { source, scopes, byKey, bySignature, byCompatible };
+	return { source, scopes, byKey, bySignature, byCompatible, byFamily, byParentFamily };
 }
 
 export function locatorFor(scope: VersionScope, index: ScopeIndex): ScopeLocator {
@@ -184,6 +288,11 @@ export function locatorFor(scope: VersionScope, index: ScopeIndex): ScopeLocator
 		fingerprintText: scopeFingerprint(index, scope),
 		previousText: scope.previousKey ? scopeFingerprint(index, index.byKey.get(scope.previousKey)!) : null,
 		nextText: scope.nextKey ? scopeFingerprint(index, index.byKey.get(scope.nextKey)!) : null,
+		container: scope.container,
+		title: scope.title,
+		titleAncestry: [...scope.titleAncestry],
+		kindOrdinal: scope.kindOrdinal,
+		kindCount: scope.kindCount,
 	};
 }
 
@@ -194,7 +303,7 @@ export function resolveScope(index: ScopeIndex, locator: ScopeLocator, manualKey
 	}
 	const exact: VersionScope[] = [];
 	let exactTruncated = false;
-	for (const candidate of index.bySignature.get(signatureKey(locator.kind, locator.signature)) ?? []) {
+	for (const candidate of index.bySignature.get(scopeSignatureKey(locator.kind, locator.signature)) ?? []) {
 		if (scopeFingerprint(index, candidate) !== locator.fingerprintText) continue;
 		if (exact.length < MAX_COMPATIBLE_CANDIDATES) exact.push(candidate);
 		else {
@@ -229,9 +338,42 @@ export function resolveScope(index: ScopeIndex, locator: ScopeLocator, manualKey
 	return { kind: "missing" };
 }
 
-export function scopeBreadcrumb(scope: Pick<VersionScope, "ancestry" | "kind" | "label">): string[] {
-	if (scope.kind === "block") return ["Block"];
-	return ["Block", ...scope.ancestry.map((part) => part.replace(/^\w+:/, "")), scope.label || kindLabel(scope.kind)];
+/** Fields any element name needs, satisfied by both a resolved scope and the
+ * locator that stands in for one when resolution failed. */
+export type ScopeDisplayFields = Pick<
+	VersionScope,
+	"ancestry" | "titleAncestry" | "kind" | "title" | "container" | "kindOrdinal" | "kindCount"
+>;
+
+/**
+ * How an element is identified to a user: where it lives, what it is, and which
+ * one — `Block › tabs › test › Code block (2 of 3)`.
+ *
+ * The final segment is an authored container title where one exists and the
+ * element's type otherwise, because a leaf's `label` is its first content line:
+ * neither stable across edits nor able to tell siblings apart. The ordinal is
+ * what actually separates three code blocks inside the same tab.
+ */
+export function scopeDisplayName(scope: ScopeDisplayFields): string {
+	if (scope.kind === "block") return "Block";
+	// `ancestry` supplies each ancestor's kind; `titleAncestry` supplies the
+	// title as authored. They are built together and stay index-aligned.
+	const trail = ["Block", ...scope.ancestry.map((part, index) => ancestrySegment(part, scope.titleAncestry[index]))];
+	trail.push(titleOf(scope.kind, scope.title, scope.container));
+	const name = trail.join(" › ");
+	return scope.kindCount > 1 ? `${name} (${scope.kindOrdinal + 1} of ${scope.kindCount})` : name;
+}
+
+/** Ancestry entries are `kind:label`; an untitled container echoes its own node
+ * name back as the label. Both render as the container's type. */
+function ancestrySegment(part: string, title: string | undefined): string {
+	const split = part.indexOf(":");
+	const kind = (split < 0 ? part : part.slice(0, split)) as VersionScopeKind;
+	return titleOf(kind, title ?? "", true);
+}
+
+function titleOf(kind: VersionScopeKind, title: string, container: boolean): string {
+	return container && title && title.toLocaleLowerCase() !== kind ? title : kindLabel(kind);
 }
 
 export function scopeSource(index: ScopeIndex, scope: Pick<VersionScope, "start" | "end">): string {
@@ -248,19 +390,28 @@ export function scopeFingerprint(
 function compatibleKey(scope: Pick<VersionScope, "kind" | "label" | "ancestry">): string {
 	return tupleKey(scope.kind, scope.label, scope.ancestry);
 }
-function tupleKey(kind: VersionScopeKind, label: string, ancestry: readonly string[]): string {
+function tupleKey(kind: string, label: string, ancestry: readonly string[]): string {
 	return JSON.stringify([kind, label, ancestry]);
-}
-function signatureKey(kind: VersionScopeKind, signature: string): string {
-	return JSON.stringify([kind, signature]);
 }
 function pushIndex(map: Map<string, VersionScope[]>, key: string, value: VersionScope): void {
 	const values = map.get(key);
 	if (values) values.push(value);
 	else map.set(key, [value]);
 }
+/** Trimmed and whitespace-collapsed, but never case-folded: this is the text
+ * the user typed. */
+function displayTitle(label: string): string {
+	return label.trim().replace(/\s+/g, " ");
+}
 function normalizeLabel(label: string): string {
 	return label.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+function scopeFamily(kind: VersionScopeKind): VersionScopeKind | "section-family" {
+	return kind === "section" || kind === "callout" || kind === "code" ? "section-family" : kind;
+}
+function containerShape(node: Extract<MicaNode, { kind: "container" }>): string {
+	const children = node.children.map((child) => (child.kind === "container" ? child.name : "leaf"));
+	return `${node.name}:${children.length}:${children.slice(0, 32).join(",")}`;
 }
 function sectionLabel(text: string, kind: VersionScopeKind): string {
 	const line = text.split(/\r?\n/, 1)[0].trim();

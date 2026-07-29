@@ -11,6 +11,7 @@ import {
 	scanBlocksView,
 	type BlockState,
 	type LedgerEvent,
+	type VersionMeta,
 } from "../wasm/bridge";
 import {
 	appendEvents,
@@ -18,6 +19,7 @@ import {
 	LedgerAppendError,
 	ledgerAppendProvesNoCommit,
 	readLedger,
+	readObject,
 	requireObject,
 	sidecarDir,
 	writeManifest,
@@ -37,6 +39,30 @@ export interface MutateOptions {
 	snapshotBefore?: boolean;
 	/** Persist the result after a successful note change. */
 	snapshotAfter?: boolean;
+}
+
+/** Exact outcome of one explicit snapshot request. Metadata maintenance is
+ * reported separately so callers never describe it as a saved version. */
+export interface SnapshotResult {
+	readonly blockIds: readonly string[];
+	readonly versionsCreated: number;
+	readonly metadataChanged: boolean;
+}
+
+export interface SnapshotEvent extends SnapshotResult {
+	readonly file: TFile;
+}
+
+export type RevertToHeadResult =
+	| { readonly status: "reverted"; readonly recoveryHash: string; readonly headHash: string }
+	| { readonly status: "unchanged" }
+	| { readonly status: "no-head" }
+	| { readonly status: "unavailable"; readonly reason: string };
+
+export type VersionRef = string | { readonly versionId?: string; readonly hash?: string };
+
+interface SnapshotCommit extends SnapshotResult {
+	readonly doc: string;
 }
 
 type SnapshotDebouncer = Debouncer<[TFile], void>;
@@ -63,7 +89,7 @@ export class VersionEngine {
 	private readonly debouncers = new Map<string, SnapshotDebouncer>();
 	private readonly queues = new Map<TFile, Promise<void>>();
 	private readonly stateReads = new Map<TFile, Promise<Record<string, BlockState>>>();
-	private readonly listeners = new Set<(file: TFile) => void>();
+	private readonly listeners = new Set<(event: SnapshotEvent) => void>();
 	private disposed = false;
 
 	constructor(private readonly plugin: MicaPlugin) {}
@@ -100,7 +126,7 @@ export class VersionEngine {
 				doc = await vault.process(file, (current) => ensureIds(current));
 				blocks = scanBlocksView(doc);
 			}
-			if (await this.refreshManifestIfPresent(vault, file, blocks)) this.emitSnapshot(file);
+			if (await this.refreshManifestIfPresent(vault, file, blocks)) this.emitSnapshot(file, [], true);
 		});
 	}
 
@@ -125,17 +151,23 @@ export class VersionEngine {
 	}
 
 	/** Subscribe to "a file was just snapshotted" (chips refresh on this). */
-	onSnapshot(cb: (file: TFile) => void): () => void {
+	onSnapshot(cb: (event: SnapshotEvent) => void): () => void {
 		if (this.disposed) return () => undefined;
 		this.listeners.add(cb);
 		return () => this.listeners.delete(cb);
 	}
 
-	private emitSnapshot(file: TFile): void {
+	private emitSnapshot(file: TFile, blockIds: readonly string[] = [], metadataChanged = false): void {
 		if (this.disposed) return;
+		const event: SnapshotEvent = {
+			file,
+			blockIds,
+			versionsCreated: blockIds.length,
+			metadataChanged,
+		};
 		for (const cb of this.listeners) {
 			try {
-				cb(file);
+				cb(event);
 			} catch (error) {
 				console.error("Mica: snapshot listener failed", error);
 			}
@@ -157,6 +189,15 @@ export class VersionEngine {
 		return read;
 	}
 
+	/** Queue a new fold after any already-started read. Use this at interaction
+	 * boundaries that freeze a durable metadata snapshot (for example a search
+	 * index) so a just-completed label/visibility event cannot be hidden by a
+	 * coalesced pre-event read. */
+	freshState(file: TFile): Promise<Record<string, BlockState>> {
+		this.stateReads.delete(file);
+		return this.state(file);
+	}
+
 	private async readState(file: TFile): Promise<Record<string, BlockState>> {
 		return foldLedger(await readLedger(this.plugin.app.vault, file));
 	}
@@ -173,7 +214,7 @@ export class VersionEngine {
 			// returns the exact note it observed, which remains the conflict guard for
 			// the subsequent Vault.process mutation. Restore/branch explicitly force
 			// their pre-images in their dedicated methods below.
-			const snapshottedDoc = options.snapshotBefore ? await this.doSnapshot(file, false) : null;
+			const snapshottedDoc = options.snapshotBefore ? (await this.doSnapshot(file, false)).doc : null;
 			let result: T | undefined;
 			let ran = false;
 			let changed = false;
@@ -280,15 +321,27 @@ export class VersionEngine {
 
 			const doc = await vault.read(file);
 			await this.refreshManifestIfPresent(vault, file, scanBlocksView(doc));
-			this.emitSnapshot(file);
+			this.emitSnapshot(file, [], true);
 		});
 	}
 
-	/** Explicit snapshots reject on failure; background callers catch separately. */
-	snapshot(file: TFile, force = false): Promise<void> {
+	/** Explicit note-wide snapshots reject on failure and report only versions
+	 * that reached the authoritative ledger. */
+	snapshot(file: TFile, force = false): Promise<SnapshotResult> {
 		this.stateReads.delete(file);
 		return this.enqueue(file, async () => {
-			await this.doSnapshot(file, force);
+			const result = await this.doSnapshot(file, force);
+			return snapshotResult(result);
+		});
+	}
+
+	/** Snapshot exactly one stable block. Other dirty blocks in the note remain
+	 * untouched; shared identity/manifest maintenance may still run. */
+	snapshotBlock(file: TFile, blockId: string, force = true): Promise<SnapshotResult> {
+		this.stateReads.delete(file);
+		return this.enqueue(file, async () => {
+			const result = await this.doSnapshot(file, force, blockId);
+			return snapshotResult(result);
 		});
 	}
 
@@ -319,7 +372,15 @@ export class VersionEngine {
 		}, 0);
 	}
 
-	private async doSnapshot(file: TFile, force: boolean, attempt = 0, historyCommitted = false): Promise<string> {
+	private async doSnapshot(
+		file: TFile,
+		force: boolean,
+		onlyBlockId?: string,
+		attempt = 0,
+		historyCommitted = false,
+		created = new Set<string>(),
+		metadataChangedBefore = false,
+	): Promise<SnapshotCommit> {
 		let committed = historyCommitted;
 		try {
 			const vault = this.plugin.app.vault;
@@ -336,6 +397,19 @@ export class VersionEngine {
 				blocks = scanBlocksView(doc);
 			}
 			const events: LedgerEvent[] = [];
+			if (onlyBlockId) {
+				let targets = 0;
+				for (const block of blocks) {
+					if (block.closed && block.id === onlyBlockId) targets += 1;
+				}
+				if (targets !== 1) {
+					throw new Error(
+						targets
+							? `Mica: block id is ambiguous: ${onlyBlockId}`
+							: `Mica: block not found: ${onlyBlockId}`,
+					);
+				}
+			}
 			if (hasClosedBlock) {
 				this.requireUniqueSnapshotIds(blocks);
 				if (blocks.some((block) => block.id && block.closed)) {
@@ -343,36 +417,66 @@ export class VersionEngine {
 					for (const block of blocks) {
 						const id = block.id;
 						if (!id || !block.closed) continue;
+						if (onlyBlockId && id !== onlyBlockId) continue;
 						const content = doc.slice(block.content_start, block.content_end);
 						const hash = hashContent(content);
-						const head = state[id]?.head ?? null;
+						const blockState = state[id];
+						const head = blockState?.rawHead ?? blockState?.head ?? null;
 						if (head === hash) continue;
 						if (!force && !(await this.contentChanged(vault, file, content, head))) continue;
 						await ensureSidecar(vault, file);
 						await writeObject(vault, file, hash, content);
 						const ts = Date.now();
-						events.push({ type: "add-version", eid: newId(), ts, block: id, hash });
-						events.push({ type: "set-head", eid: newId(), ts, block: id, hash });
+						const checkpointId = newId();
+						events.push({
+							type: "checkpoint",
+							eid: checkpointId,
+							ts,
+							block: id,
+							hash,
+							parent: blockState?.rawHeadVersionId ?? blockState?.headVersionId ?? null,
+							cause: "snapshot",
+						});
+						events.push({ type: "move-head", eid: newId(), ts, block: id, target: checkpointId });
 					}
 				}
 			}
 			const manifestChanged = await this.refreshManifestIfPresent(vault, file, blocks);
+			const anyMetadataChanged = metadataChangedBefore || manifestChanged;
 			// Sidecar/object writes are asynchronous and cannot share a transaction
 			// with the note. Re-read immediately before committing the authoritative
 			// head events; if Sync/editor changed the note meanwhile, discard these
 			// prepared events and snapshot the fresh document instead.
 			const beforeCommit = await vault.read(file);
-			if (beforeCommit !== doc) return this.retrySnapshot(file, force, attempt, committed);
+			if (beforeCommit !== doc)
+				return this.retrySnapshot(file, force, onlyBlockId, attempt, committed, created, anyMetadataChanged);
 			if (!events.length) {
-				if (manifestChanged) this.emitSnapshot(file);
-				return doc;
+				const blockIds = [...created];
+				if (anyMetadataChanged || blockIds.length) this.emitSnapshot(file, blockIds, anyMetadataChanged);
+				return {
+					doc,
+					blockIds,
+					versionsCreated: created.size,
+					metadataChanged: anyMetadataChanged,
+				};
 			}
 			await appendEvents(vault, file, events);
 			committed = true;
+			for (let i = 0; i < events.length; i += 2) {
+				const event = events[i];
+				if (event?.type === "add-version" || event?.type === "checkpoint") created.add(event.block);
+			}
 			const afterCommit = await vault.read(file);
-			if (afterCommit !== doc) return this.retrySnapshot(file, force, attempt, committed);
-			this.emitSnapshot(file);
-			return doc;
+			if (afterCommit !== doc)
+				return this.retrySnapshot(file, force, onlyBlockId, attempt, committed, created, anyMetadataChanged);
+			const blockIds = [...created];
+			this.emitSnapshot(file, blockIds, anyMetadataChanged);
+			return {
+				doc,
+				blockIds,
+				versionsCreated: blockIds.length,
+				metadataChanged: anyMetadataChanged,
+			};
 		} catch (error) {
 			if (error instanceof SnapshotFailure) throw error;
 			const rollbackSafe =
@@ -401,11 +505,19 @@ export class VersionEngine {
 		});
 	}
 
-	private retrySnapshot(file: TFile, force: boolean, attempt: number, historyCommitted: boolean): Promise<string> {
+	private retrySnapshot(
+		file: TFile,
+		force: boolean,
+		onlyBlockId: string | undefined,
+		attempt: number,
+		historyCommitted: boolean,
+		created: Set<string>,
+		metadataChanged: boolean,
+	): Promise<SnapshotCommit> {
 		if (attempt >= 2) {
 			return Promise.reject(new Error(`Mica: ${file.path} kept changing while versions were being saved; retry`));
 		}
-		return this.doSnapshot(file, force, attempt + 1, historyCommitted);
+		return this.doSnapshot(file, force, onlyBlockId, attempt + 1, historyCommitted, created, metadataChanged);
 	}
 
 	private requireUniqueSnapshotIds(blocks: ReturnType<typeof scanBlocksView>): void {
@@ -430,58 +542,258 @@ export class VersionEngine {
 		return contentSignature(headContent) !== signature;
 	}
 
-	/** Revert to a verified version or reject without claiming success. */
-	revert(file: TFile, blockId: string, hash: string): Promise<void> {
+	/** Revert to a verified checkpoint or reject without claiming success. */
+	revert(file: TFile, blockId: string, ref: VersionRef): Promise<void> {
+		return this.resetHeadToVersion(file, blockId, ref).then(() => undefined);
+	}
+
+	/** Move HEAD to an existing checkpoint after preserving the live pre-image. */
+	resetHeadToVersion(file: TFile, blockId: string, ref: VersionRef): Promise<boolean> {
 		this.stateReads.delete(file);
 		return this.enqueue(file, async () => {
-			await this.requireVersion(file, blockId, hash);
-			const content = await requireObject(this.plugin.app.vault, file, hash);
-			const snapshottedDoc = await this.doSnapshot(file, true);
+			const selected = await this.resolveVersion(file, blockId, ref);
+			const content = await requireObject(this.plugin.app.vault, file, selected.hash);
+			const liveDoc = await this.plugin.app.vault.read(file);
+			const live = this.uniqueLiveBlock(liveDoc, blockId);
+			const state = (await this.readState(file))[blockId];
+			if (
+				liveDoc.slice(live.content_start, live.content_end) === content &&
+				(state?.rawHeadVersionId ?? state?.headVersionId) === selected.versionId
+			)
+				return false;
+			const snapshottedDoc = (await this.doSnapshot(file, true, blockId)).doc;
 			const replacement = await this.replaceUniqueBlock(file, blockId, content, snapshottedDoc);
 			await this.commitLiveVersion(file, blockId, content, replacement, [
-				{ type: "set-head", eid: newId(), ts: Date.now(), block: blockId, hash },
+				{ type: "move-head", eid: newId(), ts: Date.now(), block: blockId, target: selected.versionId },
 			]);
+			return true;
+		});
+	}
+
+	/** Restore older bytes as a new forward checkpoint parented to current HEAD. */
+	restoreAsCheckpoint(file: TFile, blockId: string, ref: VersionRef): Promise<boolean> {
+		this.stateReads.delete(file);
+		return this.enqueue(file, async () => {
+			const selected = await this.resolveVersion(file, blockId, ref);
+			const content = await requireObject(this.plugin.app.vault, file, selected.hash);
+			const liveDoc = await this.plugin.app.vault.read(file);
+			const live = this.uniqueLiveBlock(liveDoc, blockId);
+			if (liveDoc.slice(live.content_start, live.content_end) === content) return false;
+			const snapshottedDoc = (await this.doSnapshot(file, true, blockId)).doc;
+			const current = (await this.readState(file))[blockId];
+			const parent = current?.rawHeadVersionId ?? current?.headVersionId ?? null;
+			const checkpointId = newId();
+			const replacement = await this.replaceUniqueBlock(file, blockId, content, snapshottedDoc);
+			const ts = Date.now();
+			await this.commitLiveVersion(file, blockId, content, replacement, [
+				{
+					type: "checkpoint",
+					eid: checkpointId,
+					ts,
+					block: blockId,
+					hash: selected.hash,
+					parent,
+					source: selected.versionId,
+					cause: "restore",
+				},
+				{ type: "move-head", eid: newId(), ts, block: blockId, target: checkpointId },
+			]);
+			return true;
+		});
+	}
+
+	/** Append reversible visibility changes for exact logical checkpoints. */
+	setVersionsVisible(file: TFile, blockId: string, versionIds: readonly string[], visible: boolean): Promise<number> {
+		this.stateReads.delete(file);
+		return this.enqueue(file, async () => {
+			const requested = new Set(versionIds);
+			if (!requested.size) return 0;
+			const state = (await this.readState(file))[blockId];
+			const visibilityById = new Map<string, boolean>();
+			for (const version of state?.versions ?? []) {
+				if (requested.has(version.versionId)) visibilityById.set(version.versionId, version.visible);
+			}
+			for (const version of state?.removedVersions ?? []) {
+				if (requested.has(version.versionId)) visibilityById.set(version.versionId, version.visible);
+			}
+			const changed: string[] = [];
+			for (const id of requested) {
+				const current = visibilityById.get(id);
+				if (current === undefined) throw new Error(`Mica: version ${id} does not belong to block ${blockId}`);
+				if (current !== visible) changed.push(id);
+			}
+			if (!changed.length) return 0;
+			const ts = Date.now();
+			await appendEvents(
+				this.plugin.app.vault,
+				file,
+				changed.map((target) => ({
+					type: "version-visibility" as const,
+					eid: newId(),
+					ts,
+					block: blockId,
+					target,
+					visible,
+				})),
+			);
+			this.emitSnapshot(file, [], true);
+			return changed.length;
+		});
+	}
+
+	restoreRemovedVersions(file: TFile, blockId: string, versionIds: readonly string[]): Promise<number> {
+		return this.setVersionsVisible(file, blockId, versionIds, true);
+	}
+
+	/** Restore the current block body to its stored HEAD. The discarded working
+	 * copy is force-snapshotted first, so the operation remains recoverable. */
+	revertToHead(file: TFile, blockId: string): Promise<RevertToHeadResult> {
+		this.stateReads.delete(file);
+		return this.enqueue(file, async () => {
+			const state = (await this.readState(file))[blockId];
+			const head = state?.rawHead ?? state?.head;
+			if (!head) return { status: "no-head" };
+			let headContent: string | null;
+			try {
+				headContent = await readObject(this.plugin.app.vault, file, head);
+			} catch (error) {
+				return {
+					status: "unavailable",
+					reason: error instanceof Error ? error.message : String(error),
+				};
+			}
+			if (headContent === null) {
+				return { status: "unavailable", reason: `Mica: missing history object ${head} for ${file.path}` };
+			}
+			const liveDoc = await this.plugin.app.vault.read(file);
+			const live = this.uniqueLiveBlock(liveDoc, blockId);
+			const current = liveDoc.slice(live.content_start, live.content_end);
+			if (current === headContent) return { status: "unchanged" };
+			const recoveryHash = hashContent(current);
+			const snapshottedDoc = (await this.doSnapshot(file, true, blockId)).doc;
+			const replacement = await this.replaceUniqueBlock(file, blockId, headContent, snapshottedDoc);
+			await this.commitLiveVersion(file, blockId, headContent, replacement, [
+				{
+					type: "move-head",
+					eid: newId(),
+					ts: Date.now(),
+					block: blockId,
+					target: state?.rawHeadVersionId ?? state?.headVersionId ?? null,
+				},
+			]);
+			return { status: "reverted", recoveryHash, headHash: head };
+		});
+	}
+
+	/** Recreate a dirty working copy without moving the durable HEAD pointer.
+	 * Used only to undo Revert-to-HEAD after proving both the ledger head and
+	 * live content still equal the head that operation restored. */
+	restoreWorkingCopy(file: TFile, blockId: string, recoveryHash: string, expectedHead: string): Promise<void> {
+		this.stateReads.delete(file);
+		return this.enqueue(file, async () => {
+			const state = (await this.readState(file))[blockId];
+			if ((state?.rawHead ?? state?.head) !== expectedHead) {
+				throw new Error("Mica: HEAD changed after the revert; the working copy was left unchanged");
+			}
+			const hasRecovery =
+				(state?.versions ?? []).some((version) => version.hash === recoveryHash) ||
+				(state?.removedVersions ?? []).some((version) => version.hash === recoveryHash);
+			if (!hasRecovery) {
+				throw new Error("Mica: the recovery checkpoint no longer belongs to this block");
+			}
+			const [recovery, headContent] = await Promise.all([
+				requireObject(this.plugin.app.vault, file, recoveryHash),
+				requireObject(this.plugin.app.vault, file, expectedHead),
+			]);
+			await this.plugin.app.vault.process(file, (doc) => {
+				const live = this.uniqueLiveBlock(doc, blockId);
+				if (doc.slice(live.content_start, live.content_end) !== headContent) {
+					throw new Error("Mica: the block changed after the revert; the working copy was left unchanged");
+				}
+				const next = replaceBlockContent(doc, blockId, recovery);
+				if (next === null) throw new Error(`Mica: cannot restore working copy for ${blockId}`);
+				return next;
+			});
+			this.emitSnapshot(file, [], true);
 		});
 	}
 
 	/** Create a verified branch version and make it the live/head content. */
-	editVersion(file: TFile, blockId: string, parentHash: string, content: string): Promise<void> {
+	editVersion(file: TFile, blockId: string, parentRef: VersionRef, content: string): Promise<void> {
 		this.stateReads.delete(file);
 		return this.enqueue(file, async () => {
-			await this.requireVersion(file, blockId, parentHash);
-			await requireObject(this.plugin.app.vault, file, parentHash);
+			const parent = await this.resolveVersion(file, blockId, parentRef);
+			await requireObject(this.plugin.app.vault, file, parent.hash);
 			this.uniqueLiveBlock(await this.plugin.app.vault.read(file), blockId);
-			const snapshottedDoc = await this.doSnapshot(file, true);
+			const snapshottedDoc = (await this.doSnapshot(file, true, blockId)).doc;
 			const hash = hashContent(content);
 			await ensureSidecar(this.plugin.app.vault, file);
 			await writeObject(this.plugin.app.vault, file, hash, content);
 			const replacement = await this.replaceUniqueBlock(file, blockId, content, snapshottedDoc);
 			const ts = Date.now();
+			const checkpointId = newId();
 			await this.commitLiveVersion(file, blockId, content, replacement, [
-				{ type: "add-version", eid: newId(), ts, block: blockId, hash, parent: parentHash },
-				{ type: "set-head", eid: newId(), ts, block: blockId, hash },
+				{
+					type: "checkpoint",
+					eid: checkpointId,
+					ts,
+					block: blockId,
+					hash,
+					parent: parent.versionId,
+					cause: "branch-edit",
+				},
+				{ type: "move-head", eid: newId(), ts, block: blockId, target: checkpointId },
 			]);
 		});
 	}
 
 	/** Append a label only after proving the version/object is valid. */
-	labelVersion(file: TFile, blockId: string, hash: string, label: string): Promise<void> {
+	labelVersion(file: TFile, blockId: string, ref: VersionRef, label: string): Promise<void> {
 		this.stateReads.delete(file);
 		return this.enqueue(file, async () => {
-			await this.requireVersion(file, blockId, hash);
-			await requireObject(this.plugin.app.vault, file, hash);
+			const version = await this.resolveVersion(file, blockId, ref);
+			await requireObject(this.plugin.app.vault, file, version.hash);
 			await appendEvents(this.plugin.app.vault, file, [
-				{ type: "label", eid: newId(), ts: Date.now(), block: blockId, hash, label: label || null },
+				{
+					type: "version-label",
+					eid: newId(),
+					ts: Date.now(),
+					block: blockId,
+					target: version.versionId,
+					label: label || null,
+				},
 			]);
-			this.emitSnapshot(file);
+			this.emitSnapshot(file, [], true);
 		});
 	}
 
-	private async requireVersion(file: TFile, blockId: string, hash: string): Promise<void> {
+	private async resolveVersion(file: TFile, blockId: string, ref: VersionRef): Promise<VersionMeta> {
 		const block = (await this.readState(file))[blockId];
-		if (!block?.versions.some((version) => version.hash === hash)) {
-			throw new Error(`Mica: version ${hash} does not belong to block ${blockId}`);
+		const collections = [block?.versions ?? [], block?.removedVersions ?? []] as const;
+		const versionId = typeof ref === "string" ? ref : ref.versionId;
+		if (versionId) {
+			for (const versions of collections) {
+				for (const version of versions) if (version.versionId === versionId) return version;
+			}
+			// Public string selectors prefer stable checkpoint identity, then
+			// retain the legacy exact-hash contract when no such id exists.
+			if (typeof ref !== "string")
+				throw new Error(`Mica: version ${versionId} does not belong to block ${blockId}`);
 		}
+		const hash = typeof ref === "string" ? ref : ref.hash;
+		let match: VersionMeta | null = null;
+		if (hash) {
+			for (const versions of collections) {
+				for (const version of versions) {
+					if (version.hash !== hash) continue;
+					if (match)
+						throw new Error(`Mica: content hash ${hash} identifies multiple checkpoints; use versionId`);
+					match = version;
+				}
+			}
+		}
+		if (match) return match;
+		throw new Error(`Mica: version ${hash ?? "(missing reference)"} does not belong to block ${blockId}`);
 	}
 
 	private async replaceUniqueBlock(
@@ -533,18 +845,23 @@ export class VersionEngine {
 		}
 		// A write racing immediately after the append is preserved, then captured
 		// as the newest head so the ledger cannot remain stale.
-		if ((await vault.read(file)) !== replacement.committed) await this.doSnapshot(file, true);
-		this.emitSnapshot(file);
+		if ((await vault.read(file)) !== replacement.committed) await this.doSnapshot(file, true, blockId);
+		this.emitSnapshot(
+			file,
+			events.some((event) => event.type === "add-version" || event.type === "checkpoint") ? [blockId] : [],
+			true,
+		);
 	}
 
 	private uniqueLiveBlock(doc: string, blockId: string): ReturnType<typeof scanBlocksView>[number] {
-		const matches = scanBlocksView(doc).filter((block) => block.closed && block.id === blockId);
-		if (matches.length !== 1) {
-			throw new Error(
-				matches.length ? `Mica: block id is ambiguous: ${blockId}` : `Mica: block not found: ${blockId}`,
-			);
+		let match: ReturnType<typeof scanBlocksView>[number] | null = null;
+		for (const block of scanBlocksView(doc)) {
+			if (!block.closed || block.id !== blockId) continue;
+			if (match) throw new Error(`Mica: block id is ambiguous: ${blockId}`);
+			match = block;
 		}
-		return matches[0];
+		if (!match) throw new Error(`Mica: block not found: ${blockId}`);
+		return match;
 	}
 
 	private async rollbackBlock(
@@ -557,9 +874,13 @@ export class VersionEngine {
 		const expected = normalizeBlockContent(attempted);
 		try {
 			await this.plugin.app.vault.process(file, (doc) => {
-				const matches = scanBlocksView(doc).filter((block) => block.closed && block.id === blockId);
-				if (matches.length !== 1) throw new Error("block disappeared or became ambiguous");
-				const block = matches[0];
+				let block: ReturnType<typeof scanBlocksView>[number] | null = null;
+				for (const candidate of scanBlocksView(doc)) {
+					if (!candidate.closed || candidate.id !== blockId) continue;
+					if (block) throw new Error("block disappeared or became ambiguous");
+					block = candidate;
+				}
+				if (!block) throw new Error("block disappeared or became ambiguous");
 				if (doc.slice(block.content_start, block.content_end) !== expected) {
 					throw new Error("block changed again before rollback");
 				}
@@ -579,4 +900,12 @@ export class VersionEngine {
 
 function normalizeBlockContent(content: string): string {
 	return content.length > 0 && !content.endsWith("\n") ? `${content}\n` : content;
+}
+
+function snapshotResult(commit: SnapshotCommit): SnapshotResult {
+	return {
+		blockIds: commit.blockIds,
+		versionsCreated: commit.versionsCreated,
+		metadataChanged: commit.metadataChanged,
+	};
 }

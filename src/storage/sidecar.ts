@@ -320,11 +320,24 @@ function sameManifest(text: string, expected: SidecarManifest): boolean {
 		return (
 			value.noteId === expected.noteId &&
 			value.path === expected.path &&
-			JSON.stringify(value.blocks) === JSON.stringify(expected.blocks)
+			sameOrderedStringRecord(value.blocks, expected.blocks)
 		);
 	} catch {
 		return false;
 	}
+}
+
+function sameOrderedStringRecord(actual: unknown, expected: Readonly<Record<string, string>>): boolean {
+	if (typeof actual !== "object" || actual === null || Array.isArray(actual)) return false;
+	const actualRecord = actual as Record<string, unknown>;
+	const actualKeys = Object.keys(actualRecord);
+	const expectedKeys = Object.keys(expected);
+	if (actualKeys.length !== expectedKeys.length) return false;
+	for (let index = 0; index < actualKeys.length; index++) {
+		const key = actualKeys[index];
+		if (key !== expectedKeys[index] || actualRecord[key] !== expected[key]) return false;
+	}
+	return true;
 }
 
 export type LedgerCommitState = "none" | "partial" | "unknown" | "conflict";

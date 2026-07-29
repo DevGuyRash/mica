@@ -203,7 +203,17 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	const key = draftKey(target);
 	const setDraft = (text: string | null): void => {
 		if (!ctx.ui) return;
-		ctx.ui.draft = text === null ? null : { key, text, expected: target.original };
+		ctx.ui.draft =
+			text === null
+				? null
+				: {
+						key,
+						text,
+						expected: target.original,
+						path: [...target.path],
+						start: target.start,
+						end: target.end,
+					};
 	};
 
 	// --- Action bar (TOP, fixed): Save · Cancel · spacer · tools · Expand ----
@@ -391,7 +401,18 @@ export function openLightboxFor(ctx: RenderCtx, target: RegionTarget, initial?: 
 		initial: initial ?? ctx.ui?.draft?.text ?? target.original,
 		sourcePath: ctx.sourcePath,
 		onDraft: (v) => {
-			if (ctx.ui) ctx.ui.draft = v === target.original ? null : { key, text: v, expected: target.original };
+			if (ctx.ui)
+				ctx.ui.draft =
+					v === target.original
+						? null
+						: {
+								key,
+								text: v,
+								expected: target.original,
+								path: [...target.path],
+								start: target.start,
+								end: target.end,
+							};
 		},
 		onDiscard: () => {
 			if (ctx.ui?.draft?.key === key) ctx.ui.draft = null;
@@ -414,7 +435,15 @@ export function openLightboxFor(ctx: RenderCtx, target: RegionTarget, initial?: 
 			if (accepted) {
 				return true;
 			}
-			if (ctx.ui) ctx.ui.draft = { key, text: value, expected: target.original };
+			if (ctx.ui)
+				ctx.ui.draft = {
+					key,
+					text: value,
+					expected: target.original,
+					path: [...target.path],
+					start: target.start,
+					end: target.end,
+				};
 			new Notice("Mica: the section changed while you were editing. Your draft is still open.");
 			return false;
 		},

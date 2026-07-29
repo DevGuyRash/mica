@@ -82,12 +82,33 @@ export class MicaApi {
 		return (await this.plugin.engine.state(this.note(notePath)))[blockId]?.versions ?? [];
 	}
 
-	async versionsSnapshot(notePath: string): Promise<void> {
-		await this.plugin.engine.snapshot(this.note(notePath));
+	async versionsRemoved(notePath: string, blockId: string): Promise<VersionMeta[]> {
+		return (await this.plugin.engine.state(this.note(notePath)))[blockId]?.removedVersions ?? [];
 	}
 
-	async versionsRevert(notePath: string, blockId: string, hash: string): Promise<void> {
-		await this.plugin.engine.revert(this.note(notePath), blockId, hash);
+	async versionsSnapshot(notePath: string): ReturnType<MicaPlugin["engine"]["snapshot"]> {
+		return this.plugin.engine.snapshot(this.note(notePath));
+	}
+
+	async versionsRevert(notePath: string, blockId: string, versionSelector: string): Promise<void> {
+		await this.plugin.engine.revert(this.note(notePath), blockId, versionSelector);
+	}
+
+	async versionsRestoreCheckpoint(notePath: string, blockId: string, versionId: string): Promise<boolean> {
+		return this.plugin.engine.restoreAsCheckpoint(this.note(notePath), blockId, { versionId });
+	}
+
+	async versionsResetHead(notePath: string, blockId: string, versionId: string): Promise<boolean> {
+		return this.plugin.engine.resetHeadToVersion(this.note(notePath), blockId, { versionId });
+	}
+
+	async versionsSetVisible(
+		notePath: string,
+		blockId: string,
+		versionIds: readonly string[],
+		visible: boolean,
+	): Promise<number> {
+		return this.plugin.engine.setVersionsVisible(this.note(notePath), blockId, versionIds, visible);
 	}
 
 	async versionsDiff(
@@ -116,13 +137,13 @@ export class MicaApi {
 		return [await requireObject(vault, file, baseHash), await requireObject(vault, file, otherHash)];
 	}
 
-	async versionsEdit(notePath: string, blockId: string, parentHash: string, content: string): Promise<void> {
-		await this.plugin.engine.editVersion(this.note(notePath), blockId, parentHash, content);
+	async versionsEdit(notePath: string, blockId: string, parentSelector: string, content: string): Promise<void> {
+		await this.plugin.engine.editVersion(this.note(notePath), blockId, parentSelector, content);
 	}
 
 	/** Label (or clear the label of) a stored version. */
-	async versionsLabel(notePath: string, blockId: string, hash: string, label: string): Promise<void> {
-		await this.plugin.engine.labelVersion(this.note(notePath), blockId, hash, label);
+	async versionsLabel(notePath: string, blockId: string, versionSelector: string, label: string): Promise<void> {
+		await this.plugin.engine.labelVersion(this.note(notePath), blockId, versionSelector, label);
 	}
 
 	/**
@@ -183,30 +204,35 @@ export class MicaApi {
 
 	// --- dispatch + file-bridge ------------------------------------------
 
-	private verbTable(): Record<string, (...args: string[]) => Promise<unknown>> {
-		return {
-			"block.source": (body, name?) => Promise.resolve(this.createBlockSource({ body, name })),
-			"block.list": (n) => this.blockList(n),
-			"block.read": (n, id) => this.blockRead(n, id),
-			"block.update": (n, id, c) => this.blockUpdate(n, id, c),
-			"versions.list": (n, id) => this.versionsList(n, id),
-			"versions.snapshot": (n) => this.versionsSnapshot(n),
-			"versions.revert": (n, id, h) => this.versionsRevert(n, id, h),
-			"versions.diff": (n, b, o, g) => this.versionsDiff(n, b, o, g),
-			"versions.patch": (n, b, o) => this.versionsPatch(n, b, o),
-			"versions.edit": (n, id, parent, c) => this.versionsEdit(n, id, parent, c),
-			"versions.label": (n, id, h, l) => this.versionsLabel(n, id, h, l ?? ""),
-			"block.apply": (n, id, op) => this.blockApply(n, id, JSON.parse(op) as StructOp),
-			"block.attr": (n, id, k, v) => this.blockSetAttr(n, id, k, v ?? null),
-			"migrate.scan": () => this.migrateScan(),
-			"migrate.run": (n?) => this.migrateRun(n),
-			prepare: (n) => this.prepare(n),
-			repair: () => this.repair(),
-		};
-	}
+	private readonly verbs: Record<string, (...args: string[]) => Promise<unknown>> = {
+		"block.source": (body, name?) => Promise.resolve(this.createBlockSource({ body, name })),
+		"block.list": (n) => this.blockList(n),
+		"block.read": (n, id) => this.blockRead(n, id),
+		"block.update": (n, id, c) => this.blockUpdate(n, id, c),
+		"versions.list": (n, id) => this.versionsList(n, id),
+		"versions.removed": (n, id) => this.versionsRemoved(n, id),
+		"versions.snapshot": (n) => this.versionsSnapshot(n),
+		"versions.revert": (n, id, h) => this.versionsRevert(n, id, h),
+		"versions.restore-checkpoint": (n, id, versionId) => this.versionsRestoreCheckpoint(n, id, versionId),
+		"versions.reset-head": (n, id, versionId) => this.versionsResetHead(n, id, versionId),
+		"versions.set-visible": (n, id, visible, ...versionIds) =>
+			this.versionsSetVisible(n, id, versionIds, visible === "true"),
+		"versions.visibility": (n, id, visible, ...versionIds) =>
+			this.versionsSetVisible(n, id, versionIds, visible === "true"),
+		"versions.diff": (n, b, o, g) => this.versionsDiff(n, b, o, g),
+		"versions.patch": (n, b, o) => this.versionsPatch(n, b, o),
+		"versions.edit": (n, id, parent, c) => this.versionsEdit(n, id, parent, c),
+		"versions.label": (n, id, h, l) => this.versionsLabel(n, id, h, l ?? ""),
+		"block.apply": (n, id, op) => this.blockApply(n, id, JSON.parse(op) as StructOp),
+		"block.attr": (n, id, k, v) => this.blockSetAttr(n, id, k, v ?? null),
+		"migrate.scan": () => this.migrateScan(),
+		"migrate.run": (n?) => this.migrateRun(n),
+		prepare: (n) => this.prepare(n),
+		repair: () => this.repair(),
+	};
 
 	async runInstruction(instruction: Instruction): Promise<unknown> {
-		const fn = this.verbTable()[instruction.verb];
+		const fn = this.verbs[instruction.verb];
 		if (!fn) throw new Error(`Unknown verb: ${instruction.verb}`);
 		return fn(...(instruction.args ?? []));
 	}
@@ -259,10 +285,14 @@ export class MicaApi {
 }
 
 function uniqueBlock(doc: string, blockId: string): ReturnType<typeof scanBlocksView>[number] {
-	const matches = scanBlocksView(doc).filter((block) => block.closed && block.id === blockId);
-	if (matches.length === 0) throw new Error(`Block not found: ${blockId}`);
-	if (matches.length > 1) throw new Error(`Block id is ambiguous: ${blockId}; run Mica repair first`);
-	return matches[0];
+	let match: ReturnType<typeof scanBlocksView>[number] | null = null;
+	for (const block of scanBlocksView(doc)) {
+		if (!block.closed || block.id !== blockId) continue;
+		if (match) throw new Error(`Block id is ambiguous: ${blockId}; run Mica repair first`);
+		match = block;
+	}
+	if (!match) throw new Error(`Block not found: ${blockId}`);
+	return match;
 }
 
 function parseDiffGranularity(value: string): DiffGranularity {

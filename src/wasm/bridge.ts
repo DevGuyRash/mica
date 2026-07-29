@@ -263,18 +263,56 @@ export type LedgerEvent =
 			hash: string;
 	  }
 	| { type: "set-head"; eid: string; ts: number; block: string; hash: string }
-	| { type: "label"; eid: string; ts: number; block: string; hash: string; label?: string | null };
+	| { type: "label"; eid: string; ts: number; block: string; hash: string; label?: string | null }
+	| {
+			type: "checkpoint";
+			eid: string;
+			ts: number;
+			block: string;
+			hash: string;
+			parent?: string | null;
+			source?: string | null;
+			cause?: string | null;
+	  }
+	| { type: "move-head"; eid: string; ts: number; block: string; target?: string | null }
+	| {
+			type: "version-label";
+			eid: string;
+			ts: number;
+			block: string;
+			target: string;
+			label?: string | null;
+	  }
+	| {
+			type: "version-visibility";
+			eid: string;
+			ts: number;
+			block: string;
+			target: string;
+			visible: boolean;
+	  };
 
 export interface VersionMeta {
+	versionId: string;
 	hash: string;
 	ts: number;
 	label: string | null;
 	parent: string | null;
+	parentVersionId: string | null;
+	effectiveParentVersionId: string | null;
+	lineageRoot: boolean;
+	sourceVersionId: string | null;
+	cause: string | null;
+	visible: boolean;
 }
 
 export interface BlockState {
 	head: string | null;
+	headVersionId: string | null;
+	rawHead: string | null;
+	rawHeadVersionId: string | null;
 	versions: VersionMeta[];
+	removedVersions: VersionMeta[];
 }
 
 /** Fold an append-only ledger into current per-block state, keyed by block id. */
@@ -351,6 +389,7 @@ export interface MigratedVersion {
 export interface MigratedBlock {
 	id: string;
 	name: string | null;
+	tab_names: string[];
 	versions: MigratedVersion[];
 }
 

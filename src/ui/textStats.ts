@@ -54,14 +54,27 @@ function countWords(text: string): number {
 		for (const part of words.segment(text)) if (part.isWordLike) count++;
 		return count;
 	}
-	return (text.match(/[\p{L}\p{N}]+(?:['\u2019-][\p{L}\p{N}]+)*/gu) ?? []).length;
+	let count = 0;
+	const fallback = /[\p{L}\p{N}]+(?:['\u2019-][\p{L}\p{N}]+)*/gu;
+	while (fallback.exec(text)) count++;
+	return count;
 }
 
 function countVisibleGraphemes(text: string): number {
 	if (!text) return 0;
 	if (graphemes) {
 		let count = 0;
-		for (const part of graphemes.segment(text)) if (!/^[\r\n]+$/.test(part.segment)) count++;
+		for (const part of graphemes.segment(text)) {
+			let lineEnding = true;
+			for (let i = 0; i < part.segment.length; i++) {
+				const code = part.segment.charCodeAt(i);
+				if (code !== 10 && code !== 13) {
+					lineEnding = false;
+					break;
+				}
+			}
+			if (!lineEnding) count++;
+		}
 		return count;
 	}
 	let count = 0;

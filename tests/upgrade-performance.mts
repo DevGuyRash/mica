@@ -5,6 +5,9 @@ import { copyNodes } from "../src/ui/copyPayload.ts";
 import { SEARCH_WORKER_SOURCE } from "../src/ui/searchWorker.ts";
 import { visibleTextStats } from "../src/ui/textStats.ts";
 import { buildScopeIndexFromCst } from "../src/ui/versionScopeCore.ts";
+import { versionLineageRoute } from "../src/ui/versionLineage.ts";
+import { buildScopeTransition } from "../src/ui/versionTransition.ts";
+import { searchVersions } from "../src/ui/versionWindow.ts";
 import type { Cst, MicaNode } from "../src/wasm/bridge.ts";
 
 const MIB = 1024 * 1024;
@@ -13,6 +16,9 @@ const TIME_BUDGET_MS = {
 	statistics: 2_000,
 	copy: 1_250,
 	scopeIndex: 1_750,
+	scopeTransition: 2_500,
+	versionSearch: 500,
+	lineage: 250,
 } as const;
 const HEAP_BUDGET_BYTES = 192 * MIB;
 const ARRAY_BUFFER_BUDGET_BYTES = 64 * MIB;
@@ -118,18 +124,18 @@ assert.ok(copyLarge.value.length > largeDocument.length);
 assert.match(copyLarge.value, /^\s*1 │ ```mica/);
 assertNearLinear("copy", copySmall.elapsed, copyLarge.elapsed);
 
-function scopeFixture(count: number): { source: string; cst: Cst } {
+function scopeFixture(count: number, revision = "original"): { source: string; cst: Cst } {
 	const children: MicaNode[] = [];
 	let source = "";
 	for (let index = 0; index < count; index++) {
-		const open = ":::section\n";
-		const body = `Scope ${index} ${"y".repeat(2028)}\n`;
+		const open = `:::section Scope ${index}\n`;
+		const body = `Scope ${index}\n${revision} ${"y".repeat(2016)}\n`;
 		const close = ":::\n";
 		source += open + body + close;
 		children.push({
 			kind: "container",
 			name: "section",
-			title: "",
+			title: `Scope ${index}`,
 			open_line: open,
 			close_line: close,
 			children: [{ kind: "leaf", text: body }],
@@ -151,6 +157,59 @@ assert.ok(
 );
 assertNearLinear("scope indexing", scopeSmall.elapsed, scopeLarge.elapsed);
 
+const changedSmall = scopeFixture(256, "revised");
+const changedLarge = scopeFixture(512, "revised");
+const changedSmallIndex = buildScopeIndexFromCst(changedSmall.source, changedSmall.cst);
+const changedLargeIndex = buildScopeIndexFromCst(changedLarge.source, changedLarge.cst);
+const transitionSmall = timed("scopeTransition", () => buildScopeTransition(scopeSmall.value, changedSmallIndex));
+const transitionLarge = timed("scopeTransition", () => buildScopeTransition(scopeLarge.value, changedLargeIndex));
+assert.equal(transitionLarge.value.forward.size, 513);
+assert.equal(transitionLarge.value.reverse.size, 513);
+assertNearLinear("scope transition matching", transitionSmall.elapsed, transitionLarge.elapsed);
+
+const duplicateScopeFixture = (count: number): { source: string; cst: Cst } => {
+	const node = (): MicaNode => ({
+		kind: "container",
+		name: "section",
+		title: "",
+		open_line: ":::section\n",
+		close_line: ":::\n",
+		children: [{ kind: "leaf", text: "identical empty-like body\n" }],
+	});
+	const children = Array.from({ length: count }, node);
+	return { source: ":::section\nidentical empty-like body\n:::\n".repeat(count), cst: { children } };
+};
+const duplicateSmallFixture = duplicateScopeFixture(200);
+const duplicateLargeFixture = duplicateScopeFixture(400);
+const duplicateSmallIndex = buildScopeIndexFromCst(duplicateSmallFixture.source, duplicateSmallFixture.cst);
+const duplicateLargeIndex = buildScopeIndexFromCst(duplicateLargeFixture.source, duplicateLargeFixture.cst);
+const duplicateSmall = timed("scopeTransition", () => buildScopeTransition(duplicateSmallIndex, duplicateSmallIndex));
+const duplicateLarge = timed("scopeTransition", () => buildScopeTransition(duplicateLargeIndex, duplicateLargeIndex));
+assertNearLinear("duplicate-heavy scope matching", duplicateSmall.elapsed, duplicateLarge.elapsed);
+
+const versionRows = Array.from({ length: 10_000 }, (_, index) => ({
+	n: index + 1,
+	meta: {
+		versionId: `version-${index}`,
+		hash: `b3:${index.toString(16).padStart(64, "0")}`,
+		label: index % 3 ? `Routine snapshot ${index}` : `Milestone ${index}`,
+		ts: Date.UTC(2025, 0, 1) + index,
+		effectiveParentVersionId: index ? `version-${index - 1}` : null,
+	},
+}));
+const versionSearch = timed("versionSearch", () => searchVersions(versionRows, "milestone", 100));
+assert.equal(versionSearch.value.length, 100);
+const lineage = timed("lineage", () =>
+	versionLineageRoute(
+		versionRows.slice(0, 201),
+		versionRows[0].meta.versionId,
+		versionRows[200].meta.versionId,
+		"working",
+		null,
+	),
+);
+assert.equal(lineage.value.length, 200);
+
 const memoryAfter = process.memoryUsage();
 const heapDelta = Math.max(0, memoryAfter.heapUsed - memoryBefore.heapUsed);
 const arrayBufferDelta = Math.max(0, memoryAfter.arrayBuffers - memoryBefore.arrayBuffers);
@@ -166,5 +225,8 @@ console.log(
 		`statistics ${statisticsSmall.elapsed.toFixed(1)}→${statisticsLarge.elapsed.toFixed(1)} ms; ` +
 		`copy ${copySmall.elapsed.toFixed(1)}→${copyLarge.elapsed.toFixed(1)} ms; ` +
 		`scope ${scopeSmall.elapsed.toFixed(1)}→${scopeLarge.elapsed.toFixed(1)} ms; ` +
+		`transition ${transitionSmall.elapsed.toFixed(1)}→${transitionLarge.elapsed.toFixed(1)} ms; ` +
+		`duplicates ${duplicateSmall.elapsed.toFixed(1)}→${duplicateLarge.elapsed.toFixed(1)} ms; ` +
+		`version search ${versionSearch.elapsed.toFixed(1)} ms; lineage ${lineage.elapsed.toFixed(1)} ms; ` +
 		`heap ${(heapDelta / MIB).toFixed(1)} MiB, ArrayBuffers ${(arrayBufferDelta / MIB).toFixed(1)} MiB`,
 );

@@ -83,7 +83,7 @@ interface Slot {
 	};
 	/** Grid column metadata (cell drags): the flow indices of this column's
 	 *  cells plus the same-column landing indices above/below this gap. */
-	col?: { up?: number; down?: number; members: number[] };
+	col?: { up?: number; down?: number; members: ReadonlySet<number> };
 }
 
 /** A drop container captured once per drag. Structure (elements, indices,
@@ -98,6 +98,11 @@ interface SlotContainer {
 	horizontal: boolean;
 	depth: number;
 	kids: { el: HTMLElement; idx: number }[];
+	/** Live viewport bounds, refreshed only when slot geometry is recomputed. */
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
 }
 
 /** A same-block compatible target captured once when a gesture starts. Its
@@ -111,6 +116,17 @@ interface CombineCandidate {
 	right: number;
 	bottom: number;
 }
+
+interface SpringTarget {
+	el: HTMLElement;
+	button: HTMLElement;
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
+}
+
+type SpringBuckets = Map<number, Map<number, SpringTarget[]>>;
 
 /** Block roots expose their op hook for cross-block drops. */
 export interface CrossBlockMove {
@@ -153,8 +169,9 @@ interface ActiveDrag {
 	offsetX: number;
 	offsetY: number;
 	markedEl: HTMLElement | null;
-	springTargets: Map<string, Array<{ el: HTMLElement; left: number; top: number; right: number; bottom: number }>>;
-	springEl: HTMLElement | null;
+	springChips: readonly SpringTarget[];
+	springTargets: SpringBuckets;
+	springTarget: SpringTarget | null;
 	springTimer: number | null;
 	scrollRaf: number | null;
 	cleanup: () => void;
@@ -169,38 +186,51 @@ const COMBINE_STATIONARY_PX = 6;
 
 const parsePath = (s: string | undefined): number[] => (s ? s.split(".").map(Number) : []);
 
-function springTargets(scope: Element) {
-	const buckets = new Map<
-		string,
-		Array<{ el: HTMLElement; left: number; top: number; right: number; bottom: number }>
-	>();
+function collectSpringChips(scope: Element): SpringTarget[] {
+	const chips: SpringTarget[] = [];
 	for (const el of scope.querySelectorAll<HTMLElement>(".mica-tab-chip")) {
-		const rect = el.getBoundingClientRect();
-		const target = { el, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+		const button = el.querySelector<HTMLElement>(".mica-tab-btn");
+		if (button) chips.push({ el, button, left: 0, top: 0, right: 0, bottom: 0 });
+	}
+	return chips;
+}
+
+function springTargets(chips: readonly SpringTarget[]): SpringBuckets {
+	const buckets: SpringBuckets = new Map();
+	for (const target of chips) {
+		if (target.button.classList.contains("is-active")) continue;
+		const rect = target.el.getBoundingClientRect();
+		target.left = rect.left;
+		target.top = rect.top;
+		target.right = rect.right;
+		target.bottom = rect.bottom;
 		for (let y = Math.floor(rect.top / SPRING_BUCKET_PX); y <= Math.floor(rect.bottom / SPRING_BUCKET_PX); y++) {
+			let row = buckets.get(y);
+			if (!row) {
+				row = new Map();
+				buckets.set(y, row);
+			}
 			for (
 				let x = Math.floor(rect.left / SPRING_BUCKET_PX);
 				x <= Math.floor(rect.right / SPRING_BUCKET_PX);
 				x++
 			) {
-				const key = `${x}:${y}`;
-				const entries = buckets.get(key) ?? [];
+				const entries = row.get(x) ?? [];
 				entries.push(target);
-				buckets.set(key, entries);
+				row.set(x, entries);
 			}
 		}
 	}
 	return buckets;
 }
 
-function springTargetAt(d: ActiveDrag, x: number, y: number): HTMLElement | null {
-	const key = `${Math.floor(x / SPRING_BUCKET_PX)}:${Math.floor(y / SPRING_BUCKET_PX)}`;
-	return (
-		d.springTargets
-			.get(key)
-			?.find((target) => x >= target.left && x <= target.right && y >= target.top && y <= target.bottom)?.el ??
-		null
-	);
+function springTargetAt(d: ActiveDrag, x: number, y: number): SpringTarget | null {
+	const candidates = d.springTargets.get(Math.floor(y / SPRING_BUCKET_PX))?.get(Math.floor(x / SPRING_BUCKET_PX));
+	if (!candidates) return null;
+	for (const target of candidates) {
+		if (x >= target.left && x <= target.right && y >= target.top && y <= target.bottom) return target;
+	}
+	return null;
 }
 
 /**
@@ -285,6 +315,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 	const containers = collectContainers(root, spec);
 	const combineTargets = collectCombineTargets(root, item, spec);
 	const springScope = root.closest(".cm-editor, .markdown-preview-view") ?? root;
+	const springChips = collectSpringChips(springScope);
 	refreshCombineTargets(combineTargets);
 	active = {
 		spec,
@@ -306,10 +337,11 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		pointerX: e.clientX,
 		pointerY: e.clientY,
 		markedEl: null,
-		springTargets: springTargets(springScope),
+		springChips,
+		springTargets: springTargets(springChips),
 		offsetX: e.clientX - rect.left,
 		offsetY: e.clientY - rect.top,
-		springEl: null,
+		springTarget: null,
 		springTimer: null,
 		scrollRaf: null,
 		cleanup: () => {
@@ -317,7 +349,6 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 			ghost.remove();
 			indicator.remove();
 			item.removeClass("mica-combine-arming", "mica-combine-ready");
-			document.querySelector(".mica-spring-pending")?.removeClass("mica-spring-pending");
 			item.removeClass("mica-dragging");
 			document.body.removeClass("mica-dnd-active");
 		},
@@ -381,6 +412,10 @@ function collectContainers(root: HTMLElement, spec: DragSpec): SlotContainer[] {
 				horizontal: el.dataset.axis === "x",
 				depth: parentPath.length,
 				kids,
+				left: 0,
+				top: 0,
+				right: 0,
+				bottom: 0,
 			});
 		}
 	}
@@ -459,7 +494,7 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLE
 		}
 		if (pk !== fromParentKey) return false;
 		// Same-column gaps hugging the dragged cell (column semantics).
-		if (s.col?.members.includes(fromIdx)) {
+		if (s.col?.members.has(fromIdx)) {
 			return s.col.up === fromIdx || s.col.down === fromIdx;
 		}
 		return s.index === fromIdx || s.index === fromIdx + 1;
@@ -468,16 +503,12 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLE
 	for (const entry of cached) {
 		const { parentPath, len, kids } = entry;
 		const rect = entry.el.getBoundingClientRect();
+		entry.left = rect.left;
+		entry.top = rect.top;
+		entry.right = rect.right;
+		entry.bottom = rect.bottom;
 		if (rect.width === 0 || rect.height === 0) continue; // hidden panel
-		const container = {
-			el: entry.el,
-			rootEl: entry.rootEl,
-			left: rect.left,
-			top: rect.top,
-			right: rect.right,
-			bottom: rect.bottom,
-			depth: entry.depth,
-		};
+		const container = entry;
 
 		if (!kids.length) {
 			// Empty container: one "into" slot covering it.
@@ -520,9 +551,14 @@ function computeSlots(cached: SlotContainer[], spec: DragSpec, sourceRoot: HTMLE
 			}
 			for (const list of columns.values()) {
 				list.sort((a, b) => a.r.top - b.r.top);
-				const colLeft = Math.min(...list.map((c) => c.r.left));
-				const colWidth = Math.max(...list.map((c) => c.r.width));
-				const members = list.map((c) => c.idx);
+				let colLeft = Number.POSITIVE_INFINITY;
+				let colWidth = 0;
+				const members = new Set<number>();
+				for (const cell of list) {
+					colLeft = Math.min(colLeft, cell.r.left);
+					colWidth = Math.max(colWidth, cell.r.width);
+					members.add(cell.idx);
+				}
 				// Before each cell in the column…
 				for (let i = 0; i < list.length; i++) {
 					const gapTop = i === 0 ? list[i].r.top - 5 : (list[i - 1].r.bottom + list[i].r.top) / 2;
@@ -659,8 +695,14 @@ function dragMove(e: PointerEvent): void {
 	let deepestUnder = -1;
 	for (const c of d.containers) {
 		if (c.depth <= deepestUnder) continue;
-		const r = c.el.getBoundingClientRect();
-		if (r.width > 0 && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom)
+		if (
+			c.right > c.left &&
+			c.bottom > c.top &&
+			e.clientX >= c.left &&
+			e.clientX <= c.right &&
+			e.clientY >= c.top &&
+			e.clientY <= c.bottom
+		)
 			deepestUnder = c.depth;
 	}
 	// Home zone: inside the item's own starting bounds the drag is inert —
@@ -696,7 +738,7 @@ function dragMove(e: PointerEvent): void {
 	// the complete interval before combine becomes ready.
 	springLoad(e);
 	const scrolling = autoScroll(e);
-	updateCombineIntent(d, e.clientX, e.clientY, scrolling || d.springEl !== null);
+	updateCombineIntent(d, e.clientX, e.clientY, scrolling || d.springTarget !== null);
 	paintDropIndicator(d);
 
 	// Content drags (regions, groups): outline the receiving container so an
@@ -768,7 +810,7 @@ function updateCombineIntent(d: ActiveDrag, x: number, y: number, blocked: boole
 function promoteCombine(d: ActiveDrag, candidate: CombineCandidate): void {
 	d.combineTimer = null;
 	if (active !== d || d.combineArmed !== candidate) return;
-	if (d.scrollRaf !== null || d.springEl !== null) {
+	if (d.scrollRaf !== null || d.springTarget !== null) {
 		clearCombineIntent(d);
 		paintDropIndicator(d);
 		return;
@@ -828,38 +870,28 @@ function paintDropIndicator(d: ActiveDrag): void {
 function springLoad(e: PointerEvent): void {
 	const d = active;
 	if (!d) return;
-	// Action/grip chrome may overlap a narrow tab (especially with touch-sized
-	// targets). Walk the hit-test stack so transparent sibling chrome cannot
-	// mask the tab underneath and defeat spring-loading.
-	const under = document.elementsFromPoint(e.clientX, e.clientY).find((element) => element.closest(".mica-tab-chip"));
-	// Match the whole chip (its button is a child, so `closest` from the chip's
-	// padding or its ✕ affordance would miss a `.mica-tab-btn` selector).
-	// Coarse/narrow layouts can omit the tab from the hit-test stack beneath
-	// drag chrome. Fall back to numeric bounds cached when geometry changes, so
-	// this path performs no layout reads on pointermove.
-	const chipWrap =
-		(under as HTMLElement | null)?.closest<HTMLElement>(".mica-tab-chip") ??
-		springTargetAt(d, e.clientX, e.clientY) ??
-		null;
-	const chip = chipWrap?.querySelector<HTMLElement>(".mica-tab-btn:not(.is-active)") ?? null;
-	if (chip === d.springEl) return;
+	// Tab membership and buttons are captured at gesture start; pointer frames
+	// only perform a bucket lookup against geometry refreshed after layout can
+	// move. This also keeps overlapped narrow/touch chips reachable.
+	const target = springTargetAt(d, e.clientX, e.clientY);
+	if (target === d.springTarget) return;
 	clearCombineIntent(d);
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
 	d.springTimer = null;
-	document.querySelector(".mica-spring-pending")?.removeClass("mica-spring-pending");
-	d.springEl = chip;
-	if (!chip) return;
-	chipWrap?.addClass("mica-spring-pending");
+	d.springTarget?.el.removeClass("mica-spring-pending");
+	d.springTarget = target;
+	if (!target) return;
+	target.el.addClass("mica-spring-pending");
 	d.springTimer = window.setTimeout(() => {
-		chipWrap?.removeClass("mica-spring-pending");
-		if (!active || active.springEl !== chip) return;
+		target.el.removeClass("mica-spring-pending");
+		if (!active || active.springTarget !== target) return;
 		active.springTimer = null;
 		clearCombineIntent(active);
-		chip.click();
+		target.button.click();
 		// The panel switch re-lays-out the block — recompute geometry.
 		active.slots = computeSlots(active.containers, active.spec, active.sourceRoot);
-		const springScope = active.sourceRoot.closest(".cm-editor, .markdown-preview-view") ?? active.sourceRoot;
-		active.springTargets = springTargets(springScope);
+		active.springTargets = springTargets(active.springChips);
+		active.springTarget = null;
 		refreshCombineTargets(active.combineTargets);
 	}, SPRING_LOAD_DELAY_MS);
 }
@@ -890,8 +922,7 @@ function autoScroll(e: PointerEvent): boolean {
 				return;
 			}
 			d.slots = computeSlots(d.containers, d.spec, d.sourceRoot);
-			const springScope = d.sourceRoot.closest(".cm-editor, .markdown-preview-view") ?? d.sourceRoot;
-			d.springTargets = springTargets(springScope);
+			d.springTargets = springTargets(d.springChips);
 			refreshCombineTargets(d.combineTargets);
 			d.scrollRaf = window.requestAnimationFrame(step);
 		};
@@ -906,6 +937,7 @@ function finishDrag(commit: boolean): void {
 	if (!d) return;
 	const combineTarget =
 		commit && d.combineReady?.el.isConnected && d.sourceRoot.isConnected ? d.combineReady.spec : null;
+	d.springTarget?.el.removeClass("mica-spring-pending");
 	active = null;
 	if (d.springTimer !== null) window.clearTimeout(d.springTimer);
 	if (d.scrollRaf !== null) window.cancelAnimationFrame(d.scrollRaf);
@@ -991,7 +1023,7 @@ function finishDrag(commit: boolean): void {
 	const fromIdx = d.spec.fromPath[d.spec.fromPath.length - 1] ?? -1;
 	const fromParent = d.spec.fromPath.slice(0, -1).join(".");
 	const col = d.current.col;
-	if (d.spec.kind === "cell" && col?.members.includes(fromIdx) && d.current.parentPath.join(".") === fromParent) {
+	if (d.spec.kind === "cell" && col?.members.has(fromIdx) && d.current.parentPath.join(".") === fromParent) {
 		// Same column: bubble within it — the other columns must not move.
 		const to = col.up !== undefined && fromIdx > col.up ? col.up : col.down;
 		if (to !== undefined && to !== fromIdx) {

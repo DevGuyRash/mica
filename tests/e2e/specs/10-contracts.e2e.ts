@@ -167,6 +167,187 @@ describe("runtime contracts (window.mica)", function () {
 		expect(branched).toBe("branched from v1\n");
 	});
 
+	it("uses stable selectors when distinct checkpoints share one content hash", async function () {
+		await createNote("DuplicateHashSelectors.md", "```mica id=duplicate-hash-selectors\none\n```\n");
+		const result = await browser.executeObsidian(async ({ app }) => {
+			const note = "DuplicateHashSelectors.md";
+			const blockId = "duplicate-hash-selectors";
+			await window.mica.versionsSnapshot(note);
+			await window.mica.blockUpdate(note, blockId, "two\n");
+			const [v1] = await window.mica.versionsList(note, blockId);
+			if (!v1) throw new Error("missing original selector fixture");
+			await window.mica.versionsRestoreCheckpoint(note, blockId, v1.versionId);
+			const duplicateHistory = await window.mica.versionsList(note, blockId);
+			const v3 = duplicateHistory.at(-1);
+			if (!v3 || v3.hash !== v1.hash || v3.versionId === v1.versionId)
+				throw new Error("failed to create distinct checkpoints with duplicate content");
+
+			const ambiguous: string[] = [];
+			for (const mutation of [
+				() => window.mica.versionsRevert(note, blockId, v1.hash),
+				() => window.mica.versionsEdit(note, blockId, v1.hash, "must not be committed\n"),
+				() => window.mica.versionsLabel(note, blockId, v1.hash, "must not be committed"),
+			]) {
+				try {
+					await mutation();
+				} catch (error) {
+					ambiguous.push(error instanceof Error ? error.message : String(error));
+				}
+			}
+
+			await window.mica.versionsLabel(note, blockId, v1.versionId, "original checkpoint");
+			await window.mica.versionsEdit(note, blockId, v3.versionId, "branched from duplicate\n");
+			const afterEdit = await window.mica.versionsList(note, blockId);
+			const branch = afterEdit.at(-1);
+			if (!branch) throw new Error("missing id-selected branch");
+			await window.mica.versionsRevert(note, blockId, v1.versionId);
+
+			const plugin = (
+				app as unknown as {
+					plugins: {
+						getPlugin(id: string): {
+							engine: {
+								state(
+									file: unknown,
+								): Promise<
+									Record<string, { rawHeadVersionId: string | null; headVersionId: string | null }>
+								>;
+							};
+						};
+					};
+				}
+			).plugins.getPlugin("mica");
+			const file = app.vault.getAbstractFileByPath(note);
+			const state = (await plugin.engine.state(file))[blockId];
+			const final = await window.mica.versionsList(note, blockId);
+			return {
+				ambiguous,
+				v1: v1.versionId,
+				v3: v3.versionId,
+				branchParent: branch.parentVersionId,
+				labels: final
+					.filter((version) => version.hash === v1.hash)
+					.map((version) => [version.versionId, version.label]),
+				head: state.rawHeadVersionId ?? state.headVersionId,
+				content: await window.mica.blockRead(note, blockId),
+			};
+		});
+
+		expect(result.ambiguous).toHaveLength(3);
+		expect(result.ambiguous.every((message) => message.includes("identifies multiple checkpoints"))).toBe(true);
+		expect(result.branchParent).toBe(result.v3);
+		expect(result.labels).toContainEqual([result.v1, "original checkpoint"]);
+		expect(result.labels).toContainEqual([result.v3, null]);
+		expect(result.head).toBe(result.v1);
+		expect(result.content).toBe("one\n");
+	});
+
+	it("keeps checkpoint identity across restore, timeline removal, and HEAD reset", async function () {
+		await createNote("CheckpointIdentity.md", "```mica id=checkpoint-identity\none\n```\n");
+		const result = await browser.executeObsidian(async ({ app }) => {
+			await window.mica.versionsSnapshot("CheckpointIdentity.md");
+			await window.mica.blockUpdate("CheckpointIdentity.md", "checkpoint-identity", "two\n");
+			const initial = await window.mica.versionsList("CheckpointIdentity.md", "checkpoint-identity");
+			if (initial.length !== 2) throw new Error(`expected two checkpoints, got ${initial.length}`);
+			const [v1, v2] = initial;
+
+			const removedHead = await window.mica.runInstruction({
+				verb: "versions.set-visible",
+				args: ["CheckpointIdentity.md", "checkpoint-identity", "false", v2.versionId],
+			});
+			const plugin = (
+				app as unknown as {
+					plugins: {
+						getPlugin(id: string): {
+							engine: {
+								state(file: unknown): Promise<
+									Record<
+										string,
+										{
+											headVersionId: string | null;
+											head: string | null;
+											versions: typeof initial;
+											removedVersions: typeof initial;
+										}
+									>
+								>;
+							};
+						};
+					};
+				}
+			).plugins.getPlugin("mica");
+			const file = app.vault.getAbstractFileByPath("CheckpointIdentity.md");
+			const hiddenState = (await plugin.engine.state(file))["checkpoint-identity"];
+			const liveWhileHidden = await window.mica.blockRead("CheckpointIdentity.md", "checkpoint-identity");
+			await window.mica.runInstruction({
+				verb: "versions.visibility",
+				args: ["CheckpointIdentity.md", "checkpoint-identity", "true", v2.versionId],
+			});
+
+			const restored = await window.mica.versionsRestoreCheckpoint(
+				"CheckpointIdentity.md",
+				"checkpoint-identity",
+				v1.versionId,
+			);
+			const afterRestore = await window.mica.versionsList("CheckpointIdentity.md", "checkpoint-identity");
+			const v3 = afterRestore.at(-1);
+			if (!v3) throw new Error("missing forward restore checkpoint");
+			const noOpRestore = await window.mica.versionsRestoreCheckpoint(
+				"CheckpointIdentity.md",
+				"checkpoint-identity",
+				v1.versionId,
+			);
+			await window.mica.versionsSetVisible("CheckpointIdentity.md", "checkpoint-identity", [v2.versionId], false);
+			const spliced = await window.mica.versionsList("CheckpointIdentity.md", "checkpoint-identity");
+			const removed = await window.mica.versionsRemoved("CheckpointIdentity.md", "checkpoint-identity");
+			const reset = await window.mica.versionsResetHead(
+				"CheckpointIdentity.md",
+				"checkpoint-identity",
+				v1.versionId,
+			);
+			const resetState = (await plugin.engine.state(file))["checkpoint-identity"];
+			return {
+				idsUnique: new Set(afterRestore.map((version) => version.versionId)).size,
+				hashes: afterRestore.map((version) => version.hash),
+				v1: v1.versionId,
+				v2: v2.versionId,
+				v3: v3.versionId,
+				v3Parent: v3.parentVersionId,
+				v3Source: v3.sourceVersionId,
+				v3Cause: v3.cause,
+				removedHead,
+				hiddenHead: hiddenState.headVersionId,
+				liveWhileHidden,
+				restored,
+				noOpRestore,
+				spliced: spliced.map((version) => ({
+					id: version.versionId,
+					parent: version.effectiveParentVersionId,
+				})),
+				removed: removed.map((version) => version.versionId),
+				reset,
+				resetHead: resetState.headVersionId,
+			};
+		});
+		expect(result.idsUnique).toBe(3);
+		expect(result.hashes[0]).toBe(result.hashes[2]);
+		expect(result.v3Parent).toBe(result.v2);
+		expect(result.v3Source).toBe(result.v1);
+		expect(result.v3Cause).toBe("restore");
+		expect(result.removedHead).toBe(1);
+		expect(result.hiddenHead).toBe(result.v1);
+		expect(result.liveWhileHidden).toBe("two\n");
+		expect(result.restored).toBe(true);
+		expect(result.noOpRestore).toBe(false);
+		expect(result.spliced).toEqual([
+			{ id: result.v1, parent: null },
+			{ id: result.v3, parent: result.v1 },
+		]);
+		expect(result.removed).toEqual([result.v2]);
+		expect(result.reset).toBe(true);
+		expect(result.resetHead).toBe(result.v1);
+	});
+
 	it("moves history with a renamed note and refreshes metadata without minting a version", async function () {
 		const originalPath = "RenameOrigin.md";
 		const renamedPath = "RenameDestination.md";

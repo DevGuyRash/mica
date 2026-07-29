@@ -68,6 +68,41 @@ assert.equal(isLedgerEvent({ ...replacement, target: "" }), false);
 assert.equal(isLedgerEvent({ ...replacement, hash: "not-a-hash" }), false);
 assert.equal(isLedgerEvent({ ...replacement, eid: "" }), false);
 assert.equal(isLedgerEvent({ ...replacement, block: "" }), false);
+const checkpoint: LedgerEvent = {
+	type: "checkpoint",
+	eid: "checkpoint-1",
+	ts: 4,
+	block: "block",
+	hash: fullHash,
+	parent: "checkpoint-0",
+	source: "checkpoint-source",
+	cause: "restore",
+};
+assert.equal(isLedgerEvent(checkpoint), true);
+assert.equal(isLedgerEvent({ ...checkpoint, parent: "" }), false);
+assert.equal(isLedgerEvent({ ...checkpoint, source: "" }), false);
+assert.equal(isLedgerEvent({ ...checkpoint, cause: 7 }), false);
+assert.equal(
+	isLedgerEvent({
+		type: "move-head",
+		eid: "move-1",
+		ts: 5,
+		block: "block",
+		target: "checkpoint-1",
+	}),
+	true,
+);
+assert.equal(
+	isLedgerEvent({
+		type: "version-visibility",
+		eid: "visibility-1",
+		ts: 6,
+		block: "block",
+		target: "checkpoint-1",
+		visible: false,
+	}),
+	true,
+);
 
 const parsed = parseLedgerText(`${JSON.stringify(base)}\nnot-json\n{"type":`);
 assert.deepEqual(parsed, [base], "malformed records and a torn tail are ignored independently");
@@ -109,6 +144,33 @@ for (const [field, value] of [
 		(error: unknown) =>
 			error instanceof InvalidLedgerEventError && error.eventType === "replace-version" && error.field === field,
 		`well-formed replace-version with invalid ${field} fails closed`,
+	);
+}
+for (const invalid of [
+	{ ...checkpoint, eid: "" },
+	{ ...checkpoint, block: "" },
+	{ ...checkpoint, parent: "" },
+	{ ...checkpoint, source: "" },
+	{
+		type: "move-head",
+		eid: "move-invalid",
+		ts: 5,
+		block: "block",
+		target: "",
+	},
+	{
+		type: "version-visibility",
+		eid: "visibility-invalid",
+		ts: 6,
+		block: "block",
+		target: "checkpoint-1",
+		visible: "no",
+	},
+]) {
+	assert.throws(
+		() => parseLedgerText(`${JSON.stringify(invalid)}\n`),
+		(error: unknown) => error instanceof InvalidLedgerEventError,
+		`well-formed ${invalid.type} with invalid identity data fails closed`,
 	);
 }
 assert.throws(
@@ -203,6 +265,18 @@ assert.throws(
 			})(),
 		),
 	/duplicate source eid/,
+);
+assert.throws(
+	() =>
+		remintOrderedLedgerEventIds(
+			[
+				{ type: "add-version", eid: "first", ts: 1, block: "old", hash: legacyHash },
+				{ type: "set-head", eid: "second", ts: 2, block: "old", hash: legacyHash },
+			],
+			() => "duplicate-generated-id",
+		),
+	/event id generator produced duplicate eid/,
+	"sorted generated ids still reject duplicates without a second identity set",
 );
 
 console.log("LEDGER CONTRACTS OK");

@@ -210,10 +210,19 @@ function validateInfo(infoRaw: string, fenceChar: FenceChar): void {
 /** Longest same-character fence run beginning at Markdown fence indentation. */
 function longestFenceRun(body: string, fenceChar: FenceChar): number {
 	let longest = 0;
-	for (const line of sourceLines(body)) {
-		const text = lineText(body, line);
-		const indent = leadingSpaces(text);
-		if (indent <= 3) longest = Math.max(longest, sameCharRun(text.slice(indent), fenceChar));
+	let start = 0;
+	while (start < body.length) {
+		const newline = body.indexOf("\n", start);
+		const end = newline < 0 ? body.length : newline > start && body[newline - 1] === "\r" ? newline - 1 : newline;
+		let cursor = start;
+		while (cursor < end && body[cursor] === " ") cursor++;
+		if (cursor - start <= 3) {
+			let runEnd = cursor;
+			while (runEnd < end && body[runEnd] === fenceChar) runEnd++;
+			longest = Math.max(longest, runEnd - cursor);
+		}
+		if (newline < 0) break;
+		start = newline + 1;
 	}
 	return longest;
 }
