@@ -14,56 +14,26 @@ if (!(["default", "minimum", "mobile", "desktop-latest"] as const).includes(requ
 const profile = requestedProfile as E2eProfile;
 
 function capabilityFor(selected: E2eProfile): WebdriverIO.Capabilities {
-	if (selected === "minimum") {
-		return {
-			browserName: "obsidian",
-			browserVersion: VERIFIED_APP_VERSION,
-			"wdio:obsidianOptions": {
-				installerVersion: VERIFIED_INSTALLER_VERSION,
-				plugins: ["."],
-				vault: "tests/e2e/vault",
-			},
-		};
-	}
-
-	if (selected === "mobile") {
-		return {
-			browserName: "obsidian",
-			browserVersion: VERIFIED_APP_VERSION,
-			"wdio:obsidianOptions": {
-				emulateMobile: true,
-				installerVersion: VERIFIED_INSTALLER_VERSION,
-				plugins: ["."],
-				vault: "tests/e2e/vault",
-			},
-			"goog:chromeOptions": {
-				mobileEmulation: {
-					deviceMetrics: { width: 390, height: 844, pixelRatio: 3 },
-				},
-			},
-		};
-	}
-
-	if (selected === "desktop-latest") {
-		return {
-			browserName: "obsidian",
-			browserVersion: "latest",
-			"wdio:obsidianOptions": {
-				installerVersion: "latest",
-				plugins: ["."],
-				vault: "tests/e2e/vault",
-			},
-		};
-	}
-
+	const latest = selected === "desktop-latest";
+	const mobile = selected === "mobile";
 	return {
 		browserName: "obsidian",
-		browserVersion: VERIFIED_APP_VERSION,
+		browserVersion: latest ? "latest" : VERIFIED_APP_VERSION,
 		"wdio:obsidianOptions": {
-			installerVersion: VERIFIED_INSTALLER_VERSION,
+			...(mobile ? { emulateMobile: true } : {}),
+			installerVersion: latest ? "latest" : VERIFIED_INSTALLER_VERSION,
 			plugins: ["."],
 			vault: "tests/e2e/vault",
 		},
+		...(mobile
+			? {
+					"goog:chromeOptions": {
+						mobileEmulation: {
+							deviceMetrics: { width: 390, height: 844, pixelRatio: 3 },
+						},
+					},
+				}
+			: {}),
 	};
 }
 

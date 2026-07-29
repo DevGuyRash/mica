@@ -9,7 +9,7 @@ const banner = `/*
  * License: MIT
  */`;
 
-const context = await esbuild.context({
+const buildOptions = {
 	banner: { js: banner },
 	entryPoints: ["src/main.ts"],
 	bundle: true,
@@ -42,11 +42,11 @@ const context = await esbuild.context({
 		"@lezer/lr",
 		...builtins,
 	],
-});
+};
 
 if (production) {
-	await context.rebuild();
-	await context.dispose();
+	await esbuild.build(buildOptions);
 } else {
+	const context = await esbuild.context(buildOptions);
 	await context.watch();
 }

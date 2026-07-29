@@ -40,14 +40,16 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Audit JavaScript dependencies
-              run: pnpm audit --audit-level high
+            - name: Audit production JavaScript dependencies
+              run: pnpm run audit:prod
             - name: Audit Rust dependencies
               run: cargo deny check advisories
 
             # Tier 1+gate: format, typecheck, lint, Rust unit/regression tests.
             - name: Check
               run: pnpm run check
+            - name: Version identity stress corpus
+              run: pnpm run test:version-stress
             - name: Rust format
               run: cargo fmt --all -- --check
             - name: Clippy
@@ -70,7 +72,7 @@ jobs:
                   path: .obsidian-cache
                   key: obsidian-${{ runner.os }}
             - name: E2E (real Obsidian under Xvfb)
-              run: xvfb-run -a pnpm run e2e
+              run: pnpm run e2e
 
             - name: Upload plugin release assets
               if: github.ref_type == 'tag'
