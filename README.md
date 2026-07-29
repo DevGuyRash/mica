@@ -54,7 +54,13 @@ Already have markdown you want inside a block? Select it and run **`Mica: Wrap s
 
 **3. Restructure it.** Add a tab with **`+`**, rename with a double-click, right-click a tab for icons/duplicate/delete, and **drag** tabs, cells, sections, or whole groups wherever they should live — insertion lines show exactly where things land, and hovering a tab mid-drag springs it open so you can drop inside. Hold compatible Markdown over another section for a moment and the line becomes a full target outline with a large **+**; dropping combines them into one reversible section. The ordinary section menu provides previous/next combine actions for keyboard and touch use. Deletions, conversions, combines, and uncombines offer conflict-guarded **Undo** instead of nagging with confirms. Hover between any two sections for a quiet **+** that inserts prose, a callout, a code block, or a whole new group right there.
 
-**4. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history. The footer's **`v3 ●`** chip means three versions and unsaved changes; click it for the **timeline** — labels, relative times, one-click restore, branch-edit, and readable diffs. Right-click the chip for auto-save controls.
+**4. It versions itself.** A moment after you edit, Mica stamps the block with an id and starts keeping history. The footer's **`v3 ●`** chip means three visible checkpoints and unsaved changes; click it for the **timeline** — labels, relative times, forward restores, deliberate HEAD resets, recoverable timeline removal, branch-edit, and readable diffs. Right-click the chip for auto-save controls.
+
+In manual mode, **Save version** saves only that block and tells you when there
+were no changes. While editing, contextual Undo/Redo controls affect only the
+current Mica block—not unrelated Markdown elsewhere in the note. When the
+working block differs from HEAD, **Revert to HEAD** first preserves the working
+copy as a recoverable version and then restores HEAD exactly.
 
 > **Already using `obsidian-tabs`?** Run **`Mica: Migrate tabs → Mica (dry run, whole vault)`**, review, then convert — your manual "archived" callouts become real, labeled version history. Or from the shell: `mica migrate --dry-run`. A retained `<Note>.mica/migration.json` records the transaction status, exact original/migrated object hashes, and replayable ledger events so the plugin or CLI can resume an interrupted migration without guessing.
 
@@ -84,7 +90,7 @@ Everything is ordinary Markdown, and Mica sizes fences for you — you never cou
 
 ### The block header and action menus
 
-Hover a block (or pin it via settings) for its header: the current **name** and one **⋮ menu** containing collapse, whole-block source editing, appearance, copy, navigator, version history, and save-version actions. An unnamed block displays its note title without writing a `name=` attribute; additional unnamed blocks display ` · 2`, ` · 3`, and so on. Those suffixes are presentation only—stable ids remain authoritative. Sections, tabs, tab groups, grids, cells, nested callouts/code, and folded rows follow the same rule: the drag grip stays direct where useful and secondary actions live in one consistent menu. Menus default to click; optional delayed hover is disabled automatically on touch/coarse pointers, while click, Enter, Space, context menus, and folded-row activation remain available.
+Hover a block (or pin it via settings) for its header: the current **name** and one **⋮ menu** containing collapse, whole-block source editing, appearance, copy, navigator, version history, and save-version actions. An unnamed block displays its note title without writing a `name=` attribute; additional unnamed blocks display ` · 2`, ` · 3`, and so on. Those suffixes are presentation only—stable ids remain authoritative. Sections, tabs, tab groups, grids, cells, nested callouts/code, and folded rows follow the same rule: the drag grip stays direct where useful and secondary actions live in one consistent menu. Menus default to click; optional delayed hover is disabled automatically on touch/coarse pointers, while click, Enter, Space, context menus, and folded-row activation remain available. The **Section actions** settings composer can hide copy, editing, conversion, combine, fold, or delete commands from semantic sections without changing editor, block, tab, grid, or cell controls; drag always remains available.
 
 Copy actions exist on blocks, tab groups, individual tabs, grids, cells, text/code sections, callouts, nested callouts, nested code, combined sections, and folded sections in both Reading view and Live Preview. By default they copy portable Markdown content with Mica layout wrappers removed. Four independent preferences can retain selected Mica layout syntax, add a fresh identity-free outer `mica` fence, add aligned line numbers, and choose whether numbers cover authored content only or every generated output line. Projection preserves authored indentation, tabs, blank runs, trailing bytes, and LF/CRLF style; generated wrappers use a safe fence and never copy source ids or appearance attributes.
 
@@ -94,13 +100,25 @@ Copy actions exist on blocks, tab groups, individual tabs, grids, cells, text/co
 
 - **Smart auto-snapshots.** A short while after a block's _content_ changes, it's snapshotted. Structure-only churn — adding empty tabs, reordering, renaming — never mints a version. Toggle auto/manual and the idle interval from the version chip's right-click menu.
 - **Pre-image safety.** Content-changing CLI/API mutations first ensure the current semantic content is represented in history. Structure-only layout changes intentionally do not mint versions; destructive editor controls instead offer exact-source, conflict-guarded Undo.
-- **Where it lives.** Next to `My Note.md`, a visible `My Note.mica/` folder holds verified content-addressed version objects (plain Markdown through 4 KiB; larger objects use gzip when the host WebView supports it and otherwise remain plain Markdown), an append-only `ledger.jsonl`, and a human-readable `manifest.json`. Migrated notes also retain `migration.json`; structural history normalization uses a separate `section-normalization.json` recovery record. It all rides Obsidian Sync and git.
+- **Where it lives.** Next to `My Note.md`, a visible `My Note.mica/` folder holds verified content-addressed version objects (plain Markdown through 4 KiB; larger objects use gzip when the host WebView supports it and otherwise remain plain Markdown), an append-only `ledger.jsonl`, and a human-readable `manifest.json`. Migrated notes also retain `migration.json`; structural history normalization uses `section-normalization.json`, and prompt-block consolidation uses `tab-consolidation.json`. It all rides Obsidian Sync and git.
+- **Checkpoint identity.** Each checkpoint has a stable version ID separate from its content hash, so restoring identical bytes can still create a distinct point in history. Parents, HEAD, labels, and visibility use that ID. Visible `vN` numbers are presentation labels and may change when checkpoints are removed from or restored to the timeline; automation should use a version ID or an unambiguous hash.
+- **Coordinated upgrade.** Identity-bearing checkpoints, HEAD moves, labels, and visibility are new typed ledger events. Older readers fail closed instead of guessing. Upgrade the Mica plugin and CLI on every device that touches the vault before creating or managing these checkpoints.
 - **Append-only structural normalization.** `replace-version` events can point an existing `add-version` event at a structure-only replacement object without rewriting the original event or object. Labels, timestamps, origins, lineage, version order, and version count stay attached to the original addition. This ledger event requires a Mica build that understands it: upgrade the plugin and CLI on every device before normalizing history or editing a normalized sidecar.
 - **Rename contract.** The block UUID, not its display name or note path, owns the lineage. Renaming a note moves its sidecar through the same serialized queue and refreshes the manifest; a destination collision is surfaced and neither folder is overwritten. Explicit block-name changes update current metadata but do not create a `vN` row, so the content timeline does not claim to be a rename audit log.
 
 ### The timeline
 
-Click the version chip: versions are shown in fixed 100-row pages with label, relative age, optional exact local timestamp, head marker, and preview — plus the dirty **working copy** when you have unsaved changes. Find an older base directly by version number, label, or hash. **Diff** keeps the inline / split / patch, line / word / char, whitespace, syntax-filtering, and copied-patch workflow. **Inspect** replaces only the large diff pane with a read-only rendering of the selected snapshot: navigate its tabs, select a block/tab/grid/cell/logical section/callout/code scope, follow its ancestry breadcrumb, then compare only that exact source slice. Cross-version matching accepts unique content or compatible structural evidence, never a numeric path alone; missing or ambiguous counterparts require an explicit pairing or added/removed choice. Candidate previews are bounded, with the rendered base snapshot taking over for very large ambiguous sets. The authoritative whole-block timeline always remains visible. Interactive scope inspection is capped at 2 Mi UTF-16 code units per snapshot; larger comparisons stay available through whole-block diff and the interruptible CLI instead of blocking Obsidian's UI. Per version: **Restore** (current state is snapshotted first), **Branch-edit** (opens the lightbox; saving creates a new version that records its parent), **Label**, **Copy**.
+Click the version chip: versions are shown in fixed 100-row pages with label, relative age, optional exact local timestamp, head marker, and preview — plus the dirty **working copy** when you have unsaved changes. Comparison starts in **Auto**: a working copy compares with the current head, a stored version with its recorded parent, a branch with the version it actually branched from, and v1 with an empty “Before v1” baseline. Head and pinned versions remain explicit overrides. The searchable picker finds exact `v123` ordinals, labels, hash prefixes, and dates without loading every object or rendering an unbounded menu.
+
+**Diff** keeps the inline / split / patch, line / word / char, whitespace, syntax-filtering, and copied-patch workflow. **Inspect** replaces only the large diff pane with a read-only rendering of the selected snapshot: navigate its tabs, select one element or up to eight disjoint elements, then compare every selected block/tab/grid/cell/logical section/callout/code scope against the same base. Ctrl/Cmd-click toggles, Shift selects a compatible sibling range, selected scopes receive numbered markers, and multi-element results stay separate in lazy collapsible rows so disjoint source is never presented as one file. **Copy comparisons** produces a headed Markdown report with one independent patch per element. Whole-block comparison across several versions remains a separate advanced, four-version workflow.
+
+Cross-version matching walks actual parent lineage and accepts reciprocal one-to-one mappings supported by exact content, mapped parents, stable labels, structural shape, neighbors, or bounded content resemblance—never numeric position or resemblance alone. Ordered token trigrams, token frequencies, and line anchors improve candidate ranking without turning similarity into identity. It reports changes, conversions, adjacent splits/combines, additions, removals, and unresolved ambiguity. Missing or ambiguous counterparts require an explicit pairing or disposition; indistinguishable empty or duplicated elements are intentionally never guessed. Ambiguities show rendered, keyboard-navigable candidate cards with evidence, neighboring context, and expandable bounded previews. Long lineage walks stream through adjacent snapshots without retaining the entire history. The authoritative whole-block timeline always remains visible. Interactive scope inspection is capped at 2 Mi UTF-16 code units per snapshot; larger comparisons stay available through whole-block diff and the interruptible CLI instead of blocking Obsidian's UI.
+
+Per checkpoint, **Restore as new checkpoint** first preserves a dirty working copy, restores the selected bytes, and records a new child of the previous HEAD so history keeps moving forward. **Reset HEAD here** is the deliberate branching operation: it restores the selected bytes and moves HEAD to that existing checkpoint. **Remove from timeline** appends a visibility event without deleting ledger lines or objects; descendants compare against their nearest retained ancestor, hidden gaps remain visible as counts, and the Removed versions view restores original lineage. Removing the visible current checkpoint leaves live content and the raw ledger HEAD alone, moves only the effective visible HEAD to the nearest retained ancestor, and does not falsely mark unchanged content dirty. The next real edit remains parented to the hidden raw checkpoint, while its visible lineage is spliced cleanly in the timeline.
+
+Blocks taller than both 800 px and 1.25× their nearest scrollport keep navigation and status reachable without a permanently sticky toolbar. The default contextual cluster travels from the header to a compact middle dock and then to the footer, so Save and History never appear twice. Its copy control names the exact scope it will copy: keyboard focus and Source-mode selection win, active tabs and top-level grids form stable automatic boundaries, and a reading band changes target only after scrolling settles. The adjacent scope picker can pin any structural descendant, resume automatic targeting, or copy the whole block once; stale scopes fail instead of silently copying an ancestor. Mini-editor drafts and the full in-memory Source buffer participate in the projection.
+
+The same setting controls a CodeMirror companion dock in full Source mode and for raw fences exposed in Live Preview. It stays associated with the long block containing the primary selection while scrolling, without moving the caret or recreating its controls. History reads the exact in-memory buffer, and mutations first save and verify that generation before touching the ledger. ID-less blocks retain jumps but explain why History is unavailable. Settings can reduce either dock to jump-only controls or turn them off, choose contextual/block/manual copy targeting, compose the dock actions, and select theme, frosted, accent, or contrast-checked custom floating surfaces. Nested scroll panes, touch targets, safe-area insets, reduced motion, and theme-overridable dock variables are respected.
 
 ---
 
@@ -115,19 +133,25 @@ mica set "My Note" -b demo -f new.md  # replace content (pre-image + result vers
 mica tab add "My Note" --title Notes  # structural edits: tab/cell/grid/mv
 mica versions "My Note"               # the timeline, in your terminal
 mica diff "My Note"                   # working copy vs head, colored
-mica restore "My Note" v3             # roll back (snapshots current state first)
+mica restore "My Note" v3             # restore bytes as a new forward checkpoint
+mica reset-head "My Note" v3          # restore and deliberately branch from v3
+mica remove-versions "My Note" v2 v3  # recoverably hide checkpoints
+mica restore-versions "My Note" <id>  # return removed checkpoints to the timeline
 mica label "My Note" v3 "Golden"      # name a version
 mica snapshot "My Note"               # change-gated snapshot now
 mica watch                            # daemon: auto-snapshot the vault while Obsidian is closed
 mica migrate --dry-run                # legacy ```tabs conversion report
 mica normalize-sections Prompts --history --dry-run  # validate one-editor normalization
+mica consolidate-tabs Prompts --history --dry-run    # plan one-block tab consolidation
 mica repair                           # re-home sidecars after renames; report orphans
 mica doctor                           # sidecar health (missing objects, bad ledger lines)
 ````
 
 After reviewing the dry-run JSON, repeat `normalize-sections` without `--dry-run` while Obsidian is closed. The command accepts one note or a directory, wraps each selected body in exactly one logical `:::section`, and uses append-only replacements for stored history. It preserves original objects and ledger lines and can resume an interrupted note transaction from `section-normalization.json`.
 
-Global flags: `--vault DIR` (else it walks up to `.obsidian`), `--json` on every read command for scripting. Blocks are addressed by id, `name`, or 1-based index; versions by `vN`, label, or hash prefix.
+`consolidate-tabs` is the recoverable follow-up for prompt collections that were imported as several independent blocks. It creates one unnamed target block with one tab per logical prompt, preserves source history as full target snapshots, and promotes top-level callouts and fenced code to native sections. Single-block notes retain their UUID while receiving the same semantic section correction. The command preserves all source objects/events and resumes from `tab-consolidation.json`.
+
+Global flags: `--vault DIR` (else it walks up to `.obsidian`), `--json` on every read command for scripting. Blocks are addressed by id, `name`, or 1-based index. Interactive version selectors accept visible `vN`, labels, stable version IDs, or unambiguous hash prefixes; durable scripts should use the version ID.
 
 ## Scripting & AI agents
 
@@ -145,13 +169,18 @@ await window.mica.blockUpdate("My Note.md", "<id>", "new body"); // guarded upda
 await window.mica.blockApply("My Note.md", "<id>", { op: "insertTab", path: [0], at: 2 });
 await window.mica.blockSetAttr("My Note.md", "<id>", "accent", "#7c5cff");
 await window.mica.versionsList("My Note.md", "<id>");
-await window.mica.versionsLabel("My Note.md", "<id>", "<hash>", "Golden");
+await window.mica.versionsRestoreCheckpoint("My Note.md", "<id>", "<version-id>");
+await window.mica.versionsResetHead("My Note.md", "<id>", "<version-id>");
+await window.mica.versionsSetVisible("My Note.md", "<id>", ["<version-id>"], false);
+await window.mica.versionsLabel("My Note.md", "<id>", "<version-id>", "Golden");
 await window.mica.versionsDiff("My Note.md", base, other, "word");
 ```
 
 `createBlockSource` is the canonical template path: it returns a complete Mica fence with a UUIDv7, validates an optional user-authored name, and sizes the outer backtick fence above every run in the body. Names containing double quotes, backticks, line breaks, or control characters are rejected with a clear error rather than silently changed. Template code should not reconstruct the header grammar itself.
 
-**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-bridge/inbox/`; the result appears in `mica-bridge/outbox/`. Verbs: `block.source` (body, optional name), `block.list/read/update/apply/attr`, `versions.list/snapshot/revert/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. Destructive verbs snapshot first.
+`versionsRevert`, `versionsEdit`, and `versionsLabel` take a stable version ID. For compatibility, each also accepts a full content hash when that hash identifies exactly one checkpoint; duplicate-hash histories require the version ID.
+
+**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-bridge/inbox/`; the result appears in `mica-bridge/outbox/`. Verbs: `block.source` (body, optional name), `block.list/read/update/apply/attr`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. `versions.set-visible` takes the note, block ID, `"true"` or `"false"`, then one or more version IDs; `versions.visibility` remains a compatibility alias. Destructive verbs snapshot first.
 
 ---
 
@@ -177,8 +206,16 @@ Grouped by intent — **Versioning**, **Comparing**, **Appearance**, **Copying**
 - **Copying** — independently retain `tab:` / `:::` layout syntax, wrap copies in an outer Mica block, add aligned line numbers, and number authored content or complete output. Generated outer fences are sized around nested code blocks and never duplicate a block id.
 - **Editors** — global live line numbers, whitespace visualization, marker-preserving Markdown styling, autosize/max height, save/click-away behavior, and a configurable formatting ribbon. Custom buttons validate their name/template/icon, avoid id collisions, update already-open toolbars, and can target Markdown, code, or both. Entity actions promote only while they fit; tabs stay compact with hover/focus dots plus right-click, and the hover dots can be disabled without removing keyboard/context-menu access.
 - **Comparing** — choose diff defaults and optionally append exact local timestamps to relative version ages.
-- **Actions** — direct copy/edit/fold controls appear on hover while they fit and progressively collapse into one vertical-ellipsis menu as a block, section, tab, grid, cell, or editor narrows. Drag and editor line numbers stay direct. Rendered entities can instead keep every secondary action in the ellipsis; menus open by click or delayed hover, while touch remains click-only.
+- **Icon packs** — Obsidian's built-in Lucide icons are always available and need no network. Extra packs (Bootstrap Icons, Tabler, Simple Icons, Iconoir, Twemoji) are **off by default and never bundled**; enabling one downloads it from [jsDelivr](https://www.jsdelivr.com/) (falling back to [unpkg](https://unpkg.com/) for npm-hosted packs) the first time an icon is needed, from a version-pinned URL. Downloaded SVG is rebuilt through an allowlist rather than inserted as markup. Each pack's licence is shown beside its toggle, and packs requiring credit (Twemoji, CC-BY 4.0) surface that attribution in settings. Disabling a pack releases everything it loaded.
+- **Long blocks** — choose the contextual traveling cluster, jump-only navigation, or no extra controls; select contextual, whole-block, or manual clipboard targeting; compose the dock actions; and choose theme, frosted, accent, or custom floating colors.
+- **Actions** — direct copy/edit/fold controls appear on hover while they fit and progressively collapse into one vertical-ellipsis menu as a block, section, tab, grid, cell, or editor narrows. Drag and editor line numbers stay direct. Rendered entities can instead keep every secondary action in the ellipsis; menus open by click or delayed hover, while touch remains click-only. A two-pane section-action composer hides or restores contextual section commands live; its hidden-list storage means newly introduced commands remain visible by default.
 - Everything resolves to CSS custom properties (`--mica-accent`, `--mica-radius`, `--mica-gutter-*`, `--mica-inspector-*`, …), so [Style Settings](https://github.com/mgmeyers/obsidian-style-settings) or your theme can go further. `preview.html` previews themes without launching Obsidian.
+
+### Network use
+
+Mica works entirely offline. The only outbound requests it can make are icon-pack
+downloads, and only for packs you explicitly enable — see **Icon packs** above.
+No telemetry, no analytics, no self-update.
 
 ## How it works (in one breath)
 

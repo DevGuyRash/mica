@@ -29,7 +29,7 @@ crates/mica-core (pure Rust)         hosts
 Every correctness guarantee comes from one discipline repeated at three layers:
 
 - **Editing.** Block boundaries are recomputed from a live scan at every decision point — render and write alike. No line number or node path is ever trusted after the document may have changed. Edits are `{from,to,insert}` change specs derived at dispatch time — never a cached-coordinate overwrite. (That overwrite is exactly what corrupts `obsidian-tabs`.)
-- **Versioning.** Current state is a fold over an append-only `ledger.jsonl`; version objects are immutable and content-addressed. Revert flips a pointer; nothing is rewritten.
+- **Versioning.** Current state is a fold over an append-only `ledger.jsonl`; version objects are immutable and content-addressed, while logical checkpoint IDs distinguish separate history points that share identical bytes. Restore appends a forward checkpoint; reset and visibility changes append state events. Nothing is rewritten.
 - **Identity.** The note↔history link is derived by matching content-carried UUIDs, not paths — so it self-heals across renames and moves.
 
 ## Rust → WASM core
@@ -41,7 +41,7 @@ Every correctness guarantee comes from one discipline repeated at three layers:
 ## Rendering (three modes)
 
 - **Reading view.** `registerMarkdownCodeBlockProcessor("mica", …)` builds read-only interactive DOM; nested content renders by recursion via `MarkdownRenderer.render` under a `MarkdownRenderChild`.
-- **Live Preview.** A `StateField<DecorationSet>` builds `Decoration.replace({widget, block:true})` for every closed block and provides it via `EditorView.decorations.from(field)`. This MUST be a StateField: CodeMirror rejects block-level/line-break-spanning decorations from view plugins at runtime ("Block decorations may not be specified via plugins") — a constraint verified the hard way in a live Obsidian. Reveal-on-overlap: a block whose range intersects the selection renders as raw source. Gated by `editorLivePreviewField`; ranges end at the closing fence line's end (never past its newline); `WidgetType.eq(id, content)` reuses DOM; the scan is cached per document text so cursor-only transactions skip WASM.
+- **Live Preview.** A `StateField<DecorationSet>` builds `Decoration.replace({widget, block:true})` for every closed block and provides it via `EditorView.decorations.from(field)`. This MUST be a StateField: CodeMirror rejects block-level/line-break-spanning decorations from view plugins at runtime ("Block decorations may not be specified via plugins") — a constraint verified the hard way in a live Obsidian. Reveal-on-overlap: a block whose range intersects the selection renders as raw source. Widget replacement is gated by `editorLivePreviewField`; ranges end at the closing fence line's end (never past its newline); `WidgetType.eq(id, content)` reuses DOM; the scan is cached per document text so cursor-only transactions skip WASM.
 - **Source mode.** Widgets off; raw fence text; byte-exact round-trip.
 
 ## Editing (corruption-proof)
@@ -102,9 +102,17 @@ are auto-stamped on a debounced maintenance path (setting-gated), independently
 of automatic content snapshots. Built-in commands and `createBlockSource` stamp
 UUIDv7 identities before insertion.
 
+Open editors also own a bounded, session-only block history keyed by stable
+block id. Mica transactions record exact outer-block pre/post images; compound
+cross-block operations remain one entry, while consecutive raw-source typing
+groups for 750 ms. Undo/Redo re-scan the live document and replace only exact
+expected block images, so unrelated note edits are never rolled back. The
+controller retains at most 100 entries/8 MiB per editor and is deliberately
+separate from the durable version ledger.
+
 ## Storage & versioning
 
-- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: verified content-addressed objects (`objects/b3-….mica.md`, or `.mica.gz` above 4 KiB when the host WebView supports compression; older WebViews retain larger objects as `.mica.md`), an append-only `ledger.jsonl` (authoritative; folded in `(ts, eid)` order so Sync/git line-unions converge — `add-version` events may carry a `parent` hash for branch lineage), and a `manifest.json` summary (note anchor, path hint, current explicit block names). A `replace-version` event targets one original `add-version` EID and changes only that event's effective object hash. The newest replacement in `(ts, eid)` order wins; add/head/label/parent references resolve through the effective hash before visible-version deduplication. Conflicting targets, inconsistent duplicate-hash replacements, or effective-hash collisions fail the fold closed. Original events and objects remain immutable and readable. Note renames serialize with snapshots, move only into an absent destination, and surface collisions without merging; the manifest also refreshes on metadata-only maintenance without timestamp-only rewrites. UUIDs alone anchor lineage. Note paths and block names are current non-versioned metadata, so the content ledger intentionally cannot reconstruct historical renames. Hosts recompute the plaintext hash on every object read/write, reject malformed identities and oversized/decompression-bomb objects, and share the same 128 MiB limit. Repair moves fully orphaned sidecars into the root `.mica-graveyard/`; a derived `state.json` cache remains planned (see `state.md`).
+- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: verified content-addressed objects (`objects/b3-….mica.md`, or `.mica.gz` above 4 KiB when the host WebView supports compression; older WebViews retain larger objects as `.mica.md`), an append-only `ledger.jsonl` authoritative under `(ts, eid)` ordering, and a `manifest.json` summary. Legacy `add-version` rows retain hash lineage and append-only `replace-version` normalization. New `checkpoint` rows use a stable logical version ID plus content hash, parent version ID, optional restore source, and cause. `move-head`, `version-label`, and `version-visibility` target logical IDs, so identical content hashes remain distinct checkpoints and hidden versions retain their original lineage. The folded model keeps both the raw ledger HEAD and the effective visible HEAD: dirty checks and new checkpoint parentage use raw HEAD, while timeline display and explicit visible-Head comparison use effective HEAD. Effective visible parents and HEAD splice over hidden ancestors without changing live bytes or falsely dirtying a working copy that still matches a hidden raw HEAD. Conflicting IDs, absent/cross-block targets, inconsistent legacy replacements, or ambiguous hash references fail closed. Original events and objects remain immutable and readable. Note renames serialize with snapshots, move only into an absent destination, and surface collisions without merging; the manifest also refreshes on metadata-only maintenance without timestamp-only rewrites. UUIDs alone anchor block lineage. Note paths and block names are current non-versioned metadata, so the content ledger intentionally cannot reconstruct historical renames. Hosts recompute the plaintext hash on every object read/write, reject malformed identities and oversized/decompression-bomb objects, and share the same 128 MiB limit. Repair moves fully orphaned sidecars into the root `.mica-graveyard/`; a derived `state.json` cache remains planned (see `state.md`).
 - Legacy migrations additionally retain `<Note>.mica/migration.json`, a shared
   plugin/CLI transaction record with schema
   `{format,status,note,original,migrated,events}`. `original` and `migrated`
@@ -119,8 +127,26 @@ UUIDv7 identities before insertion.
   compare-and-swaps the note, appends only missing events, verifies the folded
   result, and then marks the journal complete. It never repurposes the legacy
   migration record or refreshes the manifest.
+- Prompt-collection consolidation retains
+  `<Note>.mica/tab-consolidation.json`. It replaces the selected live prompt
+  collection with one fresh unnamed block, maps source blocks to tabs, and
+  composes each source legacy version or identity-bearing checkpoint into a
+  whole-target checkpoint while preserving source timestamps, labels,
+  visibility, logical parents, objects, and ledger events. Top-level callouts
+  and fenced code remain native leaves; only
+  contiguous ordinary Markdown runs receive reversible `:::section` wrappers.
+  Exact note and manifest generations make interrupted publication resumable.
 - Visible (not hidden) because hidden dot-folders emit no Vault events — which would break self-healing — and visible files ride Obsidian Sync / obsidian-git and stay human-readable.
 - Snapshot-on-save is change-gated by a domain-separated, length-framed full BLAKE3 content signature (no structural snapshot storms or leaf-boundary collisions). Per-note plugin work is serialized; exact-content preconditions and guarded rollback protect the note when a sidecar append fails. The CLI stages replacements beside their target, syncs them, atomically publishes them, and verifies the result. Append-only + content-addressed means Sync/git normally see additions rather than object rewrites.
+- Explicit snapshots return the block ids whose `checkpoint`/`move-head` pairs
+  reached the ledger. A block status control targets only its own id; the
+  command-palette action remains note-wide. Manifest refreshes and identity
+  maintenance never count as saved versions. Revert-to-HEAD force-snapshots the
+  exact working body first, then restores the prior verified head, making the
+  discarded body recoverable. Restore-as-checkpoint creates a distinct forward
+  checkpoint even when its object hash appeared earlier; Reset HEAD appends a
+  logical head move to the selected checkpoint. Timeline removal and restoration
+  append visibility events and never delete objects.
 
 ## Diff
 
@@ -128,21 +154,86 @@ The Rust `similar` crate provides char/word/line granularity, intra-line emphasi
 
 Focused history inspection reuses the ordinary block renderer with an
 inspection presentation contract that suppresses edit/copy/fold/drag chrome and
-external navigation while leaving tab activation available. Each loaded version
-gets a linear `ScopeIndex`: exact source ranges, kind/path/ancestry, normalized
-label, one polynomial rolling range hash backed by two `Uint32Array` prefix
-tables, and neighbor fingerprints. The index build is O(source units + CST
-nodes) without a sort, retained indexes share the existing 12-object LRU, and
-exact bytes—not hashes—authorize fingerprint matches. Interactive indexing is
-capped at 2 Mi UTF-16 code units; larger snapshots stay available to whole-block
-diff/CLI paths. A unique
-compatible label/ancestry/neighbor candidate may match automatically; numeric
-path equality never does. Ambiguous candidate materialization is capped at 64;
-larger sets use the rendered base-snapshot picker instead of constructing an
-unbounded menu. Missing counterparts require a modal-session manual pairing or
-explicit added/removed disposition. Pairings are scoped to one base/selected
-version pair. No inner ids, historical rewrites, ledger events, or public API
-changes are involved.
+external navigation while leaving tab activation available. Auto comparison
+resolves working copy → head, stored version → recorded parent, and root →
+empty baseline; ordinary plugin and CLI snapshots persist the previous logical
+HEAD as `parentVersionId`. Explicit Head never substitutes another version.
+
+Each loaded version gets a linear `ScopeIndex`: exact source ranges,
+kind/family/path/ancestry, parent and sibling context, normalized metadata,
+structural shape, a polynomial rolling range hash backed by two `Uint32Array`
+prefix tables, and neighbor fingerprints. Indexing is O(source units + CST
+nodes). Adjacent parent→child transitions use indexed, capped candidate edges,
+reciprocal one-to-one validation, and exact-byte verification. Unique exact
+content, mapped parents, stable labels, structural shape, neighboring anchors,
+and linear resemblance sketches can support a mapping. Candidate resemblance is
+45% ordered token-trigram Dice, 25% token-frequency Dice, and 30% normalized
+line-anchor Dice (short content falls back to token frequency); numeric
+position, resemblance alone, or one weak neighbor cannot establish identity.
+Adjacent section windows are indexed once
+for split/combine recognition rather than rescanned per section. Unmatched
+scopes become Added/Removed only when no plausible edge remains; duplicate or
+empty ambiguities stay Needs matching.
+
+Arbitrary comparisons route lazily through recorded parents and the nearest
+common ancestor. At most two adjacent objects need loading for each streamed
+transition; the 12-object/index/transition LRUs remain bounded, and traversal
+stops at the first unsafe or unavailable edge. Interactive indexing is capped at
+2 Mi UTF-16 code units; larger snapshots stay available to whole-block diff/CLI
+paths. Ambiguous candidate materialization is capped at 64, with rendered
+snapshot selection as the complete fallback. Manual pairings are scoped to one
+modal, version pair, and selected locator. The inspection selection model keeps
+up to eight scopes in source order, eliminates parent/descendant overlaps, and
+builds one independently resolved, lazily rendered comparison row per scope. No
+inner scope ids or historical rewrites are involved.
+
+One comparison plan answers what the history window is comparing: a base, the
+targets derived from the timeline selection, and an optional element scope.
+Element focus and several-version comparison compose — each focused element owns
+a row spanning every target. A picked version never becomes a column of itself;
+it is reported as the base instead. Grid layouts cap at four columns and name
+what they dropped, while stacked patches are uncapped. Rendering and copying
+both walk the plan's ordered cells, so the clipboard cannot describe a different
+comparison than the surface. Element names come from location, type, and
+position among same-kind siblings, never from content: a leaf's label is its
+first source line, which is neither stable nor able to tell siblings apart.
+
+Very tall blocks register with one controller per actual scroll container. A
+single status cluster is reparented between header, middle dock, and footer,
+preventing duplicate Save/History controls. Reading view uses a zero-height
+sticky host. Live Preview moves the same middle cluster into a stationary
+CodeMirror-owned overlay, outside community-theme clipping and virtualized
+widget geometry. Registration waits until a detached `WidgetType.toDOM` result
+enters Obsidian’s live DOM, then binds explicitly to `.cm-scroller`. Managers
+share scroll/resize observation, use a bounded timer fallback when animation
+frames are throttled, and remove themselves with the render component.
+
+The dock clipboard consumes the existing `ScopeIndex` rather than adding
+another structural parser. One transient controller records automatic, focused,
+or pinned intent. Automatic reading targeting samples a stable band after
+scroll idle; the outermost tab or grid boundary owns that context, so parallel
+cells are never guessed. Focus and Source-mode caret/selection may select a
+deeper exact scope. Pinned locators reconcile conservatively through the same
+scope resolver used by history, and copy reparses the current working source
+immediately before projecting it. A stale or ambiguous locator fails closed;
+there is no ancestor fallback. Mini-editor drafts are applied as one guarded
+working-copy overlay before indexing and copying.
+
+When a CodeMirror primary selection is inside a long raw fence in full Source
+mode or exposed Live Preview source, a single per-editor companion dock listens
+to the actual scroll DOM as well as CodeMirror viewport updates and uses the
+same bounded scheduling fallback. It reads the current editor buffer as a
+`WorkingCopyProvider`. Read-only history can inspect that buffer immediately.
+Before Restore, branch-edit, or explicit Save mutates version state, the provider
+flushes through `MarkdownView.save()` and verifies both the editor generation
+and vault bytes; a concurrent edit cancels the mutation rather than operating on
+stale source.
+
+Dock action order, target mode, and floating surface are settings-backed. The
+rendered and raw-source presenters share action IDs, scope labels, clipboard
+projection, and pin state even though CodeMirror requires its own DOM host.
+Theme/frosted/accent/custom treatments resolve through documented
+`--mica-long-dock-*` variables and apply only while controls float.
 
 ## Clipboard projection
 
@@ -160,6 +251,13 @@ action list, mount no document-wide listener, and dispose native menus/timers
 with their render child. Optional hover-open has a short delay and leave grace,
 checks fine-pointer capability at use time, and never replaces click/keyboard
 behavior. Tabs keep activation/add/overflow direct.
+
+Semantic section actions pass through one preference filter before either
+responsive controls or context menus are built. Persisted
+`hiddenSectionActions` stores grouped omissions (for example every contextual
+`convert-*` action maps to `convert`) rather than a whitelist, so new action
+types remain visible after upgrades. The filter is scoped to `sectionActions`;
+drag and block/tab/grid/cell/editor commands never enter it.
 
 `SETTING_LIFECYCLES` exhaustively maps every persisted setting to immediate
 runtime application, open-widget rerender, live toolbar repaint, click-time
@@ -194,23 +292,29 @@ same tab-indented manifest, same append-only ledger), the same snapshot gate,
 and the same reducer for structural edits. Note, object, and manifest replacements
 are guarded, atomic, and post-write verified; vault walks do not follow symlinks
 outside the vault. Commands: ls/cat/set, tab/cell/
-grid/mv, versions/show/diff/restore/label, snapshot, watch (a polling
+grid/mv, versions/show/diff/restore/reset-head/remove-versions/restore-versions/label, snapshot, watch (a polling
 auto-snapshot daemon for when Obsidian is closed), migrate,
-normalize-sections, prepare, repair, doctor. `normalize-sections` accepts a
+normalize-sections, consolidate-tabs, prepare, repair, doctor.
+`normalize-sections` accepts a
 note or directory; `--history` applies the same one-section wrapper to stored
 versions through append-only replacement events, and `--dry-run` performs the
 full validation without writes. `--json` everywhere for scripting. Exit codes: 1 I/O, 2 bad args,
 3 not found, 4 corrupt state.
+`consolidate-tabs` accepts the same note-or-directory scope and uses
+`--history` to retain each source block's history in the fresh tabbed target.
+Single-block notes keep their UUID and use append-only replacements when only
+semantic leaf boundaries need correction.
 
-`replace-version` is a coordinated ledger-format upgrade. Readers fail closed
-on an unknown typed event, but pre-upgrade binaries cannot interpret a future
-event they do not know about. Every plugin and CLI instance that can touch a
-normalized vault must therefore be upgraded before the first history
-normalization.
+`replace-version` and the identity-bearing checkpoint event family are
+coordinated ledger-format upgrades. Readers fail closed on an unknown typed
+event, but pre-upgrade binaries cannot interpret a future event they do not
+know about. Every plugin and CLI instance on every device that can touch the
+vault must therefore be upgraded before the first structural history
+normalization or identity-bearing checkpoint operation.
 
 ## Scriptable API
 
-`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/snapshot/revert/diff/patch/edit`, `migrate.scan/run`, `prepare`, `repair`) plus `createBlockSource({name?, body})`, the canonical template constructor. It returns a complete UUIDv7-addressed block, validates the optional explicit name through the core header writer, and sizes the outer fence above body backticks; `block.source` mirrors it in the file bridge. The other APIs are mirrored by palette commands and that bridge: an agent drops `{verb,args}` JSON in `mica-bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, **trashes the consumed inbox file**, and writes `mica-bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. Mutating verbs run through the per-file transaction queue, reject duplicate identities, and surface failures to callers. A desktop loopback transport into a running Obsidian instance remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
+`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`) plus `createBlockSource({name?, body})`, the canonical template constructor. It returns a complete UUIDv7-addressed block, validates the optional explicit name through the core header writer, and sizes the outer fence above body backticks; `block.source` mirrors it in the file bridge. Revert, branch edit, and label selectors resolve a stable checkpoint ID first; a full content hash remains a compatibility selector only when it identifies one checkpoint. The other APIs are mirrored by palette commands and that bridge: an agent drops `{verb,args}` JSON in `mica-bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, **trashes the consumed inbox file**, and writes `mica-bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. The bridge names visibility changes `versions.set-visible`; `versions.visibility` remains an alias for existing callers. Mutating verbs run through the per-file transaction queue, reject duplicate identities, and surface failures to callers. A desktop loopback transport into a running Obsidian instance remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
 
 ## Build & distribution
 

@@ -28,7 +28,7 @@ pnpm run check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 pnpm run build
-xvfb-run -a pnpm run e2e
+pnpm run e2e
 ```
 
 WHEN claiming release readiness THEN you SHALL additionally run:
@@ -37,11 +37,11 @@ WHEN claiming release readiness THEN you SHALL additionally run:
 cargo build --release -p mica-cli --locked
 pnpm run smoke
 pnpm run check:release:assets
-pnpm audit --audit-level high
+pnpm run audit:prod
 cargo deny check advisories
-xvfb-run -a pnpm run e2e:mobile
-xvfb-run -a pnpm run e2e:minimum
-xvfb-run -a pnpm run e2e:latest
+pnpm run e2e:mobile
+pnpm run e2e:minimum
+pnpm run e2e:latest
 ```
 
 WHEN a change is documentation-only and does not alter a command, contract, or
@@ -76,6 +76,22 @@ WHEN the UI and reducer disagree about whether an operation is legal THEN you
 SHALL restore parity. You SHALL NOT let the UI advertise a no-op or rejected
 operation; the reducer remains the final authority.
 
+WHEN a surface can be rendered, described, exported, and copied THEN you SHALL
+derive all of them from one ordered plan computed once. You SHALL NOT re-derive
+what is displayed inside the exporter; a second derivation is how a clipboard
+comes to hold a different comparison than the screen.
+
+WHEN a control does not apply in the current mode THEN you SHALL disable it with
+its reason. You SHALL NOT leave it enabled and inert, and you SHALL NOT hide a
+selection the user made — an input the plan excludes SHALL be reported with why.
+
+WHEN naming a structural element for a user THEN you SHALL identify it by
+location, type, and position among same-kind siblings, preserving authored
+casing. You SHALL NOT name it from its content: a leaf's derived label is its
+first source line, which neither survives edits nor separates siblings. WHEN a
+value is case-folded or grouped for matching THEN you SHALL keep the authored
+value alongside it for display.
+
 ## Preserve bytes unless the user changed them
 
 `parse → serialize` is byte-identical for an unedited tree. Leaves represent
@@ -85,6 +101,10 @@ WHEN changing parsing, serialization, hashing, line handling, or structural
 normalization THEN you SHALL pin current behavior first and keep round-trip
 coverage for LF, CRLF, BOMs where supported, missing final newlines, deep
 nesting, large documents, inner fences, and real-note fixtures.
+
+WHEN converting text offsets THEN you SHALL name the unit: UTF-8 bytes, Unicode
+scalars, or UTF-16 code units. You SHALL combine UTF-16 units only for a valid
+surrogate pair and test isolated surrogates and non-BMP text.
 
 You SHALL distinguish authored content from structural scaffolding:
 
@@ -125,6 +145,10 @@ WHEN overwriting mutable user data THEN you SHALL use an exact preimage or
 generation guard. WHEN an operation is stale THEN you SHALL preserve both the
 current data and the user's draft.
 
+WHEN an operation suspends after reading mutable authority THEN its validation
+is stale; you SHALL re-read and revalidate every generation or preimage guard
+after the last suspension and before the first persistent side effect.
+
 WHEN publishing multiple related effects THEN you SHALL make them atomic or
 recoverable:
 
@@ -141,9 +165,23 @@ WHEN reading content-addressed or compressed data THEN you SHALL verify its
 address and enforce compressed and decompressed size bounds before returning
 it. You SHALL NOT follow symlinks through vault or sidecar trust boundaries.
 
-WHEN handling an error THEN you SHALL make failure visible and preserve the
-last known-good state. You MAY catch and ignore only explicitly best-effort
-cleanup.
+WHEN read-modify-writing an extensible object THEN you SHALL preserve unknown
+fields; otherwise you SHALL reject them before writing. You SHALL NOT silently
+drop fields you do not understand.
+
+WHEN handling an error THEN you SHALL make failure visible at its owning
+boundary and preserve the last known-good state. You SHALL NOT emit repeated
+user notices from a hot loop; you SHALL coalesce them or report through the
+owning operation. You MAY catch and ignore only explicitly best-effort cleanup.
+
+WHEN folding append-only, resumable, or legacy events THEN each event SHALL
+establish every state-existence fact it asserts. You SHALL NOT require an
+earlier creation event unless the format does, and you SHALL test valid
+prefixes and isolated compatibility events.
+
+WHEN output is hashed, content-addressed, persisted, or compared THEN you SHALL
+derive its bytes and order canonically from explicit inputs. You SHALL NOT rely
+on map iteration, locale, or ambient time or randomness unless recorded.
 
 ## Complexity is part of correctness
 
@@ -152,11 +190,41 @@ changed path runs per keystroke, per cursor transaction, per pointer frame, per
 render, per edit, per file, or per release. The hotter the path, the smaller
 its allocation and scan budget.
 
-WHEN touching a hot path THEN you SHALL state and verify its expected
-time/space complexity. You SHALL prefer one pass and output-proportional space.
-You SHALL NOT accept hidden quadratic behavior from repeated scans,
-`shift()`, front insertion, nested serialization, cloning in fold loops, or
-DOM queries inside geometry loops.
+WHEN touching a user-sized path THEN you SHALL state and verify its time,
+peak auxiliary space, full-input pass count, and expensive boundary operations:
+I/O, parsing, bridge crossings, decompression, DOM queries, and layout reads.
+Several `O(n)` passes are still duplicated work.
+
+On user-sized paths you SHALL prefer one pass, borrowed input, and
+output-proportional space. You SHALL NOT repeat scans; front-remove or insert;
+query a growing collection from its own loop; repeatedly serialize or clone;
+or query DOM structure inside geometry loops.
+
+### Data movement, lookup, and caching
+
+WHEN several consumers need facts from one document, file, or ledger generation
+THEN you SHALL build one validated index or report and reuse it. You SHALL
+discard it when its authority changes; cached text, CST nodes, and offsets
+SHALL NOT outlive that generation. You SHALL NOT reread storage merely to get
+another projection of it.
+
+WHEN repeated membership and stable order are both required THEN you SHALL use
+a map or set for lookup plus an ordered vector or final sort. You SHALL NOT pay
+quadratic lookup cost merely to preserve order.
+
+WHEN consuming large input THEN you SHALL borrow, stream, advance a
+source-ordered cursor, or emit through a callback. You SHALL NOT materialize
+lines, matches, filtered copies, serialized subtrees, or whole-input joins
+merely to inspect, count, hash, or compare them.
+
+WHEN preallocating THEN you SHALL derive capacity from known output
+cardinality or use a conservative cap. You SHALL NOT reserve memory from input
+byte length when the number of produced items can be far smaller.
+
+WHEN adding a cache THEN you SHALL define its authority generation, reuse
+condition, entry and byte bounds, eviction, and owner. Single-use values SHOULD
+bypass it; reusable values SHOULD leave after their last use. You SHALL budget
+peak memory across input, cache, candidate, rollback, and final output together.
 
 ### Per keystroke and cursor transaction
 
@@ -169,9 +237,11 @@ consumers to rewrite.
 ### Per pointer move and animation frame
 
 WHEN a gesture starts THEN you SHALL collect structural membership, indices,
-and stable elements once. During frame loops you SHALL re-read only geometry
-that can move. You SHALL NOT query the DOM tree, parse attributes, allocate
-candidate collections, or recompute after a scroll position has saturated.
+and stable elements once. In frame loops you SHALL batch reads before writes,
+re-read only moving geometry, and reuse measurements. You SHALL NOT re-query
+known membership, re-parse attributes, rebuild candidates, or recompute after
+scroll saturation. You MAY live-hit-test where clipping, transforms, or
+stacking make cached geometry insufficient.
 
 WHEN computing drop targets THEN you SHALL describe visible, reachable
 interaction space. A target behind clipping, scrolling, or sticky controls is
@@ -214,8 +284,9 @@ an editor. WHEN the user selects a content type THEN you MAY create that child
 and focus its editor.
 
 WHEN adding a read-only action such as copy, inspect, reveal, or navigate THEN
-you SHALL expose it in both Reading view and Live Preview. You SHALL keep
-mutation controls conditional on an editable context.
+you SHALL expose it in Reading view and Live Preview wherever the action has a
+referent in that mode. You SHALL keep mutation controls conditional on an
+editable context.
 
 WHEN already-rendered controls depend on settings THEN you SHALL read the
 current setting at activation time or use a deliberately invalidated render
@@ -304,6 +375,16 @@ WHEN anything outlives a function call THEN you SHALL give it an owner:
 - WHEN adding a body-level overlay THEN you SHALL close it on teardown as well
   as user dismissal.
 
+WHEN a root rerender, early return, or close replaces an owned surface THEN you
+SHALL invoke one idempotent teardown for its children, observers, listeners,
+timers, workers, asynchronous work, and stale DOM references. You SHALL cancel
+work when possible and discard results returned after teardown or generation
+advance.
+
+WHEN an operation is one-shot THEN you SHALL use the shortest-lived API that
+satisfies it. You SHALL NOT create a retained, watch, or incremental context
+only to perform one operation and immediately dispose it.
+
 WHEN a widget rebuild destroys DOM without an explicit destroy callback THEN
 you SHALL sweep disconnected entries rather than retaining them indefinitely.
 
@@ -315,6 +396,11 @@ or protects an invariant.
 WHEN a repeated operation has one meaning and at least three call sites THEN
 you SHOULD extract one small helper. WHEN only two call sites are merely
 similar THEN you SHOULD keep them local until their shared contract is proven.
+
+WHEN extracting or broadening a helper THEN you SHALL preserve its scope,
+ordering, availability, fallback, timing, ownership, and failure contract. A
+wait-then-act helper SHALL act on the resolved instance and SHALL NOT silently
+succeed when unresolved.
 
 You SHALL NOT split modules, add layers, introduce frameworks, or create
 configuration merely to satisfy line-count aesthetics. File length is a
@@ -344,9 +430,41 @@ that can contain the defect:
 - integration tests for filesystem transactions and recovery;
 - real-Obsidian tests for rendering, focus, input, themes, and lifecycle.
 
+WHEN optimizing THEN you SHALL pin semantics before the refactor and add the
+cheapest resource contract that would fail under the rejected design. You
+SHALL test relevant adversarial cardinalities: one huge line, duplicates,
+all-unique values, cache reuse, and valid event prefixes. You SHALL prefer
+structural bounds and eviction assertions over timing-sensitive unit tests;
+benchmarks supplement, never replace, semantic tests.
+
 WHEN writing E2E assertions THEN you SHALL prefer persisted note text or public
 plugin contracts over incidental DOM shape. You MAY use DOM assertions for
 accessibility, visibility, and interaction availability.
+
+WHEN a test acts on an entity THEN you SHALL address it by an identity the
+operation under test cannot change. A displayed ordinal derived from what is
+currently visible — `v{n}` renumbers whenever a checkpoint leaves the timeline —
+may locate a row, but every action and assertion after that SHALL use the stable
+id. You SHALL expose that id as a data attribute rather than have tests infer it.
+
+WHEN a fixture owns persistent state outside the file it seeds — a sidecar
+ledger, stored objects, remembered settings — THEN each test SHALL get its own,
+or SHALL reset that state explicitly. Rewriting a note body does not clear its
+history, and accumulated state makes a test assert something different on its
+second run than its first. WHEN tests are isolated this way THEN every fixture
+query SHALL be scoped to its own block or view: per-test fixtures multiply the
+mounted blocks a bare selector can match, so isolation without scoping trades a
+stale-state bug for an intermittent wrong-element one.
+
+WHEN a test needs a state to persist THEN you SHALL provoke the event that would
+destroy it and assert survival, rather than waiting and observing that nothing
+happened. A fixed pause proves neither that the state held nor that anything
+occurred at all.
+
+WHEN running the E2E suite THEN you SHALL invoke it through the repository's
+`e2e` scripts, which launch Obsidian on a virtual display where one exists. You
+SHALL NOT call `wdio` directly: a real Obsidian window takes focus from whatever
+the user is doing, and the suite launches one repeatedly.
 
 WHEN querying the DOM in E2E THEN you SHALL scope the query to the active
 Markdown view or an explicitly owned fixture root. Background leaves and
@@ -373,6 +491,14 @@ supported depth limit.
 WHEN scripting a source rewrite THEN you SHALL assert that every intended match
 exists and is unique enough before replacement. A silent no-op rewrite is a
 failed change.
+
+## Precedence
+
+WHEN a correctness, security, or user-data-preservation rule conflicts with a
+cost or cleanliness rule THEN correctness, security, and preservation prevail.
+WHEN clauses collide with no tiebreak written THEN the prohibition beats the
+mandate; failing that you SHALL take the more reversible course and report the
+collision.
 
 ## Shipping and active state
 
