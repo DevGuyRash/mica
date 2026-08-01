@@ -74,7 +74,7 @@ parentPort.on("message", (data) => self.onmessage({ data }));
 				matchCase: true,
 			});
 		});
-		assert.equal(response.ok, true, response.error);
+		assert.equal(response.ok, true, response.error ?? "search worker rejected the request");
 		const ranges = new Uint32Array(response.ranges!);
 		const elapsed = performance.now() - started;
 		assert.ok(elapsed <= TIME_BUDGET_MS.search, `search took ${elapsed.toFixed(1)} ms`);
@@ -112,7 +112,7 @@ assert.equal(statisticsLarge.value.words, 2048);
 assertNearLinear("statistics", statisticsSmall.elapsed, statisticsLarge.elapsed);
 
 const copyFixture = (document: string): string =>
-	copyNodes([{ kind: "leaf", text: document } satisfies MicaNode], {
+	copyNodes([{ kind: "leaf", text: document, is_code: false } satisfies MicaNode], {
 		includeMicaSyntax: true,
 		includeOuterContainer: true,
 		includeLineNumbers: true,
@@ -136,9 +136,10 @@ function scopeFixture(count: number, revision = "original"): { source: string; c
 			kind: "container",
 			name: "section",
 			title: `Scope ${index}`,
+			colons: 3,
 			open_line: open,
 			close_line: close,
-			children: [{ kind: "leaf", text: body }],
+			children: [{ kind: "leaf", text: body, is_code: false }],
 		});
 	}
 	return { source, cst: { children } };
@@ -172,9 +173,10 @@ const duplicateScopeFixture = (count: number): { source: string; cst: Cst } => {
 		kind: "container",
 		name: "section",
 		title: "",
+		colons: 3,
 		open_line: ":::section\n",
 		close_line: ":::\n",
-		children: [{ kind: "leaf", text: "identical empty-like body\n" }],
+		children: [{ kind: "leaf", text: "identical empty-like body\n", is_code: false }],
 	});
 	const children = Array.from({ length: count }, node);
 	return { source: ":::section\nidentical empty-like body\n:::\n".repeat(count), cst: { children } };
@@ -208,6 +210,7 @@ const lineage = timed("lineage", () =>
 		null,
 	),
 );
+assert.ok(lineage.value, "a 200-checkpoint lineage resolves");
 assert.equal(lineage.value.length, 200);
 
 const memoryAfter = process.memoryUsage();

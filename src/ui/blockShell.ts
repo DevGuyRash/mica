@@ -4,7 +4,15 @@ import type MicaPlugin from "../main";
 import { parseBlock, scanBlocksView, serializeCst, type Cst, type MicaNode } from "../wasm/bridge";
 import { readObject } from "../storage/sidecar";
 import type { Reveal, StructOp } from "../cst/ops";
-import { makeDraggable, type CombineSpec, type CombineTargetElement } from "./dnd";
+import {
+	combineKindOf,
+	combineNeedsMixed,
+	makeDraggable,
+	regionKind,
+	type CombineKind,
+	type CombineSpec,
+	type CombineTargetElement,
+} from "./dnd";
 import { draftKey, openLightboxFor, openQuickEdit, type RegionTarget } from "./quickEdit";
 import { setMicaIcon } from "../icons/setMicaIcon";
 import { openCalloutEditor, openCalloutEditorFor, parseCallout } from "./calloutEditor";
@@ -342,6 +350,22 @@ function markInspectable(el: HTMLElement, ctx: RenderCtx, key: string, ordinalBa
 	}
 }
 
+/**
+ * A tab chip is the only way to reach the elements inside its panel, so an
+ * unmodified activation navigates and leaves the selection alone.
+ *
+ * Selecting through it would make cross-tab selection impossible: reaching the
+ * second tab would discard whatever was picked in the first. The tab itself
+ * stays selectable by modifier-activation, by clicking its panel, and from its
+ * actions menu.
+ */
+function navigatesOnly(
+	scope: HTMLElement,
+	event: Pick<MouseEvent | KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey">,
+): boolean {
+	return scope.hasClass("mica-tab-chip") && !(event.ctrlKey || event.metaKey || event.shiftKey);
+}
+
 function selectInspectionScope(
 	scope: HTMLElement,
 	ctx: RenderCtx,
@@ -429,6 +453,7 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 			}
 			const scope = target.closest<HTMLElement>("[data-mica-inspect-key]");
 			if (!scope || !el.contains(scope)) return;
+			if (navigatesOnly(scope, event)) return;
 			selectInspectionScope(scope, ctx, event);
 		});
 		el.addEventListener("keydown", (event) => {
@@ -456,6 +481,7 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 				return;
 			}
 			if (event.key !== "Enter" && event.key !== " ") return;
+			if (navigatesOnly(scope, event)) return;
 			event.preventDefault();
 			selectInspectionScope(scope, ctx, event);
 		});
@@ -924,42 +950,44 @@ function foldSummary(text: string): string {
 	return "(empty)";
 }
 
-function isPlainMarkdown(text: string): boolean {
-	return Boolean(text.trim()) && !parseCallout(text) && !parseCodeFence(text);
-}
-
-/** UI-side promise filter for the reducer's deliberately narrow compatibility
- * contract. The shared core repeats every check and remains authoritative. */
+/**
+ * UI-side promise filter for the reducer's compatibility contract. The shared
+ * core repeats every check and remains authoritative.
+ *
+ * Callouts and fenced code are candidates, not exclusions. Excluding them left
+ * them out of the combine index entirely, which silently redefined "the section
+ * below" as the next *prose* section — combining downward past a callout landed
+ * beyond it. What they cannot do is merge without `allowMixed`, and that is the
+ * caller's to ask for. Containers stay out: merging one would dissolve
+ * structure whose bytes uncombining could not restore.
+ */
 function combineSpecFor(target: RegionTarget): CombineSpec | null {
 	if (!target.logical) {
-		return isPlainMarkdown(target.original)
+		const key = combineKindOf(target.original);
+		return key
 			? {
 					path: [...target.path],
 					start: target.start,
 					end: target.end,
 					expected: target.original,
-					key: "markdown",
+					key,
 				}
 			: null;
 	}
 	const node = target.logical.node;
-	if (
-		node.kind !== "container" ||
-		node.name !== "section" ||
-		node.children.some(
-			(child) =>
-				child.kind !== "leaf" || child.is_code || (Boolean(child.text.trim()) && !isPlainMarkdown(child.text)),
-		)
-	)
+	if (node.kind !== "container" || node.name !== "section" || node.children.some((child) => child.kind !== "leaf"))
 		return null;
+	const key = regionKind(
+		node.children.map((child) => (child.kind === "leaf" ? combineKindOf(child.text, child.is_code) : null)),
+	);
 	const index = target.logical.path[target.logical.path.length - 1];
-	if (index === undefined) return null;
+	if (!key || index === undefined) return null;
 	return {
 		path: target.logical.path.slice(0, -1),
 		start: index,
 		end: index + 1,
 		expected: target.logical.source,
-		key: "markdown",
+		key,
 	};
 }
 
@@ -1929,7 +1957,7 @@ const MAX_COMBINE_RUN = 6;
  */
 function combineRunActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
 	const source = combineSpecFor(target);
-	if (!source) return [];
+	if (!source || !ctx.editable) return [];
 	// Built once per render by `rebuildCombineIndex`; rescanning here would make
 	// every menu cost a document-wide pass.
 	const ordered = ctx.combineOrder ?? [];
@@ -1958,9 +1986,10 @@ function combineRunActions(region: HTMLElement, ctx: RenderCtx, target: RegionTa
 		const slice = run.slice(0, length);
 		const last = slice[slice.length - 1];
 		const expected = slice.map((spec) => spec.expected).join("");
+		const mixed = combineNeedsMixed(slice.map((spec) => spec.key));
 		actions.push({
 			id: `combine-run-${length}`,
-			label: `Combine the next ${length} sections`,
+			label: `This and the next ${length - 1}${mixed ? " (merged as Markdown)" : ""}`,
 			icon: "between-horizontal-start",
 			run: () =>
 				applyWithUndo(
@@ -1971,7 +2000,7 @@ function combineRunActions(region: HTMLElement, ctx: RenderCtx, target: RegionTa
 						start: slice[0].start,
 						end: last.end,
 						expected,
-						allowMixed: slice.some((spec) => spec.key !== "markdown"),
+						allowMixed: mixed,
 					},
 					`${length} sections combined`,
 				),
@@ -1980,36 +2009,68 @@ function combineRunActions(region: HTMLElement, ctx: RenderCtx, target: RegionTa
 	return actions;
 }
 
+const COMBINE_KIND_NOUN: Record<CombineKind, string> = {
+	markdown: "section",
+	callout: "callout",
+	code: "code block",
+};
+
+/**
+ * One action per direction, grouped under a single menu entry.
+ *
+ * There used to be a plain and an "as Markdown" variant side by side. For two
+ * prose sections they produce byte-identical results — `allowMixed` is a
+ * permission the reducer needs, not a second outcome — so the pair was a choice
+ * that wasn't one. Where the permission *is* required the merge dissolves a
+ * callout or fence into the section, and that consequence belongs in the label
+ * rather than in a second item the user has to tell apart.
+ */
 function combineActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
 	const source = combineSpecFor(target);
-	if (!source) return [];
+	if (!source || !ctx.editable) return [];
 	const indexed = ctx.combineNeighbors?.get(region as CombineTargetElement);
 	if (!indexed) return [];
 	const neighbors = [
 		{ destination: indexed.previous, direction: "previous" },
 		{ destination: indexed.next, direction: "next" },
 	].filter((entry): entry is { destination: CombineSpec; direction: string } => Boolean(entry.destination));
-	return neighbors.flatMap(({ destination, direction }, index) => {
+	return neighbors.map(({ destination, direction }) => {
 		const where = direction === "previous" ? "above" : "below";
-		return [
-			{
-				id: `combine-${direction}`,
-				label: `Combine with section ${where}`,
-				icon: direction === "previous" ? "arrow-up-to-line" : "arrow-down-to-line",
-				separatorBefore: index === 0,
-				run: () => applyWithUndo(ctx, combineOp(source, destination), "Sections combined"),
-			},
-			{
-				// Offered separately because it dissolves a callout or code block
-				// into the merged section instead of leaving it addressable. The
-				// bytes are preserved either way.
-				id: `combine-${direction}-mixed`,
-				label: `Combine with section ${where} as Markdown`,
-				icon: "merge",
-				run: () => applyWithUndo(ctx, combineOp(source, destination, true), "Sections combined as Markdown"),
-			},
-		];
+		const mixed = combineNeedsMixed([source.key, destination.key]);
+		return {
+			id: `combine-${direction}`,
+			label: `With the ${COMBINE_KIND_NOUN[destination.key]} ${where}${mixed ? " (merged as Markdown)" : ""}`,
+			icon: direction === "previous" ? "arrow-up-to-line" : "arrow-down-to-line",
+			run: () =>
+				applyWithUndo(
+					ctx,
+					combineOp(source, destination, mixed),
+					mixed ? "Sections combined as Markdown" : "Sections combined",
+				),
+		};
 	});
+}
+
+/** The single menu entry that owns every combine. Nesting them keeps a section
+ * menu readable once callouts and fenced code became combinable: the direction
+ * pair and every reachable run length would otherwise sit at the top level. */
+function combineMenu(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
+	const runs = combineRunActions(region, ctx, target);
+	if (runs.length) runs[0] = { ...runs[0], separatorBefore: true };
+	const children = [...combineActions(region, ctx, target), ...runs];
+	if (!children.length) return [];
+	return [
+		{
+			id: "combine",
+			label: "Combine",
+			icon: "between-horizontal-start",
+			separatorBefore: true,
+			children,
+			// Reached only if a surface renders this as a direct button; the menu
+			// path opens the children instead.
+			run: () => children[0].run(),
+		},
+	];
 }
 
 function sectionActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
@@ -2044,7 +2105,7 @@ function sectionActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarge
 						),
 				},
 			);
-		actions.push(...combineActions(region, ctx, target), ...combineRunActions(region, ctx, target));
+		actions.push(...combineMenu(region, ctx, target));
 	} else if (ctx.editable) {
 		const kind = classifySection(target.original);
 		actions.push(
@@ -2081,7 +2142,7 @@ function sectionActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarge
 				run: () => convertRegion(ctx, target, destination),
 			});
 		}
-		actions.push(...combineActions(region, ctx, target), ...combineRunActions(region, ctx, target));
+		actions.push(...combineMenu(region, ctx, target));
 	}
 	if (ctx.editable) {
 		const fkey = foldKeyForRegion(target);
@@ -2795,6 +2856,18 @@ function tabActions(
 	copy: CopyControl,
 ): ActionSpec[] {
 	const actions: ActionSpec[] = [copyAction(ctx, copy)];
+	if (ctx.inspection) {
+		// The keyboard- and touch-reachable way to select the tab itself, since a
+		// plain activation of its chip navigates instead.
+		const key = `tab:${[...path, idx].join(".")}`;
+		const selected = (ctx.inspection.selectedKeys ?? [ctx.inspection.selectedKey ?? "block:"]).includes(key);
+		actions.push({
+			id: "inspect-select",
+			label: selected ? "Remove this tab from the comparison" : "Add this tab to the comparison",
+			icon: selected ? "square-minus" : "square-plus",
+			run: () => ctx.inspection?.onSelect(key, { toggle: true, range: false, additive: false }),
+		});
+	}
 	if (!ctx.editable) return actions;
 	actions.push(
 		{

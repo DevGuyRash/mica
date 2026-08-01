@@ -1,3 +1,5 @@
+import { parseCallout } from "./calloutFence";
+import { parseCodeFence } from "./codeFence";
 import type { StructOp } from "../cst/ops";
 
 /**
@@ -19,15 +21,42 @@ import type { StructOp } from "../cst/ops";
 export type DragKind = "tab" | "cell" | "group" | "region";
 
 /** Exact reducer coordinates for one section that may participate in a
- * combine gesture. The compatibility key is deliberately narrow: the core is
- * the final authority, while the UI uses this key only to avoid promising an
- * operation that the reducer will reject. */
+ * combine gesture. The kind is what the section holds; the core is the final
+ * authority, while the UI uses the kind only to describe the operation and to
+ * decide whether it needs the reducer's mixed-content permission. */
+export type CombineKind = "markdown" | "callout" | "code";
+
 export interface CombineSpec {
 	path: number[];
 	start: number;
 	end: number;
 	expected: string;
-	key: "markdown";
+	key: CombineKind;
+}
+
+/** A merge whose parts are not all plain prose dissolves the callout or fence
+ * into the merged section, so the reducer requires it to be asked for by name.
+ * The bytes survive either way; what changes is whether the part stays
+ * separately addressable. */
+export function combineNeedsMixed(kinds: readonly CombineKind[]): boolean {
+	return kinds.some((kind) => kind !== "markdown");
+}
+
+/** What a single content leaf holds. Blank text has no kind — it is scaffolding
+ * between sections, and carries no say in how a merge is described. */
+export function combineKindOf(text: string, isCode = false): CombineKind | null {
+	if (!text.trim()) return null;
+	if (isCode || parseCodeFence(text)) return "code";
+	if (parseCallout(text)) return "callout";
+	return "markdown";
+}
+
+/** The kind that decides how a merge is described and whether it needs the
+ * reducer's mixed permission: plain only when every content leaf is prose. */
+export function regionKind(kinds: readonly (CombineKind | null)[]): CombineKind | null {
+	const present = kinds.filter((kind): kind is CombineKind => kind !== null);
+	if (!present.length) return null;
+	return present.find((kind) => kind !== "markdown") ?? "markdown";
 }
 
 /** Typed light-DOM hook installed by the renderer on first-class regions.
@@ -432,7 +461,9 @@ function collectCombineTargets(root: HTMLElement, source: HTMLElement, spec: Dra
 	for (const el of Array.from(root.querySelectorAll<CombineTargetElement>(".mica-region"))) {
 		if (el === source || el.closest(".mica") !== root) continue;
 		const target = el.micaCombine;
-		if (!target || target.key !== sourceSpec.key || sameCombineRegion(sourceSpec, target)) continue;
+		// Kinds may differ: the drop simply asks for a mixed merge, exactly as the
+		// menu does. Refusing unlike kinds here is what made a callout undroppable.
+		if (!target || sameCombineRegion(sourceSpec, target)) continue;
 		targets.push({
 			el,
 			spec: { ...target, path: [...target.path] },
@@ -951,6 +982,7 @@ function finishDrag(commit: boolean): void {
 	if (combineSource && combineTarget) {
 		apply?.({
 			op: "combineRegions",
+			allowMixed: combineNeedsMixed([combineSource.key, combineTarget.key]),
 			sourcePath: combineSource.path,
 			sourceStart: combineSource.start,
 			sourceEnd: combineSource.end,

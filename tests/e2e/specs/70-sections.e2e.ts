@@ -257,6 +257,45 @@ describe("structured sections", function () {
 		);
 	});
 
+	it("treats a callout as the section below it, and says the merge dissolves it", async function () {
+		// Callouts and fenced code used to be absent from the combine index, which
+		// silently redefined "the section below" as the next *prose* section:
+		// combining downward from Alpha landed on Gamma and jumped the callout.
+		const original = "Alpha para\n\n> [!note] Nota\n> Callout body\n\nGamma para\n";
+		await seedAndOpen("CombineAcross.md", `Intro.\n\n\`\`\`mica id=combine-across\n${original}\`\`\`\n`);
+		await browser.waitUntil(
+			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 3),
+			{ timeout: 8000, timeoutMsg: "the three regions never rendered" },
+		);
+		await browser.executeObsidian(() => {
+			const first = document.querySelector<HTMLElement>(".mica-lp .mica-region");
+			first?.querySelector<HTMLButtonElement>(".mica-entity-menu")?.click();
+		});
+		await clickLatestMenuItem("Combine");
+		// The label names what is actually below and warns about the consequence,
+		// which is the only thing the old "as Markdown" twin communicated.
+		await clickLatestMenuItem("With the callout below (merged as Markdown)");
+		await browser.waitUntil(
+			async () => {
+				const source = await documentSource();
+				return source.includes(":::section\nAlpha para\n\n> [!note] Nota\n> Callout body\n:::\n");
+			},
+			{
+				timeout: 8000,
+				timeoutMsg: "combining downward did not merge with the callout directly below, in document order",
+			},
+		);
+		expect(await documentSource()).toContain("Gamma para");
+		await browser.executeObsidian(() => {
+			(document.querySelector(".mica-lp .mica-logical-section .mica-entity-menu") as HTMLElement).click();
+		});
+		await clickLatestMenuItem("Uncombine section");
+		await browser.waitUntil(async () => (await documentSource()).includes(original), {
+			timeout: 8000,
+			timeoutMsg: "uncombining did not restore the callout's bytes exactly",
+		});
+	});
+
 	it("merges a whole run of sections in one action, and uncombines it exactly", async function () {
 		const original = "Alpha para\n\nBeta para\n\nGamma para\n";
 		await seedAndOpen("CombineRun.md", `Intro.\n\n\`\`\`mica id=combine-run\n${original}\`\`\`\n`);
@@ -269,7 +308,8 @@ describe("structured sections", function () {
 			const first = document.querySelector<HTMLElement>(".mica-lp .mica-region");
 			first?.querySelector<HTMLButtonElement>(".mica-entity-menu")?.click();
 		});
-		await clickLatestMenuItem("Combine the next 3 sections");
+		await clickLatestMenuItem("Combine");
+		await clickLatestMenuItem("This and the next 2");
 		await browser.waitUntil(
 			async () => (await documentSource()).includes(":::section\nAlpha para\n\nBeta para\n\nGamma para\n:::\n"),
 			{ timeout: 8000, timeoutMsg: "the run did not merge into one section in document order" },
@@ -298,21 +338,57 @@ describe("structured sections", function () {
 			() => browser.executeObsidian(() => document.querySelectorAll(".mica-lp .mica-region").length >= 2),
 			{ timeout: 8000, timeoutMsg: "the compatible regions never rendered" },
 		);
-		const combineControls = await browser.executeObsidian(() => {
-			const previous = document.querySelector<HTMLButtonElement>('[data-mica-action="combine-previous"]');
-			const next = document.querySelector<HTMLButtonElement>('[data-mica-action="combine-next"]');
-			return {
-				previousLabel: previous?.getAttribute("aria-label") ?? "",
-				nextLabel: next?.getAttribute("aria-label") ?? "",
-				previousIcon: previous?.querySelector("svg")?.innerHTML ?? "",
-				nextIcon: next?.querySelector("svg")?.innerHTML ?? "",
-			};
-		});
-		expect(combineControls.previousLabel).toBe("Combine with section above");
-		expect(combineControls.nextLabel).toBe("Combine with section below");
-		expect(combineControls.previousIcon.length).toBeGreaterThan(0);
-		expect(combineControls.nextIcon.length).toBeGreaterThan(0);
-		expect(combineControls.previousIcon).not.toBe(combineControls.nextIcon);
+		// One grouped control rather than a direction pair: the button names the
+		// group and opens the options, so nothing performs a direction silently.
+		// A dismissed menu animates out and stays mounted meanwhile, so read only
+		// the newest *visible* one — and wait for the previous to actually leave
+		// before opening the next, rather than assuming Escape was instant.
+		const visibleMenuItems = (): Promise<string[]> =>
+			browser.executeObsidian(() => {
+				const menu = Array.from(document.querySelectorAll<HTMLElement>("body > .menu"))
+					.filter((element) => element.isConnected && element.getClientRects().length > 0)
+					.at(-1);
+				return Array.from(menu?.querySelectorAll<HTMLElement>(".menu-item-title") ?? []).map(
+					(element) => element.textContent?.trim() ?? "",
+				);
+			});
+		const closeAnyMenu = async (): Promise<void> => {
+			await browser.keys(["Escape"]);
+			await browser.waitUntil(async () => (await visibleMenuItems()).length === 0, {
+				timeout: 8000,
+				timeoutMsg: "a menu stayed on screen after Escape",
+			});
+		};
+		const openCombineOptions = async (regionIndex: number): Promise<string[]> => {
+			const control = await browser.executeObsidian((_, index) => {
+				const region = document.querySelectorAll<HTMLElement>(".mica-lp .mica-region")[index];
+				const button = region?.querySelector<HTMLButtonElement>('[data-mica-action="combine"]');
+				button?.click();
+				return {
+					label: button?.getAttribute("aria-label") ?? "",
+					popup: button?.getAttribute("aria-haspopup") ?? "",
+					icon: button?.querySelector("svg")?.innerHTML ?? "",
+				};
+			}, regionIndex);
+			expect(control.label).toBe("Combine");
+			expect(control.popup).toBe("menu");
+			expect(control.icon.length).toBeGreaterThan(0);
+			return browser.waitUntil(
+				async () => {
+					const items = await visibleMenuItems();
+					return items.some((item) => item.startsWith("With the ")) ? items : false;
+				},
+				{ timeout: 8000, timeoutMsg: "the grouped combine control did not open its options" },
+			);
+		};
+		// Both sections are prose, so neither direction warns about dissolving
+		// anything — and each direction is one item, not a plain/as-Markdown pair
+		// whose results were byte-identical. The first region has nothing above
+		// it, which is how the neighbour index proves it is not guessing.
+		expect(await openCombineOptions(0)).toEqual(["With the section below"]);
+		await closeAnyMenu();
+		expect(await openCombineOptions(1)).toEqual(["With the section above"]);
+		await closeAnyMenu();
 
 		const feedback = await browser.executeObsidian(async () => {
 			const regions = Array.from(document.querySelectorAll<HTMLElement>(".mica-lp .mica-region"));

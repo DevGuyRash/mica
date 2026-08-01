@@ -1710,7 +1710,9 @@ describe("production editor, actions, and focused-history upgrade", function () 
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
-					() => document.querySelector(".mica-inspector-selection-count")?.textContent === "2 selected",
+					() =>
+						document.querySelector(".mica-inspector-selection-count")?.textContent ===
+						"2 selected · numbered in document order",
 				),
 			{ timeout: 8000, timeoutMsg: "Ctrl-click did not add a second inspected element" },
 		);

@@ -4229,7 +4229,11 @@ body[data-mica-dock-surface="custom"] {
 	outline: 2px solid var(--mica-inspector-selected, var(--mica-accent));
 	outline-offset: 2px;
 }
-.mica-inspection-render .is-inspect-selected::after {
+/* Attribute-gated: `attr()` on a missing attribute yields an empty string, and
+   an empty badge still paints its background. A tab's panel deliberately has no
+   ordinal — only its chip does — so an ungated rule draws a blank accent dot
+   under the tab strip for every selected tab. */
+.mica-inspection-render .is-inspect-selected[data-mica-inspect-order]::after {
 	content: attr(data-mica-inspect-order);
 	position: absolute;
 	z-index: 3;

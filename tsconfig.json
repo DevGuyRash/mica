@@ -13,11 +13,12 @@
 		"esModuleInterop": true,
 		"isolatedModules": true,
 		"resolveJsonModule": true,
+		"allowImportingTsExtensions": true,
 		"skipLibCheck": true,
 		"noEmit": true,
 		"forceConsistentCasingInFileNames": true,
 		"useDefineForClassFields": false
 	},
-	"include": ["src/**/*.ts"],
+	"include": ["src/**/*.ts", "tests/**/*.mts"],
 	"exclude": ["node_modules", "src/wasm/pkg"]
 }

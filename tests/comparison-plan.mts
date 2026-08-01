@@ -8,7 +8,13 @@ import {
 	type ComparisonTarget,
 } from "../src/ui/comparisonPlan.ts";
 
-const target = (key: string, label = key): ComparisonTarget => ({ key, label });
+/** `vN` ranks as N, so these fixtures carry real chronology and the layout rule
+ * is exercised by every case rather than only the ones written for it. */
+const target = (key: string, label = key): ComparisonTarget => ({
+	key,
+	label,
+	order: Number(/\d+/.exec(key)?.[0] ?? 0),
+});
 const element = (id: string, name = id): { id: string; name: string } => ({ id, name });
 
 // --- pair degradation ------------------------------------------------------
@@ -46,10 +52,10 @@ const withBasePicked = planComparison({
 assert.equal(withBasePicked.kind, "multi");
 assert.deepEqual(
 	withBasePicked.targets.map((entry) => entry.key),
-	["v15", "v14"],
+	["v14", "v15"],
 	"the base never renders as one of its own comparison columns",
 );
-assert.deepEqual(withBasePicked.droppedBase, target("v16"), "dropping the base is reported, not silent");
+assert.equal(withBasePicked.droppedBase?.key, "v16", "dropping the base is reported, not silent");
 
 assert.equal(
 	planComparison({
@@ -69,8 +75,40 @@ assert.deepEqual(
 		selected: target("v16"),
 		elements: [],
 	}).targets.map((entry) => entry.key),
-	["v15", "v14"],
+	["v14", "v15"],
 	"a duplicated pick contributes one column",
+);
+
+// --- columns read forwards in time -----------------------------------------
+//
+// The timeline hands picks over newest first. Laying them out in that order
+// makes a diff read backwards, so display is chronological regardless of how
+// the picks arrived.
+
+assert.deepEqual(
+	planComparison({
+		base: target("v16"),
+		picks: [target("v15"), target("v13"), target("v14")],
+		selected: target("v16"),
+		elements: [],
+	}).targets.map((entry) => entry.key),
+	["v13", "v14", "v15"],
+	"columns are laid out oldest to newest whatever order the picks arrive in",
+);
+
+const ties = planComparison({
+	base: { key: "base", label: "base", order: 0 },
+	picks: [
+		{ key: "b", label: "b", order: 5 },
+		{ key: "a", label: "a", order: 5 },
+	],
+	selected: { key: "base", label: "base", order: 0 },
+	elements: [],
+});
+assert.deepEqual(
+	ties.targets.map((entry) => entry.key),
+	["b", "a"],
+	"equal ranks keep their incoming order rather than shuffling between renders",
 );
 
 // --- column overflow is reported, never silently truncated ------------------
@@ -79,8 +117,13 @@ const many = ["v15", "v14", "v13", "v12", "v11", "v10"].map((key) => target(key)
 const capped = planComparison({ base: target("v16"), picks: many, selected: target("v16"), elements: [] });
 assert.equal(capped.targets.length, MAX_COMPARISON_COLUMNS);
 assert.deepEqual(
+	capped.targets.map((entry) => entry.key),
+	["v12", "v13", "v14", "v15"],
+	"inclusion follows the order the timeline offered; only the layout is chronological",
+);
+assert.deepEqual(
 	capped.overflow.map((entry) => entry.key),
-	["v11", "v10"],
+	["v10", "v11"],
 	"targets beyond the column budget are named so the UI can say what it dropped",
 );
 
@@ -92,6 +135,11 @@ const uncapped = planComparison({
 	columnCap: Number.POSITIVE_INFINITY,
 });
 assert.equal(uncapped.targets.length, 6, "stacked layouts have no column budget");
+assert.deepEqual(
+	uncapped.targets.map((entry) => entry.key),
+	["v10", "v11", "v12", "v13", "v14", "v15"],
+	"lifting the cap keeps the chronological layout",
+);
 assert.deepEqual(uncapped.overflow, [], "nothing overflows when the cap is lifted");
 
 // --- cells are element-major and match display order ------------------------
@@ -104,7 +152,7 @@ const composed = planComparison({
 });
 assert.deepEqual(
 	planCells(composed).map((cell) => `${cell.element?.id}@${cell.target.key}`),
-	["a@v15", "a@v14", "b@v15", "b@v14"],
+	["a@v14", "a@v15", "b@v14", "b@v15"],
 	"each focused element owns a row spanning every target, in that order",
 );
 assert.deepEqual(
@@ -126,13 +174,13 @@ assert.equal(wholeBlock[0].elementIndex, -1);
 // paints, so an undisplayed version must not silently reach the clipboard.
 assert.deepEqual(
 	planCells(capped).map((cell) => cell.target.key),
-	["v15", "v14", "v13", "v12"],
-	"copy covers exactly the displayed targets",
+	["v12", "v13", "v14", "v15"],
+	"copy covers exactly the displayed targets, in the order they are displayed",
 );
 
 // --- keys and description ---------------------------------------------------
 
-assert.deepEqual(planKeys(composed), ["v16", "v15", "v14"], "the base is loaded alongside every target");
+assert.deepEqual(planKeys(composed), ["v16", "v14", "v15"], "the base is loaded alongside every target");
 assert.deepEqual(
 	planKeys(planComparison({ base: target("v16"), picks: [], selected: target("v16"), elements: [] })),
 	["v16"],
@@ -140,7 +188,7 @@ assert.deepEqual(
 );
 
 assert.equal(describePlan(pair), "v15 → v16");
-assert.equal(describePlan(composed), "2 elements · v16 → v15, v14");
+assert.equal(describePlan(composed), "2 elements · v16 → v14, v15");
 assert.equal(
 	describePlan(
 		planComparison({

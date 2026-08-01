@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { Worker } from "node:worker_threads";
 import { SEARCH_WORKER_SOURCE } from "../src/ui/searchWorker.ts";
-import { buildSearchFlags } from "../src/ui/searchFlags.ts";
+import { buildSearchFlags, type SearchFlagResult } from "../src/ui/searchFlags.ts";
+
+/** Narrow to the rejected branch, so a result that unexpectedly succeeds fails
+ * here by name rather than by matching `undefined` against the pattern. */
+function flagError(result: SearchFlagResult): string {
+	assert.equal(result.ok, false, "expected these flags to be rejected");
+	return result.ok ? "" : result.error;
+}
 
 interface Request {
 	id: number;
@@ -75,15 +82,15 @@ assert.deepEqual(buildSearchFlags({ matchCase: true, multiline: false, dotAll: f
 	flags: "d",
 });
 assert.match(
-	buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "g" }).error,
+	flagError(buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "g" })),
 	/Global search checkbox/i,
 );
 assert.match(
-	buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "uu" }).error,
+	flagError(buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "uu" })),
 	/duplicate/i,
 );
 assert.match(
-	buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "m" }).error,
+	flagError(buildSearchFlags({ matchCase: true, multiline: false, dotAll: false, otherFlags: "m" })),
 	/controlled by the search checkboxes/i,
 );
 

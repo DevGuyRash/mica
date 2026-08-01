@@ -1,5 +1,5 @@
 import { setIcon, type App } from "obsidian";
-import { mountActionMenu, type ActionSpec } from "./actionMenu";
+import { mountActionMenu, openActionMenuAt, type ActionSpec } from "./actionMenu";
 import { packResponsiveActions, type ResponsiveActionCandidate } from "./responsiveActions";
 
 export interface ResponsiveActionStripOptions {
@@ -134,10 +134,14 @@ export function mountResponsiveActionStrip(
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			getActions()
-				.find((current) => current.id === action.id && !current.disabled)
-				?.run();
+			const current = getActions().find((candidate) => candidate.id === action.id && !candidate.disabled);
+			if (!current) return;
+			// A grouped action's button opens its options rather than silently
+			// performing one of them — the label names the group, not a choice.
+			if (current.children?.length) openActionMenuAt(current.children, button);
+			else current.run();
 		});
+		if (action.children?.length) button.setAttribute("aria-haspopup", "menu");
 		directButtons.set(action.id, button);
 		return button;
 	};

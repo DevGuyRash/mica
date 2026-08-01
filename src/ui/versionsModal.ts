@@ -455,27 +455,34 @@ export class VersionsModal extends Modal {
 		return row ? `v${row.n}${row.meta.label ? ` — ${row.meta.label}` : ""}` : key.slice(0, 10);
 	}
 
-	private target(key: string): ComparisonTarget {
-		return { key, label: this.keyLabel(key) };
-	}
-
 	/**
-	 * Picked checkpoints that can actually be compared. A removed checkpoint
-	 * stays selectable so bulk restore can reach it, but it has left the
-	 * timeline and has no comparable snapshot — it is never a target.
+	 * `this.rows` is newest first, so a row's chronological rank is its distance
+	 * from the end. The working copy outranks every checkpoint; anything absent
+	 * from the timeline sorts oldest, which keeps the empty-tree sentinel left.
+	 *
+	 * Callers that already hold a row index pass it — resolving the rank by
+	 * search would make building an N-target plan quadratic in the timeline.
 	 */
-	private pickedRows(): Row[] {
-		return this.rows.filter((row) => this.picked.has(row.meta.versionId));
+	private target(key: string, rowIndex?: number): ComparisonTarget {
+		const at = rowIndex ?? this.rows.findIndex((row) => row.meta.versionId === key);
+		const order = key === WORKING ? this.rows.length + 1 : at < 0 ? -1 : this.rows.length - at;
+		return { key, label: this.keyLabel(key), order };
 	}
 
 	/**
 	 * The one answer to "what am I comparing". Rendering, captions, copying and
 	 * control enablement all read this, so they cannot drift apart.
+	 *
+	 * Picks are walked from `this.rows`, which is the live timeline: a removed
+	 * checkpoint stays selectable so bulk restore can reach it, but it has no
+	 * comparable snapshot and is never a target.
 	 */
 	private plan(): ComparisonPlan {
 		return planComparison({
 			base: this.target(this.baseKey()),
-			picks: this.pickedRows().map((row) => this.target(row.meta.versionId)),
+			picks: this.rows.flatMap((row, index) =>
+				this.picked.has(row.meta.versionId) ? [this.target(row.meta.versionId, index)] : [],
+			),
 			selected: this.target(this.selected),
 			elements: this.focusedSelections.map((selection) => ({
 				id: this.locatorId(selection.locator),
@@ -1535,12 +1542,21 @@ export class VersionsModal extends Modal {
 		}
 		this.inspectSelection = reconcileScopeSelection(this.inspectSelection, index);
 		const selectionBar = surface.createDiv({ cls: "mica-inspector-selection-bar" });
-		selectionBar.createSpan({ cls: "mica-vt-label", text: "Select elements" });
+		// This control governs what a *plain* click does, nothing else. Labelling
+		// it "One / Multiple" made it read as a count, so holding Ctrl — which
+		// grows the selection without changing the mode — looked like it had
+		// failed. The live count belongs to the footer, which reports it.
+		selectionBar.createSpan({ cls: "mica-vt-label", text: "Plain click" });
 		for (const mode of ["one", "multiple"] as const) {
 			const button = selectionBar.createEl("button", {
 				cls: `clickable-icon mica-pop-seg ${this.inspectSelection.mode === mode ? "is-on" : ""}`,
-				text: mode === "one" ? "One" : "Multiple",
-				attr: { type: "button", "aria-pressed": String(this.inspectSelection.mode === mode) },
+				text: mode === "one" ? "Replaces" : "Adds",
+				attr: {
+					type: "button",
+					"aria-pressed": String(this.inspectSelection.mode === mode),
+					"aria-label":
+						mode === "one" ? "Plain click replaces the selection" : "Plain click adds to the selection",
+				},
 			});
 			button.addEventListener("click", () => {
 				this.inspectSelection = {
@@ -1557,9 +1573,10 @@ export class VersionsModal extends Modal {
 		selectionBar.createSpan({
 			cls: "mica-inspector-hint",
 			text:
-				this.inspectSelection.mode === "one"
-					? "Click selects one · Ctrl-click adds · Shift-click spans siblings"
-					: "Tap adds or removes · Shift-click spans siblings",
+				(this.inspectSelection.mode === "one"
+					? "Ctrl-click adds · Shift-click spans siblings"
+					: "Tap adds or removes · Shift-click spans siblings") +
+				" · Tab names switch tabs; Ctrl-click one to compare the tab itself",
 		});
 		surface.createDiv({
 			cls: "mica-diff-caption",
@@ -1588,7 +1605,11 @@ export class VersionsModal extends Modal {
 				const button = chips.createEl("button", {
 					cls: "mica-inspector-selection-chip",
 					text: `${position + 1}. ${scopeDisplayName(scope)}`,
-					attr: { type: "button", "aria-label": `Remove ${scopeDisplayName(scope)}` },
+					attr: {
+						type: "button",
+						"aria-label": `Remove ${scopeDisplayName(scope)}`,
+						title: `Row ${position + 1} of the comparison — click to remove`,
+					},
 				});
 				button.addEventListener("click", () => {
 					const keys = this.inspectSelection.keys.filter((candidate) => candidate !== selectedKey);
@@ -1600,9 +1621,15 @@ export class VersionsModal extends Modal {
 					this.renderDiffSurface();
 				});
 			}
+			// The numbers are document order, not click order — they are the row
+			// order of the comparison you are about to see, so they renumber when
+			// an earlier element joins. Saying so stops that reading as random.
 			footer.createSpan({
 				cls: "mica-inspector-selection-count",
-				text: `${this.inspectSelection.keys.length} selected`,
+				text:
+					this.inspectSelection.keys.length > 1
+						? `${this.inspectSelection.keys.length} selected · numbered in document order`
+						: `${this.inspectSelection.keys.length} selected`,
 				attr: { "aria-live": "polite" },
 			});
 			if (this.inspectSelection.mode === "multiple" && this.inspectSelection.keys.length) {

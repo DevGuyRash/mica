@@ -118,6 +118,20 @@ async function openVersionMenu(versionId: string): Promise<void> {
 	}, versionId);
 }
 
+/** Selection read from the rendered inspector rather than from a count, so a
+ * test can tell *which* elements are selected across a navigation. */
+const selectedInspectKeys = (): Promise<string[]> =>
+	browser.executeObsidian(() =>
+		Array.from(
+			document.querySelectorAll<HTMLElement>(
+				".mica-inspector-render .is-inspect-selected[data-mica-inspect-key]",
+			),
+		)
+			.map((element) => element.dataset.micaInspectKey ?? "")
+			.filter((key, index, all) => all.indexOf(key) === index)
+			.sort(),
+	);
+
 const nUpHeads = (): Promise<string[]> =>
 	browser.executeObsidian(() =>
 		Array.from(document.querySelectorAll<HTMLElement>(".mica-diff-nup-head")).map(
@@ -194,6 +208,21 @@ describe("version history comparison", function () {
 			);
 			expect(droppedNote).toContain(baseLabel);
 			expect(droppedNote).toContain("base");
+		});
+
+		it("lays columns out oldest to newest whatever order they were ticked in", async function () {
+			// The timeline lists newest first, so laying picks out in the order it
+			// hands them over made a diff read backwards in time. Ticking the newer
+			// one first proves the layout follows chronology, not the clicks.
+			await pickVersion(await versionIdByLabel("v4"));
+			await pickVersion(await versionIdByLabel("v2"));
+			await pickVersion(await versionIdByLabel("v3"));
+			await browser.waitUntil(
+				() => browser.executeObsidian(() => document.querySelectorAll(".mica-diff-nup-head").length >= 4),
+				{ timeout: 8000, timeoutMsg: "the three-column comparison never rendered" },
+			);
+			const heads = await nUpHeads();
+			expect(heads.slice(1).map((head) => head.trim().split(/\s+/)[0])).toEqual(["v2", "v3", "v4"]);
 		});
 
 		it("honours every layout instead of only rendering one", async function () {
@@ -388,7 +417,9 @@ describe("version history comparison", function () {
 			await browser.waitUntil(
 				() =>
 					browser.executeObsidian(
-						() => document.querySelector(".mica-inspector-selection-count")?.textContent === "2 selected",
+						() =>
+							document.querySelector(".mica-inspector-selection-count")?.textContent ===
+							"2 selected · numbered in document order",
 					),
 				{ timeout: 8000, timeoutMsg: "Ctrl-click did not add a second element" },
 			);
@@ -429,7 +460,9 @@ describe("version history comparison", function () {
 			await browser.waitUntil(
 				() =>
 					browser.executeObsidian(
-						() => document.querySelector(".mica-inspector-selection-count")?.textContent === "2 selected",
+						() =>
+							document.querySelector(".mica-inspector-selection-count")?.textContent ===
+							"2 selected · numbered in document order",
 					),
 				{ timeout: 8000, timeoutMsg: "Ctrl-click did not add a second element" },
 			);
@@ -589,6 +622,142 @@ describe("version history comparison", function () {
 			expect(captions).toHaveLength(2);
 			expect(new Set(captions).size).toBe(2);
 			for (const caption of captions) expect(caption).toMatch(/ → /);
+		});
+	});
+
+	describe("selecting elements across tabs", function () {
+		let note = "";
+		let id = "";
+		const body = [
+			":::tabs",
+			":::tab First",
+			"Alpha prose.",
+			":::",
+			":::tab Second",
+			"Bravo prose.",
+			":::",
+			":::",
+			"",
+		].join("\n");
+
+		beforeEach(async function () {
+			({ note, id } = freshFixture("tab-select"));
+			await seedAndOpen(note, `\`\`\`\`mica id=${id}\n${body}\`\`\`\`\n`);
+			await browser.executeObsidian(
+				async (_, path, blockId, revision) => {
+					await window.mica.versionsSnapshot(path);
+					await window.mica.blockUpdate(path, blockId, revision);
+					await window.mica.versionsSnapshot(path);
+				},
+				note,
+				id,
+				body.replace("Bravo prose.", "Bravo prose, edited."),
+			);
+			await waitForCleanChip(id);
+			await openHistory(id);
+			await clickToolbar("Inspect");
+			await browser.waitUntil(
+				() => browser.executeObsidian(() => Boolean(document.querySelector(".mica-inspector-render"))),
+				{ timeout: 10_000, timeoutMsg: "the inspector never rendered" },
+			);
+		});
+
+		afterEach(async function () {
+			await closeHistory();
+		});
+
+		it("switches tabs without disturbing the selection, and selects the tab on Ctrl-click", async function () {
+			// A tab chip is the only route to the elements inside its panel. While
+			// a plain click selected the chip, reaching the second tab discarded
+			// whatever was picked in the first, so a cross-tab comparison could
+			// never be assembled at all.
+			await browser.executeObsidian(() => {
+				document
+					.querySelector<HTMLElement>('.mica-inspector-render [data-mica-inspect-key^="section:"]')
+					?.click();
+			});
+			await browser.waitUntil(
+				() =>
+					browser.executeObsidian(() =>
+						document.querySelector(".mica-inspector-selection-count")?.textContent?.includes("1 selected"),
+					),
+				{ timeout: 8000, timeoutMsg: "the first tab's element was never selected" },
+			);
+			const first = await selectedInspectKeys();
+
+			// Navigate to the second tab. The selection must survive.
+			await browser.executeObsidian(() => {
+				const chips = document.querySelectorAll<HTMLElement>(".mica-inspector-render .mica-tab-chip");
+				chips[1]?.querySelector<HTMLButtonElement>(".mica-tab-btn")?.click();
+			});
+			await browser.waitUntil(
+				() =>
+					browser.executeObsidian(() => {
+						const panels = document.querySelectorAll<HTMLElement>(".mica-inspector-render .mica-tab-panel");
+						return Boolean(panels[1]?.classList.contains("is-active"));
+					}),
+				{ timeout: 8000, timeoutMsg: "clicking the tab name did not switch panels" },
+			);
+			expect(await selectedInspectKeys()).toEqual(first);
+
+			// An element in the now-visible tab joins the first one, which is the
+			// whole point: one comparison spanning both tabs.
+			await browser.executeObsidian(() => {
+				const panels = document.querySelectorAll<HTMLElement>(".mica-inspector-render .mica-tab-panel");
+				panels[1]
+					?.querySelector<HTMLElement>('[data-mica-inspect-key^="section:"]')
+					?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
+			});
+			await browser.waitUntil(async () => (await selectedInspectKeys()).length === 2, {
+				timeout: 8000,
+				timeoutMsg: "an element from the second tab did not join the selection",
+			});
+
+			// The tab itself is still selectable — by modifier, since a plain click
+			// navigates. Selecting a tab supersedes the element inside it.
+			await browser.executeObsidian(() => {
+				document
+					.querySelectorAll<HTMLElement>(".mica-inspector-render .mica-tab-chip")[1]
+					?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
+			});
+			await browser.waitUntil(async () => (await selectedInspectKeys()).some((key) => key.startsWith("tab:")), {
+				timeout: 8000,
+				timeoutMsg: "Ctrl-clicking a tab chip did not select the tab itself",
+			});
+		});
+
+		it("numbers a selected tab once, on its chip and not its panel", async function () {
+			// A tab occupies a chip and a panel under one key. Both take the
+			// selected outline, but only the chip may carry the ordinal — an
+			// ungated badge rule painted an empty accent dot on the panel.
+			await browser.executeObsidian(() => {
+				document
+					.querySelector<HTMLElement>(".mica-inspector-render .mica-tab-chip")
+					?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
+			});
+			await browser.waitUntil(async () => (await selectedInspectKeys()).some((key) => key.startsWith("tab:")), {
+				timeout: 8000,
+				timeoutMsg: "the tab was never selected",
+			});
+			const badges = await browser.executeObsidian(() => {
+				const selected = Array.from(
+					document.querySelectorAll<HTMLElement>(".mica-inspector-render .is-inspect-selected"),
+				);
+				return selected.map((element) => ({
+					chip: element.classList.contains("mica-tab-chip"),
+					panel: element.classList.contains("mica-tab-panel"),
+					ordinal: element.dataset.micaInspectOrder ?? null,
+					// The badge is a pseudo-element, so its presence is only
+					// observable through the rule that gates it.
+					badge: getComputedStyle(element, "::after").content,
+				}));
+			});
+			const panel = badges.find((entry) => entry.panel);
+			const chip = badges.find((entry) => entry.chip);
+			expect(chip?.ordinal).toBe("1");
+			expect(panel).toBeDefined();
+			expect(panel?.ordinal).toBeNull();
+			expect(panel?.badge === "none" || panel?.badge === "normal").toBe(true);
 		});
 	});
 

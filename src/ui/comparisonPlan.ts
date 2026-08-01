@@ -12,10 +12,12 @@
 export const MAX_COMPARISON_COLUMNS = 4;
 
 /** A version taking part in a comparison. `key` is the modal's version key (a
- * version id, or the working-copy/empty sentinel); `label` is display text. */
+ * version id, or the working-copy/empty sentinel); `label` is display text.
+ * `order` ranks it in time — larger is newer — and fixes the column layout. */
 export interface ComparisonTarget {
 	readonly key: string;
 	readonly label: string;
+	readonly order: number;
 }
 
 /** A focused element, identified by locator id so open state and de-duplication
@@ -60,13 +62,17 @@ export interface ComparisonPlanInput {
 }
 
 /**
- * Two invariants, deliberately distinct:
+ * Three invariants, deliberately distinct:
  *
  * 1. A *picked* target never duplicates the base — it moves to `droppedBase`.
  *    This is what stops the base appearing as its own column.
  * 2. When picks resolve to nothing the plan degrades to a pair on the selected
  *    version, *even if that equals the base*. Pinning the version you are
  *    viewing is a self-comparison the user asked for, not a defect to suppress.
+ * 3. Inclusion and layout are decided separately. The cap keeps the first picks
+ *    in the order the timeline offered them, so what survives matches the list
+ *    the user ticked; the survivors are then laid out oldest to newest, because
+ *    a diff read left to right is a diff read forwards in time.
  */
 export function planComparison(input: ComparisonPlanInput): ComparisonPlan {
 	const cap = Math.max(0, input.columnCap ?? MAX_COMPARISON_COLUMNS);
@@ -87,11 +93,20 @@ export function planComparison(input: ComparisonPlanInput): ComparisonPlan {
 	return {
 		kind: multi ? "multi" : "pair",
 		base: input.base,
-		targets: all.slice(0, cap),
+		targets: chronological(all.slice(0, cap)),
 		droppedBase,
-		overflow: all.length > cap ? all.slice(cap) : [],
+		overflow: all.length > cap ? chronological(all.slice(cap)) : [],
 		elements: [...input.elements],
 	};
+}
+
+/** Oldest first. Ties keep their incoming order, so equal ranks never shuffle
+ * between renders. */
+function chronological(targets: readonly ComparisonTarget[]): ComparisonTarget[] {
+	return targets
+		.map((target, index) => ({ target, index }))
+		.sort((left, right) => left.target.order - right.target.order || left.index - right.index)
+		.map((entry) => entry.target);
 }
 
 /** Display order, fixed once. A renderer that walks this and a copier that

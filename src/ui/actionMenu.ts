@@ -17,6 +17,10 @@ export interface ActionSpec {
 	overflowOnly?: boolean;
 	/** Never collapse this action into the ellipsis. */
 	pinned?: boolean;
+	/** Nested actions, shown as a second menu. Built from a plain `Menu` rather
+	 * than `MenuItem.setSubmenu`, which the supported API does not declare — and
+	 * the minimum-version E2E profile would be the one to discover that. */
+	children?: readonly ActionSpec[];
 	run: () => void;
 }
 
@@ -37,9 +41,35 @@ export function populateActionMenu(menu: Menu, actions: readonly ActionSpec[]): 
 			if (action.checked !== undefined) item.setChecked(action.checked);
 			if (action.disabled) item.setDisabled(true);
 			if (action.danger) item.setWarning(true);
-			item.onClick(() => action.run());
+			const children = action.children;
+			if (children?.length) item.onClick((event) => openChildMenu(children, event));
+			else item.onClick(() => action.run());
 		});
 	}
+}
+
+/** Second-level menu, anchored at whatever opened it. The parent menu has
+ * already dismissed itself by the time this runs, so the child owns the screen
+ * and Obsidian's outside-click dismissal applies to it normally. */
+function openChildMenu(children: readonly ActionSpec[], event: MouseEvent | KeyboardEvent): Menu {
+	if (event instanceof MouseEvent && event.detail > 0) {
+		const child = new Menu();
+		populateActionMenu(child, children);
+		child.showAtMouseEvent(event);
+		return child;
+	}
+	return openActionMenuAt(children, event.target as HTMLElement | null);
+}
+
+/** Open a menu beside an element. Keyboard activations have no useful pointer
+ * coordinate, and a direct strip button has no pointer position worth reusing
+ * either — both want the menu anchored to the control that opened it. */
+export function openActionMenuAt(actions: readonly ActionSpec[], anchor: HTMLElement | null): Menu {
+	const menu = new Menu();
+	populateActionMenu(menu, actions);
+	const rect = anchor?.getBoundingClientRect();
+	menu.showAtPosition(rect ? { x: rect.left, y: rect.bottom } : { x: 0, y: 0 });
+	return menu;
 }
 
 export function showActionMenuAtEvent(event: MouseEvent, actions: readonly ActionSpec[]): Menu {
