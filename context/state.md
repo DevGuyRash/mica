@@ -15,6 +15,11 @@
   them when its head progression proves linearity. Vaults with older ledgers
   should confirm Auto resolves to the checkpoint they expect before trusting a
   comparison.
+- Callouts and fenced code became combine candidates, which newly exposes the
+  reducer's mixed-merge path to drag-and-drop as well as the menu. Dropping one
+  section onto a callout now dissolves it into the merged section; the bytes
+  round-trip through uncombine, but the dwell gesture over unlike kinds has only
+  been exercised by the menu path in tests.
 - Blocks written before 2026-07-12 may contain closers serialized onto a leaf
   (`a:::`). No current path produces this and diffs report it faithfully, but
   there is no repair command; deciding whether to offer one is open, since it

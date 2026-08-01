@@ -39,10 +39,15 @@ pnpm run smoke
 pnpm run check:release:assets
 pnpm run audit:prod
 cargo deny check advisories
+pnpm run test:version-stress
 pnpm run e2e:mobile
 pnpm run e2e:minimum
 pnpm run e2e:latest
 ```
+
+WHEN you add, rename, split, or remove a mandatory verification gate THEN you
+SHALL update CI, the human release procedure, and this command inventory in the
+same change. You SHALL NOT call a subset release-ready.
 
 WHEN a change is documentation-only and does not alter a command, contract, or
 generated artifact THEN you MAY limit verification to formatting, link/path
@@ -76,10 +81,21 @@ WHEN the UI and reducer disagree about whether an operation is legal THEN you
 SHALL restore parity. You SHALL NOT let the UI advertise a no-op or rejected
 operation; the reducer remains the final authority.
 
+WHEN the UI filters candidates for an operation the reducer permits THEN the
+exclusions SHALL remain visible in what the UI names. Dropping an eligible
+neighbour from a candidate index silently redefines "the one below" as "the next
+one I happen to accept", and the operation then lands somewhere the user never
+pointed at.
+
 WHEN a surface can be rendered, described, exported, and copied THEN you SHALL
 derive all of them from one ordered plan computed once. You SHALL NOT re-derive
 what is displayed inside the exporter; a second derivation is how a clipboard
 comes to hold a different comparison than the screen.
+
+WHEN a plan lays several versions of one thing side by side THEN you SHALL order
+the display chronologically and decide inclusion separately. A list offered
+newest-first orders the picker, not the comparison; laying it out as it arrived
+makes a diff read backwards in time.
 
 WHEN a control does not apply in the current mode THEN you SHALL disable it with
 its reason. You SHALL NOT leave it enabled and inert, and you SHALL NOT hide a
@@ -91,6 +107,17 @@ casing. You SHALL NOT name it from its content: a leaf's derived label is its
 first source line, which neither survives edits nor separates siblings. WHEN a
 value is case-folded or grouped for matching THEN you SHALL keep the authored
 value alongside it for display.
+
+WHEN an entity has a stable identity plus mutable, content-derived, or
+presentational aliases THEN you SHALL persist relations and target mutations,
+recovery, and follow-up actions by stable identity. You MAY accept an alias only
+as compatibility input when it resolves uniquely; ambiguity SHALL fail closed.
+
+WHEN an entity can be hidden or removed from a view without being destroyed THEN
+you SHALL distinguish visible membership from authoritative existence and
+define which operations address each set. Exact stable identity SHALL remain
+sufficient for recovery unless the operation explicitly promises irreversible
+deletion.
 
 ## Preserve bytes unless the user changed them
 
@@ -149,6 +176,11 @@ WHEN an operation suspends after reading mutable authority THEN its validation
 is stale; you SHALL re-read and revalidate every generation or preimage guard
 after the last suspension and before the first persistent side effect.
 
+WHEN persisted state names an optional or network-backed provider THEN you SHALL
+treat the identifier as data, not enablement. You SHALL revalidate current
+policy before discovery, resolution, or fetch and after any suspension; a
+disabled provider SHALL perform no network work.
+
 WHEN publishing multiple related effects THEN you SHALL make them atomic or
 recoverable:
 
@@ -178,6 +210,15 @@ WHEN folding append-only, resumable, or legacy events THEN each event SHALL
 establish every state-existence fact it asserts. You SHALL NOT require an
 earlier creation event unless the format does, and you SHALL test valid
 prefixes and isolated compatibility events.
+
+WHEN a persisted discriminated union is shared across hosts or binaries THEN
+you SHALL update every in-repo reader, writer, and parity test in the same
+change. A known variant SHALL have identical validity and state effects
+everywhere; an unknown typed variant SHALL fail closed, and legacy fallback
+SHALL run only when the input is not a typed variant.
+
+WHEN a new persisted variant is not backward-readable THEN you SHALL make it a
+coordinated upgrade and document that boundary before any release can emit it.
 
 WHEN output is hashed, content-addressed, persisted, or compared THEN you SHALL
 derive its bytes and order canonically from explicit inputs. You SHALL NOT rely
@@ -291,6 +332,25 @@ editable context.
 WHEN already-rendered controls depend on settings THEN you SHALL read the
 current setting at activation time or use a deliberately invalidated render
 epoch. You SHALL NOT capture a stale settings snapshot in a long-lived widget.
+
+WHEN one mutation can be undone from multiple surfaces THEN you SHALL make every
+surface advance the same history entry and refresh from that state. You SHALL
+NOT represent a compensating write as unrelated history or leave simultaneous
+Undo and Redo claims.
+
+WHEN two commands produce identical bytes THEN you SHALL offer one. A permission
+the reducer requires is not a choice the user makes: state its consequence in
+that command's label rather than splitting it into a pair to tell apart.
+
+WHEN a control is the only route to a region's contents THEN its plain
+activation SHALL navigate and SHALL NOT consume the selection — otherwise
+reaching the second region discards what was picked in the first, and a
+selection spanning both can never be assembled. You SHALL keep the container
+itself selectable by a distinct gesture and from its actions menu.
+
+WHEN a selection is numbered THEN the numbers SHALL be the order of the work
+they produce, and you SHALL say which order that is. An unlabelled ordinal beside
+a thing just clicked reads as click order, so any other rule looks like a bug.
 
 ## Controls must survive every input mode
 
@@ -429,6 +489,11 @@ that can contain the defect:
 - Rust reducer/parser tests for structural and byte-level invariants;
 - integration tests for filesystem transactions and recovery;
 - real-Obsidian tests for rendering, focus, input, themes, and lifecycle.
+
+Tests SHALL stay inside the typechecked project. A fixture the compiler never
+sees keeps constructing an outdated shape, so a newly required field arrives as
+`undefined`, the behavior it feeds silently stops running, and the test that
+should have caught it passes.
 
 WHEN optimizing THEN you SHALL pin semantics before the refactor and add the
 cheapest resource contract that would fail under the rejected design. You
