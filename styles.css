@@ -104,7 +104,7 @@ body {
 
 .mica-inspection-render [data-mica-inspect-key].is-inspect-hover {
 	outline-color: var(--mica-inspector-hover);
-	cursor: crosshair;
+	cursor: var(--mica-drag-cursor, crosshair);
 }
 
 .mica-inspection-render [data-mica-inspect-key].is-inspect-selected {
@@ -114,7 +114,7 @@ body {
 
 .mica-inspection-render a,
 .mica-inspection-render .internal-link {
-	cursor: not-allowed;
+	cursor: var(--mica-drag-cursor, not-allowed);
 }
 
 .mica-icon-preview.is-invalid {
@@ -263,7 +263,7 @@ body[data-mica-density="compact"],
 	height: 100%;
 	padding: 4px 14px 6px;
 	border-radius: var(--mica-radius) var(--mica-radius) 0 0;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	font-size: var(--font-ui-small);
 	white-space: nowrap;
 	transition:
@@ -363,7 +363,7 @@ body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is
 	border-radius: 4px;
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	transition: opacity 0.12s;
 }
@@ -423,7 +423,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	color: var(--text-muted);
 	font-size: 13px;
 	line-height: 1;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	transition: opacity 0.12s;
 }
@@ -487,7 +487,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 }
 
 .mica-region.is-editable {
-	cursor: text;
+	cursor: var(--mica-drag-cursor, text);
 }
 
 .mica-region.is-editable:hover {
@@ -545,7 +545,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	color: var(--text-muted);
 	border-radius: var(--mica-ctrl-radius);
 	padding: 0 var(--mica-ctrl-pad-x);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	font-size: var(--font-ui-smaller);
 	white-space: nowrap;
 	transition:
@@ -584,7 +584,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	line-height: 1;
 	transition:
 		background 0.1s,
@@ -617,7 +617,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	color: var(--text-faint);
 	font-size: 14px;
 	line-height: 1;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	transition:
 		opacity 0.12s,
@@ -688,7 +688,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	line-height: 1;
 	font-size: var(--font-ui-small);
 	transition:
@@ -717,7 +717,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-normal);
-	cursor: text;
+	cursor: var(--mica-drag-cursor, text);
 	transition:
 		border-color 0.1s,
 		background 0.1s;
@@ -786,15 +786,14 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	gap: var(--mica-status-control-gap);
 }
 
-/*
- * Author-level display rules for Mica buttons (inline-flex) otherwise override
- * the browser's presentational mapping for the hidden attribute. Dock layout
- * uses hidden as its single source of truth while actions move between their
- * original controls and responsive overflow, so it must win explicitly.
- */
+/* Dock layout hides original controls while responsive copies stay separate.
+ * The owned hidden state outranks button display rules without competing with
+ * the packing controller's inline display on those responsive copies. */
 .mica-long-travel [hidden],
-.mica-source-dock [hidden] {
-	display: none !important;
+.mica-source-dock [hidden],
+.mica-long-travel button[hidden],
+.mica-source-dock button[hidden] {
+	display: none;
 }
 
 .mica-block-edit-controls,
@@ -1075,7 +1074,7 @@ body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	font-size: var(--font-ui-smaller);
 	white-space: nowrap;
 	transition:
@@ -1264,7 +1263,7 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 	gap: 4px;
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	user-select: none;
 	white-space: nowrap;
 }
@@ -1543,7 +1542,7 @@ body.mica-theme-solar {
 	border-radius: 6px;
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-head-btn:hover {
@@ -1562,7 +1561,7 @@ body.mica-theme-solar {
 	font-size: var(--font-ui-small);
 	font-weight: 600;
 	color: var(--text-normal);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	border-radius: 6px;
 }
 .mica-head-name.is-unnamed {
@@ -1574,7 +1573,7 @@ body.mica-theme-solar {
 	background: color-mix(in srgb, var(--mica-accent) 12%, transparent);
 }
 .mica[data-mica-mode="read"] .mica-head-name {
-	cursor: default;
+	cursor: var(--mica-drag-cursor, default);
 }
 .mica-head-mode {
 	display: inline-flex;
@@ -1649,13 +1648,13 @@ body[data-mica-grip="left"] .mica-region-tools {
 	border-radius: 5px;
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-region-grip {
-	cursor: grab;
+	cursor: var(--mica-drag-cursor, grab);
 }
 .mica-region-grip:active {
-	cursor: grabbing;
+	cursor: var(--mica-drag-cursor, grabbing);
 }
 button.mica-region-x:hover {
 	color: var(--text-error, #e05561);
@@ -1711,7 +1710,7 @@ button.mica-region-x:hover {
 	border-radius: 50%;
 	background: var(--background-primary);
 	color: var(--mica-accent);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-insert-plus .svg-icon {
@@ -1742,7 +1741,7 @@ button.mica-region-x:hover {
 	padding: 2px 10px;
 	height: 24px;
 	border-radius: 6px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-qe-tools {
 	display: flex;
@@ -1862,7 +1861,7 @@ button.mica-region-x:hover {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	flex: 0 0 auto;
 }
 .mica-tool:hover {
@@ -2033,7 +2032,7 @@ button.mica-region-x:hover {
 	border-radius: 6px;
 	border: 1px solid var(--background-modifier-border);
 	background: transparent;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-pop-seg.is-on {
@@ -2049,7 +2048,7 @@ button.mica-region-x:hover {
 	border: none;
 	background: transparent;
 	border-radius: 6px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-pop-item:hover {
@@ -2077,7 +2076,7 @@ button.mica-region-x:hover {
 	border: 1px solid transparent;
 	border-radius: 8px;
 	background: color-mix(in srgb, var(--mica-co-color, var(--text-accent)) 8%, transparent);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 	text-align: left;
 }
@@ -2201,7 +2200,7 @@ button.mica-region-x:hover {
 	background: transparent;
 	box-shadow: none;
 	padding: 2px 4px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-lightbox-stats:hover,
 .mica-lightbox-stats:focus-visible {
@@ -2396,7 +2395,19 @@ button.mica-region-x:hover {
 }
 body.mica-dnd-active {
 	user-select: none;
-	cursor: grabbing;
+}
+/* Gesture classes own one inherited override. Removing them restores every
+ * control's fallback cursor; explicit user styles keep normal cascade priority. */
+body.mica-dnd-active,
+body.mica-handle-dragging {
+	--mica-drag-cursor: grabbing;
+	cursor: var(--mica-drag-cursor);
+}
+/* Cover native links/inputs in rendered content as well as Mica's own controls.
+ * Portaled docks and the body-mounted drag preview share the same gesture state. */
+body:is(.mica-dnd-active, .mica-handle-dragging) :is(.mica, .mica-long-travel, .mica-source-dock, .mica-drag-ghost),
+body:is(.mica-dnd-active, .mica-handle-dragging) :is(.mica, .mica-long-travel, .mica-source-dock, .mica-drag-ghost) * {
+	cursor: var(--mica-drag-cursor);
 }
 /* Mid-drag, the ONLY affordance is the drop indicator — insert zones, hover
  * tool clusters, and column strips would pop under the pointer and read as
@@ -2419,10 +2430,6 @@ body.mica-dnd-active .mica-drag-ghost :is(.mica-insert-zone, .mica-region-tools,
 	pointer-events: none;
 	visibility: hidden;
 }
-/* Authored Markdown may set an inline cursor; drag feedback covers that content too. */
-body.mica-dnd-active * {
-	cursor: grabbing !important;
-}
 .mica-draggable {
 	touch-action: none;
 }
@@ -2442,7 +2449,7 @@ body.mica-dnd-active * {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-faint);
-	cursor: grab;
+	cursor: var(--mica-drag-cursor, grab);
 	opacity: 0;
 }
 .mica-tab-nav-outer:hover .mica-group-grip,
@@ -2512,7 +2519,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-cell-tool:hover {
 	color: var(--mica-accent);
@@ -2530,7 +2537,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border-radius: calc(var(--mica-radius) * 0.6);
 	background: transparent;
 	color: var(--text-faint);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 	opacity: 0.5;
 	transition: opacity 120ms ease;
@@ -2547,7 +2554,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border: 1px solid var(--background-modifier-border);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-cols-chip:hover {
@@ -2687,7 +2694,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	position: relative;
 	padding: 7px 26px 7px 10px;
 	border-radius: 8px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	border: 1px solid transparent;
 }
 .mica-vrow-gap {
@@ -2767,7 +2774,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	pointer-events: none;
 }
@@ -2784,7 +2791,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	justify-content: space-between;
 	gap: 6px;
 	padding-right: 10px;
-	cursor: default;
+	cursor: var(--mica-drag-cursor, default);
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
 }
@@ -2814,7 +2821,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border-radius: 6px;
 	border: 1px solid var(--background-modifier-border);
 	background: transparent;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-base-pick:hover {
@@ -3025,7 +3032,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border: 1px solid var(--mica-accent);
 	background: transparent;
 	color: var(--mica-accent);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 	font-size: var(--font-ui-smaller);
 }
@@ -3048,7 +3055,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
 	background: var(--background-primary);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-theme-card.is-on {
@@ -3128,7 +3135,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	align-items: center;
 	justify-content: center;
 	color: var(--text-faint);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-tool-group:hover .mica-tool-caret {
 	color: var(--mica-accent);
@@ -3275,7 +3282,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	background: color-mix(in srgb, var(--mica-accent) 4%, transparent);
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	user-select: none;
 }
 .mica-fold-bar:hover {
@@ -3351,7 +3358,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	top: 0;
 	bottom: 0;
 	width: 9px;
-	cursor: col-resize;
+	cursor: var(--mica-drag-cursor, col-resize);
 	display: flex;
 	align-items: stretch;
 	justify-content: center;
@@ -3372,7 +3379,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	left: 6px;
 	right: 6px;
 	height: 9px;
-	cursor: row-resize;
+	cursor: var(--mica-drag-cursor, row-resize);
 	display: flex;
 	align-items: center;
 	justify-content: stretch;
@@ -3483,7 +3490,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	border-radius: 6px;
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	user-select: none;
 	border-top: 2px solid transparent;
 	border-bottom: 2px solid transparent;
@@ -3718,14 +3725,14 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-insert-zone,
 .mica-insert-plus,
 .mica-tab-add {
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-region.is-editable > .mica-md {
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-region.is-editing > .mica-md,
 .mica-region .mica-md .mica-mdeditor {
-	cursor: auto;
+	cursor: var(--mica-drag-cursor, auto);
 }
 .mica-ghost:hover,
 .mica-region.is-editable:hover .mica-ghost {
@@ -3877,7 +3884,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-edge-add {
 	position: absolute;
 	z-index: 4;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-edge-add.is-left {
 	left: 0;
@@ -3933,7 +3940,7 @@ body.mica-dnd-active .mica .mica-edge-add {
 /* The ⊕ pill is a real button now — the strip resizes, the pill inserts. */
 .mica-boundary-plus {
 	pointer-events: auto;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	/* Above BOTH strips (they are z-auto so pills stack in the grid's own
 	   context): where strips cross — every column pill sits on the row
 	   boundary in a 2-row grid — the later-painted strip used to swallow
@@ -3970,7 +3977,7 @@ body.mica-dnd-active .mica .mica-edge-add {
 		opacity 100ms ease,
 		color 100ms ease;
 	transform: translateX(-50%);
-	cursor: grab;
+	cursor: var(--mica-drag-cursor, grab);
 }
 .mica-row-handle {
 	width: 14px;
@@ -4010,10 +4017,6 @@ body.mica-handle-dragging .mica .mica-col-handle.is-dragging,
 body.mica-handle-dragging .mica .mica-row-handle.is-dragging {
 	opacity: 1;
 	color: var(--mica-accent);
-}
-/* Authored content keeps its own cursor outside this temporary handle drag. */
-body.mica-handle-dragging * {
-	cursor: grabbing !important;
 }
 body.mica-handle-dragging .mica .mica-col-resizer,
 body.mica-handle-dragging .mica .mica-row-resizer,
@@ -4216,9 +4219,8 @@ body[data-mica-dock-surface="custom"] {
 
 .mica-dock-contrast.is-warning {
 	font-weight: 600;
-	text-decoration-line: underline;
-	text-decoration-style: wavy;
-	text-underline-offset: 3px;
+	/* A visible underline on the status span without changing its line box. */
+	box-shadow: inset 0 -1px 0 currentColor;
 }
 .mica-versions-list.is-advanced-compare .mica-vrow-cmp {
 	opacity: 1;
@@ -4297,7 +4299,7 @@ body[data-mica-dock-surface="custom"] {
 }
 .mica-focused-row-summary {
 	padding: 7px 9px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 /* Flexing an inner span keeps the disclosure marker, which is the only thing
    saying a row opens at all. */
@@ -4446,7 +4448,7 @@ button.mica-vrow-gap {
 	border: none;
 	background: transparent;
 	box-shadow: none;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	text-align: start;
 }
 button.mica-vrow-gap:hover {
@@ -4461,7 +4463,7 @@ button.mica-vrow-gap:hover {
 	position: static;
 	margin: 0;
 	opacity: 0.45;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-vrow-select:checked,
 .mica-vrow:hover .mica-vrow-select,
@@ -4472,7 +4474,7 @@ button.mica-vrow-gap:hover {
 /* A control that cannot act says why rather than sitting inert but enabled. */
 .mica-diff-check.is-disabled {
 	opacity: 0.5;
-	cursor: not-allowed;
+	cursor: var(--mica-drag-cursor, not-allowed);
 }
 
 /* Stacked patches: the layout with no column budget. */

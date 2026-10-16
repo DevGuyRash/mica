@@ -23,11 +23,11 @@ updates**, then **Update** or **Update all**.
 1. Commit and push all new work to the permanent lowercase `review` branch
    first. Isolated work branches may integrate there. Preserve existing work
    and history; branch setup is not permission to reset or discard them.
-2. Run `pnpm run lint:obsidian` as the separate official local source preflight
-   within the authorized scope and record its actual result. Errors must be
-   zero. Keep warnings visible; fix each or document its reviewed necessity
-   without suppressing review rules. Use the component reasons below. Local
-   lint does not establish CSS coverage or an official preview pass.
+2. Run `pnpm run lint:obsidian` within the authorized scope and record its actual
+   source-rule and local CSS-tripwire results. Errors must be zero. Keep other
+   warnings visible; fix each or document its reviewed necessity without
+   suppressing rules. This preflight does not establish full CSS compatibility
+   or an official preview pass.
 3. On the Obsidian Community entry, select **Review branch**, enter the full
    current `review` HEAD commit SHA, then select **Run preview scan**. The
    official control accepts any branch, tag, or SHA; `review` is this
@@ -56,25 +56,25 @@ infer a pass from local checks, a source push, or an earlier candidate.
 
 ## Local preflight boundaries
 
-`pnpm run lint:obsidian` is a separate local source preflight. Its errors must
-be zero; warnings remain visible and need a fix or reviewed necessity. It does
-not lint CSS or establish reproducible builds, optional attestations, or an
-official preview pass.
+`pnpm run lint:obsidian` runs the official recommended TypeScript rules, with
+native DOM creation promoted to an error, then `pnpm run lint:review-css`.
+The dependency-free CSS tripwires report source locations for priority
+overrides, `:has()` and the previously rejected decoration longhands, ignoring
+comments and quoted values. They scan the shipping root stylesheet; they are
+not a full CSS parser or browser compatibility database. The preflight does not
+establish reproducible builds, optional attestations or an official preview
+pass. Rerun the exact-SHA preview after every source change, including changes
+made to remove advisory warnings.
 
-Review the narrow priority rules in [styles.css](styles.css) by component:
+Preserve these component contracts without priority overrides:
 
-- `.mica-long-travel [hidden]` and `.mica-source-dock [hidden]` keep `hidden`
-  authoritative while [blockShell](src/ui/blockShell.ts) and
-  [Live Preview](src/cm/micaLivePreview.ts) move actions into responsive
-  overflow. Their priority defeats authored `inline-flex` display rules.
-- `body.mica-dnd-active` and `body.mica-handle-dragging` apply the drag cursor
-  only during gestures owned by [dnd](src/ui/dnd.ts) and
-  [blockShell](src/ui/blockShell.ts). Priority covers authored inline cursors;
-  outside those gesture classes the content keeps its own cursor.
-
-These reasons are scoped warning dispositions, not permission to add broad
-priority rules. Review each actual warning against its component and record
-its outcome in the PR; a warning count is not an accepted baseline.
+- Dock `hidden` selectors apply to original controls/groups. Responsive copies
+  receive separate packing styles; do not make the two states compete.
+- Existing drag body classes own `--mica-drag-cursor`. Owned controls use their
+  normal cursor as its fallback; removing the class restores that fallback.
+  Scope native-content cursor coverage to Mica and its portals/previews.
+- Explicit user style overrides retain ordinary cascade priority. A warning
+  count is not an accepted baseline; review each new component finding.
 
 Review sentence-case advisories against the actual text rather than applying
 capitalization suggestions to identifiers or names:

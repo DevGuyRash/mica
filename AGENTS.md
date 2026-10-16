@@ -35,12 +35,15 @@ using the PR template. After merge, the release source and root manifest SHALL
 match that reviewed candidate; content changes return through `review` and a
 fresh preview. Follow [RELEASING.md](RELEASING.md) for the complete procedure.
 
-WHEN using the official local preflight THEN you SHALL run
-`pnpm run lint:obsidian` separately from broader checks, within the authorized
-scope. Keep warnings visible; fix each or record its reviewed necessity without
-suppressing review rules. Use the component reasons in `RELEASING.md`; local
-lint does not establish CSS coverage, reproducible builds, attestations, or an
-official preview pass.
+WHEN using the local preflight THEN you SHALL run `pnpm run lint:obsidian`
+separately from broader checks, within the authorized scope. It combines the
+official source rules with local `lint:review-css` tripwires. Native DOM
+creation in plugin source is an error. Keep other warnings visible and review
+them without suppressing rules. Do not introduce stylesheet priority overrides,
+`:has()`, or the rejected decoration longhands; use owned state classes and CSS
+variables. The CSS tripwires cover those patterns only. They do not establish
+complete CSS compatibility, reproducible builds, attestations, or an official
+preview pass. Follow the component contracts in `RELEASING.md`.
 
 ## Verification is risk-scaled
 

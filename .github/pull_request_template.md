@@ -9,7 +9,7 @@ Describe the problem and resulting behavior.
 - Scan completion time and result:
 - Official preview result and error count (required: pass, zero errors):
 - Warning count and disposition for each: fixed, or intentional necessity with
-  reviewed reason (keep unsuppressed DOM/CSS boundary cases visible):
+  reviewed reason (do not suppress review rules):
 - Recommendations and optional capabilities/attestations still unverified:
 
 - [ ] This PR is `review` → `main`, and the report covers its exact current head.
@@ -23,9 +23,9 @@ by its actual source rather than assuming an Obsidian status check exists.
 
 ## Local preflight and qualification
 
-- `pnpm run lint:obsidian` actual result and visible warnings:
+- `pnpm run lint:obsidian` actual source-rule and CSS-tripwire results:
 - Warning dispositions: exact component/rule, fix or reviewed necessity; use
-  the scoped DOM/CSS reasons in `RELEASING.md`, not a numeric baseline:
+  the component contracts in `RELEASING.md`, not a numeric baseline:
 - Other checks actually completed, and gates still pending:
 
 ## Promotion and delivery

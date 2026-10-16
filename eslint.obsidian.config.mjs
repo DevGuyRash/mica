@@ -7,6 +7,7 @@ export default defineConfig([
 	{
 		files: ["src/**/*.{ts,tsx,mts,cts}"],
 		extends: obsidianmd.configs.recommended,
+		rules: { "obsidianmd/prefer-create-el": "error" },
 		languageOptions: {
 			parserOptions: {
 				projectService: true,

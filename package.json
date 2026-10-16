@@ -59,7 +59,8 @@
 		"test:hide-syntax": "tsx tests/hide-syntax.mts",
 		"test:icon-packs": "tsx tests/icon-packs.mts",
 		"test:combine-kind": "tsx tests/combine-kind.mts",
-		"lint:obsidian": "eslint --config eslint.obsidian.config.mjs src"
+		"lint:obsidian": "eslint --config eslint.obsidian.config.mjs src && pnpm run lint:review-css",
+		"lint:review-css": "node scripts/check-review-css.mjs"
 	},
 	"keywords": [
 		"obsidian",
