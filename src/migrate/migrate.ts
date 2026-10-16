@@ -1,16 +1,18 @@
-import { TFile } from "obsidian";
+import { TFile, TFolder } from "obsidian";
 import type MicaPlugin from "../main";
-import { hasContent, hashContent, migrateTabs, newId, scanBlocksView, type LedgerEvent } from "../wasm/bridge";
+import { foldLedger, hasContent, hashContent, migrateTabs, newId, noteId, notePaths, resolveObjectHash, scanBlocksView, setNoteId, type LedgerEvent } from "../wasm/bridge";
 import {
 	appendEvents,
 	ensureSidecar,
 	ledgerAppendProvesNoCommit,
+	readLedger,
 	requireObject,
-	sidecarDir,
 	writeManifest,
 	writeObject,
 } from "../storage/sidecar";
+import { assertNoteStoreCurrent, bindNoteStore, isLiveNote, stageNoteStore, storeRoot, validateStoreRoot, type NoteStore } from "../storage/store";
 import {
+	classifyEventBatch,
 	isLedgerEvent,
 	isObjectHash,
 	MAX_LEDGER_BYTES,
@@ -47,6 +49,8 @@ interface MigrationJournal {
  */
 export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boolean): Promise<MigrateFileReport | null> {
 	const vault = plugin.app.vault;
+	if (!isLiveNote(file)) throw new Error("Mica: stored history is not a live note to migrate");
+	const root = storeRoot(vault);
 	if (dryRun) {
 		const result = migrateTabs(await vault.read(file), plugin.settings.versionCalloutTypes);
 		if (!result.changed) return null;
@@ -55,7 +59,10 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 	}
 
 	const migrated = await plugin.engine.withFileLock(file, async () => {
-		const resumed = await resumePendingMigration(plugin, file);
+		const initial = await vault.read(file);
+		const existingStore = await bindNoteStore(root, file, initial);
+		const recoveryStore = existingStore ?? await findPendingMigrationStore(plugin, file, initial);
+		const resumed = recoveryStore ? await resumePendingMigration(plugin, file, recoveryStore) : null;
 		if (resumed) return resumed;
 
 		let original = "";
@@ -68,13 +75,14 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 		const staged = result as ReturnType<typeof migrateTabs> | null;
 		if (!staged?.changed) return null;
 
-		const existingNoteId: unknown = plugin.app.metadataCache.getFileCache(file)?.frontmatter?.["mica-id"];
-		const finalized = ensureMicaId(staged.doc, typeof existingNoteId === "string" ? existingNoteId : null);
-		await ensureSidecar(vault, file);
+		const finalized = ensureMicaId(staged.doc);
+		// Keep the exact original bytes recoverable before publishing the new anchor/body.
+		const store = await stageNoteStore(root, file, original, finalized.id);
+		await ensureSidecar(store);
 		const originalHash = hashContent(original);
 		const migratedHash = hashContent(finalized.doc);
-		await writeObject(vault, file, originalHash, original);
-		await writeObject(vault, file, migratedHash, finalized.doc);
+		await writeObject(store, originalHash, original);
+		await writeObject(store, migratedHash, finalized.doc);
 
 		const importedEvents: MigrationLedgerEvent[] = [];
 		const now = Date.now();
@@ -83,7 +91,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 			for (let i = 0; i < n; i++) {
 				const version = block.versions[i];
 				const hash = hashContent(version.content);
-				await writeObject(vault, file, hash, version.content);
+				await writeObject(store, hash, version.content);
 				importedEvents.push({
 					type: "add-version",
 					eid: newId(),
@@ -95,8 +103,9 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 				});
 			}
 		}
-		const headEvents = await stageHeadEvents(plugin, file, finalized.doc);
+		const headEvents = await stageHeadEvents(store, finalized.doc);
 		const events = [...importedEvents, ...headEvents];
+		await validateMigrationAppend(store, events);
 		const versionsImported = staged.blocks.reduce((n, block) => n + block.versions.length, 0);
 		const journal: MigrationJournal = {
 			format: 1,
@@ -109,14 +118,15 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 
 		const names: Record<string, string> = {};
 		for (const block of scanBlocksView(finalized.doc)) if (block.id) names[block.id] = block.name ?? "";
-		await writeManifest(vault, file, {
+		await writeManifest(store, {
 			noteId: finalized.id,
 			path: file.path,
 			blocks: names,
 			updated: Date.now(),
 		});
-		await createPendingMigrationJournal(plugin, file, journal);
+		await createPendingMigrationJournal(plugin, store, journal);
 
+		await assertNoteStoreCurrent(store, true);
 		let committed: string;
 		try {
 			committed = await vault.process(file, (current) => {
@@ -137,7 +147,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 			throw new Error(`Mica: ${file.path} changed before imported history could be committed`);
 		}
 		try {
-			await appendEvents(vault, file, events);
+			await appendEvents(store, events);
 		} catch (error) {
 			if (ledgerAppendProvesNoCommit(error)) {
 				await rollbackMigrationNote(plugin, file, committed, original);
@@ -147,7 +157,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 			// the exact documents and eids so rerunning migration resumes append.
 			throw error;
 		}
-		await completeMigrationJournal(plugin, file, journal);
+		await completeMigrationJournal(plugin, store, journal);
 		return { backup: originalHash, blocks: staged.blocks.length, versionsImported };
 	});
 	if (!migrated) return null;
@@ -157,16 +167,23 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 async function resumePendingMigration(
 	plugin: MicaPlugin,
 	file: TFile,
+	store: NoteStore,
 ): Promise<{ backup: string; blocks: number; versionsImported: number } | null> {
-	const journal = await readMigrationJournal(plugin, file);
+	const journal = await readMigrationJournal(plugin, store);
 	if (!journal || journal.status === "complete") return null;
 	const vault = plugin.app.vault;
 	const [original, migrated] = await Promise.all([
-		requireObject(vault, file, journal.original),
-		requireObject(vault, file, journal.migrated),
+		requireObject(store, journal.original),
+		requireObject(store, journal.migrated),
 	]);
+	const originalId = noteId(original);
+	if ((originalId !== null && originalId !== store.noteId) || noteId(migrated) !== store.noteId)
+		throw new Error("Mica: pending conversion objects do not belong to this note identity");
+	const resumable = await ensureHeadEventsInJournal(plugin, store, journal, migrated);
+	await validateMigrationAppend(store, resumable.events);
 	let current = await vault.read(file);
 	if (current === original) {
+		await assertNoteStoreCurrent(store, true);
 		current = await vault.process(file, (latest) => {
 			if (latest !== original) throw new Error(`Mica: ${file.path} diverged while migration recovery was staged`);
 			return migrated;
@@ -177,9 +194,8 @@ async function resumePendingMigration(
 			`Mica: pending migration for ${file.path} cannot resume because the note differs from both journaled copies`,
 		);
 	}
-	const resumable = await ensureHeadEventsInJournal(plugin, file, journal, migrated);
-	await appendEvents(vault, file, resumable.events);
-	await completeMigrationJournal(plugin, file, resumable);
+	await appendEvents(store, resumable.events);
+	await completeMigrationJournal(plugin, store, resumable);
 	let versionsImported = 0;
 	for (const event of resumable.events) {
 		if (event.type === "add-version" && event.origin?.startsWith("migrated:")) versionsImported += 1;
@@ -196,29 +212,37 @@ async function resumePendingMigration(
  * host can resume the other's transaction with stable event ids. */
 async function ensureHeadEventsInJournal(
 	plugin: MicaPlugin,
-	file: TFile,
+	store: NoteStore,
 	journal: MigrationJournal,
 	migrated: string,
 ): Promise<MigrationJournal> {
 	const existingHeads = new Set<string>();
 	for (const event of journal.events) {
-		if (event.type === "set-head") existingHeads.add(`${event.block}\0${event.hash}`);
+		if (event.type === "set-head") existingHeads.add(`${event.block}\0${resolveObjectHash(event.hash, store.aliases)}`);
 	}
-	const staged = await stageHeadEvents(plugin, file, migrated);
+	const staged = await stageHeadEvents(store, migrated);
 	const missing: MigrationLedgerEvent[] = [];
 	for (let index = 0; index < staged.length; index += 2) {
 		const add = staged[index];
 		const head = staged[index + 1];
 		if (!add || !head || head.type !== "set-head") continue;
-		if (!existingHeads.has(`${head.block}\0${head.hash}`)) missing.push(add, head);
+		if (!existingHeads.has(`${head.block}\0${resolveObjectHash(head.hash, store.aliases)}`)) missing.push(add, head);
 	}
 	if (missing.length === 0) return journal;
 	const updated: MigrationJournal = { ...journal, events: [...journal.events, ...missing] };
-	await replaceMigrationJournal(plugin, file, journal, updated);
+	await replaceMigrationJournal(plugin, store, journal, updated);
 	return updated;
 }
 
-async function stageHeadEvents(plugin: MicaPlugin, file: TFile, doc: string): Promise<MigrationLedgerEvent[]> {
+/** Validate the actual combined append before a journal can publish live bytes. */
+async function validateMigrationAppend(store: NoteStore, events: readonly MigrationLedgerEvent[]): Promise<void> {
+	const existing = await readLedger(store);
+	const status = classifyEventBatch(existing, events);
+	if (status.conflictEids.length) throw new Error("Mica: migration events conflict with recorded history");
+	foldLedger([...existing, ...status.missing]);
+}
+
+async function stageHeadEvents(store: NoteStore, doc: string): Promise<MigrationLedgerEvent[]> {
 	const events: MigrationLedgerEvent[] = [];
 	const ts = Date.now();
 	for (const block of scanBlocksView(doc)) {
@@ -226,19 +250,19 @@ async function stageHeadEvents(plugin: MicaPlugin, file: TFile, doc: string): Pr
 		const content = doc.slice(block.content_start, block.content_end);
 		if (!hasContent(content)) continue;
 		const hash = hashContent(content);
-		await writeObject(plugin.app.vault, file, hash, content);
+		await writeObject(store, hash, content);
 		events.push({ type: "add-version", eid: newId(), ts, block: block.id, hash });
 		events.push({ type: "set-head", eid: newId(), ts, block: block.id, hash });
 	}
 	return events;
 }
 
-function migrationJournalPath(file: TFile): string {
-	return `${sidecarDir(file)}/migration.json`;
+function migrationJournalPath(store: NoteStore): string {
+	return store.paths.migration;
 }
 
-async function readMigrationJournal(plugin: MicaPlugin, file: TFile): Promise<MigrationJournal | null> {
-	const path = migrationJournalPath(file);
+async function readMigrationJournal(plugin: MicaPlugin, store: NoteStore): Promise<MigrationJournal | null> {
+	const path = migrationJournalPath(store);
 	const af = plugin.app.vault.getAbstractFileByPath(path);
 	if (!af) return null;
 	if (!(af instanceof TFile)) throw new Error(`Mica: migration journal path is not a file: ${path}`);
@@ -249,11 +273,12 @@ async function readMigrationJournal(plugin: MicaPlugin, file: TFile): Promise<Mi
 
 async function createPendingMigrationJournal(
 	plugin: MicaPlugin,
-	file: TFile,
+	store: NoteStore,
 	journal: MigrationJournal,
 ): Promise<void> {
-	const path = migrationJournalPath(file);
+	const path = migrationJournalPath(store);
 	const body = encodeMigrationJournal(journal);
+	await assertNoteStoreCurrent(store, true);
 	const existing = plugin.app.vault.getAbstractFileByPath(path);
 	if (existing) {
 		if (!(existing instanceof TFile)) throw new Error(`Mica: migration journal path is not a file: ${path}`);
@@ -264,7 +289,7 @@ async function createPendingMigrationJournal(
 			}
 			return body;
 		});
-		await verifyMigrationJournal(plugin, file, journal);
+		await verifyMigrationJournal(plugin, store, journal);
 		return;
 	}
 	try {
@@ -275,7 +300,7 @@ async function createPendingMigrationJournal(
 		}
 		throw error;
 	}
-	await verifyMigrationJournal(plugin, file, journal);
+	await verifyMigrationJournal(plugin, store, journal);
 }
 
 function validateJournalEvents(events: readonly MigrationLedgerEvent[]): void {
@@ -286,9 +311,9 @@ function validateJournalEvents(events: readonly MigrationLedgerEvent[]): void {
 	}
 }
 
-async function completeMigrationJournal(plugin: MicaPlugin, file: TFile, pending: MigrationJournal): Promise<void> {
+async function completeMigrationJournal(plugin: MicaPlugin, store: NoteStore, pending: MigrationJournal): Promise<void> {
 	const complete: MigrationJournal = { ...pending, status: "complete" };
-	await replaceMigrationJournal(plugin, file, pending, complete);
+	await replaceMigrationJournal(plugin, store, pending, complete);
 }
 
 function isMigrationJournal(value: unknown): value is MigrationJournal {
@@ -337,14 +362,15 @@ function encodeMigrationJournal(journal: MigrationJournal): string {
 
 async function replaceMigrationJournal(
 	plugin: MicaPlugin,
-	file: TFile,
+	store: NoteStore,
 	expected: MigrationJournal,
 	next: MigrationJournal,
 ): Promise<void> {
-	const path = migrationJournalPath(file);
+	const path = migrationJournalPath(store);
 	const af = plugin.app.vault.getAbstractFileByPath(path);
 	if (!(af instanceof TFile)) throw new Error(`Mica: migration journal is missing or not a file: ${path}`);
 	const body = encodeMigrationJournal(next);
+	await assertNoteStoreCurrent(store, true);
 	await plugin.app.vault.process(af, (current) => {
 		const actual = parseMigrationJournal(current, path);
 		if (!sameMigrationJournal(actual, expected) && !sameMigrationJournal(actual, next)) {
@@ -352,13 +378,13 @@ async function replaceMigrationJournal(
 		}
 		return body;
 	});
-	await verifyMigrationJournal(plugin, file, next);
+	await verifyMigrationJournal(plugin, store, next);
 }
 
-async function verifyMigrationJournal(plugin: MicaPlugin, file: TFile, expected: MigrationJournal): Promise<void> {
-	const actual = await readMigrationJournal(plugin, file);
+async function verifyMigrationJournal(plugin: MicaPlugin, store: NoteStore, expected: MigrationJournal): Promise<void> {
+	const actual = await readMigrationJournal(plugin, store);
 	if (!actual || !sameMigrationJournal(actual, expected)) {
-		throw new Error(`Mica: migration journal write could not be verified: ${migrationJournalPath(file)}`);
+		throw new Error(`Mica: migration journal write could not be verified: ${migrationJournalPath(store)}`);
 	}
 }
 
@@ -380,40 +406,48 @@ async function rollbackMigrationNote(
 
 /** Insert only Mica's own frontmatter key while preserving the rest byte-for-
  * byte. Existing `uuid` and all unrelated keys remain untouched. */
-function ensureMicaId(doc: string, cachedId: string | null): { doc: string; id: string } {
-	if (cachedId) return { doc, id: cachedId };
+function ensureMicaId(doc: string): { doc: string; id: string } {
+	const existing = noteId(doc);
+	if (existing !== null) return { doc, id: existing };
 	const id = newId();
-	const bom = doc.startsWith("\uFEFF") ? "\uFEFF" : "";
-	const body = bom ? doc.slice(1) : doc;
-	const firstEol = body.indexOf("\n");
-	const firstLine = body.slice(0, firstEol < 0 ? body.length : firstEol).replace(/\r$/, "");
-	if (firstLine.trim() === "---" && firstEol >= 0) {
-		const closing = /^(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/gm;
-		closing.lastIndex = firstEol + 1;
-		const close = closing.exec(body);
-		if (close) {
-			const frontmatter = body.slice(firstEol + 1, close.index);
-			const key = /^mica-id[ \t]*:[ \t]*([^#\r\n]*?)(?:[ \t]+#.*)?$/m.exec(frontmatter);
-			if (key) {
-				const current = key[1].trim().replace(/^(?:"(.*)"|'(.*)')$/, "$1$2");
-				if (current) return { doc, id: current };
-				const valueStart = firstEol + 1 + (key.index ?? 0) + key[0].indexOf(":") + 1;
-				const valueEnd = firstEol + 1 + (key.index ?? 0) + key[0].length;
-				return { doc: `${bom}${body.slice(0, valueStart)} ${id}${body.slice(valueEnd)}`, id };
-			}
-			const eol = body.slice(Math.max(0, close.index - 2), close.index).endsWith("\r\n") ? "\r\n" : "\n";
-			return { doc: `${bom}${body.slice(0, close.index)}mica-id: ${id}${eol}${body.slice(close.index)}`, id };
-		}
+	return { doc: setNoteId(doc, null, id), id };
+}
+
+/** Resume the existing conversion transaction even if its staged anchor was
+ * never published. This inspects central journals only; it imports no old layout. */
+async function findPendingMigrationStore(plugin: MicaPlugin, file: TFile, source: string): Promise<NoteStore | null> {
+	const root = storeRoot(plugin.app.vault);
+	if (await validateStoreRoot(root) === null) return null;
+	const notes = root.vault.getAbstractFileByPath(root.paths.notes);
+	if (!notes) return null;
+	if (!(notes instanceof TFolder)) throw new Error("Mica: central note records are not a folder");
+	let match: NoteStore | null = null;
+	for (const folder of notes.children) {
+		if (!(folder instanceof TFolder)) continue;
+		const manifest = root.vault.getAbstractFileByPath(`${folder.path}/manifest.json`);
+		if (!manifest) continue;
+		if (!(manifest instanceof TFile) || manifest.stat.size > MAX_LEDGER_BYTES)
+			throw new Error("Mica: invalid central note manifest during conversion recovery");
+		const value: unknown = JSON.parse(await root.vault.read(manifest));
+		if (typeof value !== "object" || value === null || !("path" in value) || value.path !== file.path) continue;
+		if (!("noteId" in value) || typeof value.noteId !== "string" || notePaths(value.noteId).dir !== folder.path)
+			throw new Error("Mica: central note identity does not match its directory");
+		const candidate = await stageNoteStore(root, file, source, value.noteId);
+		await assertNoteStoreCurrent(candidate);
+		const journal = await readMigrationJournal(plugin, candidate);
+		if (!journal || journal.status !== "pending") continue;
+		if (await requireObject(candidate, journal.original) !== source) continue;
+		if (match) throw new Error("Mica: multiple pending conversions match this note; no history was changed");
+		match = candidate;
 	}
-	const eol = body.includes("\r\n") ? "\r\n" : "\n";
-	return { doc: `${bom}---${eol}mica-id: ${id}${eol}---${eol}${body}`, id };
+	return match;
 }
 
 /** Migrate every markdown note in the vault (sidecars excluded). */
 export async function migrateVault(plugin: MicaPlugin, dryRun: boolean): Promise<MigrateFileReport[]> {
 	const reports: MigrateFileReport[] = [];
 	for (const file of plugin.app.vault.getMarkdownFiles()) {
-		if (file.path.includes(".mica/")) continue;
+		if (!isLiveNote(file)) continue;
 		const report = await migrateFile(plugin, file, dryRun);
 		if (report) reports.push(report);
 	}

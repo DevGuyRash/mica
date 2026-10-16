@@ -240,7 +240,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mica-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "flate2",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "mica-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "serde",

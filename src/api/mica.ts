@@ -1,7 +1,9 @@
-import { normalizePath, TFile } from "obsidian";
+import { normalizePath, Notice, TFile } from "obsidian";
 import type MicaPlugin from "../main";
 import {
 	coreVersion,
+	hashContent,
+	resolveObjectHash,
 	diffText,
 	makePatch,
 	replaceBlockContent,
@@ -13,14 +15,12 @@ import {
 } from "../wasm/bridge";
 import { applyOpText, type StructOp } from "../cst/ops";
 import { interactiveDiffIssue } from "../diff/budget";
-import { requireObject } from "../storage/sidecar";
+import { readLedger, requireObject } from "../storage/sidecar";
+import { assertNoteStoreCurrent, ensureStoreFolder, isLiveNote, storeRoot, validateStoreRoot } from "../storage/store";
 import { ensureBlockIds, ensureNoteId } from "../identity/identity";
 import { repair, type RepairReport } from "../identity/reconcile";
 import { migrateFile, migrateVault, type MigrateFileReport } from "../migrate/migrate";
 import { createBlockSource, type CreateBlockSourceOptions } from "./blockSource";
-
-const INBOX = "mica-bridge/inbox";
-const OUTBOX = "mica-bridge/outbox";
 
 interface Instruction {
 	verb: string;
@@ -34,7 +34,54 @@ interface Instruction {
  * verb routes through the same corruption-proof core the UI uses.
  */
 export class MicaApi {
+	private disposed = false;
+	private readonly bridgeTasks = new Set<Promise<void>>();
+	private readonly pendingInbox = new Set<TFile>();
+	private bridgePump: Promise<void> | null = null;
+	private queueFullReported = false;
 	constructor(private readonly plugin: MicaPlugin) {}
+
+	/** Stop admission synchronously; already admitted work stays owned until settled. */
+	dispose(): void { this.disposed = true; this.pendingInbox.clear(); }
+
+	settled(): Promise<void> {
+		return Promise.allSettled([...this.bridgeTasks]).then(() => undefined);
+	}
+
+	/** Serialize file generations; own consumption notifications reduce to no-ops. */
+	private enqueueInbox(file: TFile): void {
+		const inbox = storeRoot(this.plugin.app.vault).paths.bridgeInbox;
+		if (this.disposed || !file.path.startsWith(`${inbox}/`) || file.extension !== "json") return;
+		if (!this.pendingInbox.has(file) && this.pendingInbox.size >= 128) {
+			if (!this.queueFullReported) console.error("Mica bridge: inbox queue is full; unconsumed requests were preserved for retry");
+			this.queueFullReported = true;
+			return;
+		}
+		this.pendingInbox.add(file);
+		if (this.bridgePump) return;
+		const pump = (async () => {
+			while (!this.disposed && this.pendingInbox.size) {
+				const next = this.pendingInbox.values().next().value!;
+				this.pendingInbox.delete(next);
+				try { await this.processInbox(next); }
+				catch (error) { console.error("Mica bridge: instruction remains preserved", error); }
+			}
+		})().finally(() => {
+			this.bridgeTasks.delete(pump);
+			this.bridgePump = null;
+			this.queueFullReported = false;
+		});
+		this.bridgePump = pump;
+		this.bridgeTasks.add(pump);
+	}
+
+	private superviseBridge(work: () => Promise<void>): void {
+		if (this.disposed) return;
+		const task = Promise.resolve().then(() => { if (!this.disposed) return work(); })
+			.catch((error: unknown) => console.error("Mica bridge: operation did not finish", error))
+			.finally(() => this.bridgeTasks.delete(task));
+		this.bridgeTasks.add(task);
+	}
 
 	version(): string {
 		return coreVersion();
@@ -47,7 +94,7 @@ export class MicaApi {
 
 	private note(path: string): TFile {
 		const f = this.plugin.app.vault.getAbstractFileByPath(path);
-		if (!(f instanceof TFile)) throw new Error(`Not a note: ${path}`);
+		if (!(f instanceof TFile) || !isLiveNote(f)) throw new Error(`Not a live note: ${path}`);
 		return f;
 	}
 
@@ -132,9 +179,22 @@ export class MicaApi {
 	}
 
 	private async pair(notePath: string, baseHash: string, otherHash: string): Promise<[string, string]> {
-		const file = this.note(notePath);
-		const vault = this.plugin.app.vault;
-		return [await requireObject(vault, file, baseHash), await requireObject(vault, file, otherHash)];
+		const store = await this.plugin.engine.historyStore(this.note(notePath));
+		if (!store) throw new Error("Mica: this note has no prepared history");
+		// Pool membership does not imply membership in this note's history.
+		const allowed = new Set<string>();
+		for (const event of await readLedger(store)) {
+			if ("hash" in event) allowed.add(resolveObjectHash(event.hash, store.aliases));
+			if (event.type === "add-version" && event.parent)
+				allowed.add(resolveObjectHash(event.parent, store.aliases));
+		}
+		for (const hash of [baseHash, otherHash]) {
+			if (!allowed.has(resolveObjectHash(hash, store.aliases)))
+				throw new Error("Mica: requested object is not referenced by this note's history");
+		}
+		const pair: [string, string] = [await requireObject(store, baseHash), await requireObject(store, otherHash)];
+		await assertNoteStoreCurrent(store);
+		return pair;
 	}
 
 	async versionsEdit(notePath: string, blockId: string, parentSelector: string, content: string): Promise<void> {
@@ -243,45 +303,109 @@ export class MicaApi {
 	 * Registered inside `onLayoutReady`: Obsidian fires `create` for every
 	 * existing file during vault load, so registering earlier would REPLAY every
 	 * old instruction (including destructive ones) on every app launch. Each
-	 * inbox file is also deleted after processing, so it can only ever run once.
+	 * inbox generation is replaced with a consumed marker under an exact-byte guard.
 	 */
 	registerBridge(): void {
+		this.plugin.register(() => this.dispose());
 		this.plugin.app.workspace.onLayoutReady(() => {
-			this.plugin.registerEvent(
-				this.plugin.app.vault.on("create", (f) => {
-					if (f instanceof TFile && f.path.startsWith(`${INBOX}/`) && f.extension === "json") {
-						void this.processInbox(f);
-					}
-				}),
-			);
+			if (this.disposed) return;
+			this.superviseBridge(async () => {
+				try { await this.initializeBridge(); }
+				catch (error) {
+					if (this.disposed) return;
+					console.error("Mica bridge: storage initialization failed", error);
+					new Notice(`Mica: history storage is unavailable. ${error instanceof Error ? error.message : String(error)}`);
+				}
+			});
 		});
 	}
 
+	private async initializeBridge(): Promise<void> {
+		const root = storeRoot(this.plugin.app.vault);
+		await validateStoreRoot(root, true);
+		if (this.disposed) return;
+		await ensureStoreFolder(root, root.paths.bridgeInbox);
+		if (this.disposed) return;
+		await ensureStoreFolder(root, root.paths.bridgeOutbox);
+		if (this.disposed) return;
+		// Register after initial load and folder creation; never replay existing inbox files.
+		const enqueue = (file: unknown): void => { if (file instanceof TFile) this.enqueueInbox(file); };
+		this.plugin.registerEvent(root.vault.on("create", enqueue));
+		this.plugin.registerEvent(root.vault.on("modify", enqueue));
+	}
+
 	private async processInbox(file: TFile): Promise<void> {
+		if (this.disposed) return;
 		const vault = this.plugin.app.vault;
+		const root = storeRoot(vault);
+		const path = file.path;
+		const out = normalizePath(`${root.paths.bridgeOutbox}/${file.basename}.json`);
+		const storeId = await validateStoreRoot(root);
+		if (this.disposed) return;
+		if (!storeId) throw new Error("Mica: initialize history storage before using the bridge");
+		const text = await vault.read(file);
+		if (this.disposed) return;
 		let result: unknown;
 		let error: string | null = null;
 		try {
-			result = await this.runInstruction(JSON.parse(await vault.read(file)) as Instruction);
+			const instruction: unknown = JSON.parse(text);
+			if (isConsumedInstruction(instruction)) return;
+			const parsed = parseInstruction(instruction);
+			if (vault.getAbstractFileByPath(path) !== file || file.path !== path)
+				throw new Error("Mica: inbox file changed before execution");
+			result = await this.runInstruction(parsed);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
-		// Consume the instruction so it can never replay.
-		await this.plugin.app.fileManager
-			.trashFile(file)
-			.catch((e) => console.error("Mica bridge: failed to consume inbox file", file.path, e));
-		try {
-			if (!vault.getAbstractFileByPath(OUTBOX)) await vault.createFolder(OUTBOX);
-			const out = normalizePath(`${OUTBOX}/${file.basename}.json`);
-			const existing = vault.getAbstractFileByPath(out);
-			const body = JSON.stringify({ ok: error === null, result, error }, null, 2);
-			if (existing instanceof TFile) await vault.process(existing, () => body);
-			else await vault.create(out, body);
-		} catch (e) {
-			// Never hang an agent silently: the failure is at least observable.
-			console.error("Mica bridge: failed to write outbox result for", file.path, e);
+		if (this.disposed) return;
+		if (await validateStoreRoot(root) !== storeId) throw new Error("Mica: history store changed during instruction processing");
+		if (this.disposed) return;
+		// Trash has no compare-and-swap API. Replacing only the executed bytes
+		// prevents deletion of a newer Sync/editor instruction and prevents replay.
+		const consumed = JSON.stringify({ micaConsumed: 1, instructionHash: hashContent(text) }) + "\n";
+		await vault.process(file, (current) => {
+			if (this.disposed || file.path !== path || vault.getAbstractFileByPath(path) !== file || current !== text)
+				throw new Error("Mica: inbox generation changed; newer content was preserved");
+			return consumed;
+		});
+		if (this.disposed) return;
+		if (await validateStoreRoot(root) !== storeId) throw new Error("Mica: history store changed before response publication");
+		if (this.disposed) return;
+		await ensureStoreFolder(root, root.paths.bridgeOutbox);
+		if (this.disposed) return;
+		const existing = vault.getAbstractFileByPath(out);
+		const body = JSON.stringify({ ok: error === null, result, error }, null, 2);
+		if (existing instanceof TFile) {
+			const previous = await vault.read(existing);
+			if (this.disposed) return;
+			await vault.process(existing, (current) => {
+				if (this.disposed || existing.path !== out || vault.getAbstractFileByPath(out) !== existing || current !== previous)
+					throw new Error("Mica: newer bridge response was preserved");
+				return body;
+			});
+		} else {
+			await vault.create(out, body);
 		}
 	}
+}
+
+function isConsumedInstruction(value: unknown): boolean {
+	return typeof value === "object" && value !== null && "micaConsumed" in value && value.micaConsumed === 1
+		&& "instructionHash" in value && typeof value.instructionHash === "string";
+}
+
+function parseInstruction(value: unknown): Instruction {
+	if (typeof value !== "object" || value === null || !("verb" in value) || typeof value.verb !== "string")
+		throw new Error("Mica: bridge instruction requires a string verb");
+	if (!("args" in value)) return { verb: value.verb };
+	if (!Array.isArray(value.args)) throw new Error("Mica: bridge instruction arguments must be strings");
+	const rawArgs: unknown[] = value.args;
+	const args: string[] = [];
+	for (const arg of rawArgs) {
+		if (typeof arg !== "string") throw new Error("Mica: bridge instruction arguments must be strings");
+		args.push(arg);
+	}
+	return { verb: value.verb, args };
 }
 
 function uniqueBlock(doc: string, blockId: string): ReturnType<typeof scanBlocksView>[number] {

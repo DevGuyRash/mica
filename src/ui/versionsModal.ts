@@ -2,6 +2,7 @@ import { Component, Menu, Modal, Notice, setIcon, TFile } from "obsidian";
 import type MicaPlugin from "../main";
 import { contentSignature, diffText, makePatch, parseBlock, scanBlocksView, type VersionMeta } from "../wasm/bridge";
 import { readObject } from "../storage/sidecar";
+import type { NoteStore } from "../storage/store";
 import { interactiveDiffIssue } from "../diff/budget";
 import { renderDiff, renderNUp, renderNUpPatch, renderPatch } from "../diff/diffView";
 import { stripStructuralLines } from "../diff/hideSyntax";
@@ -87,6 +88,7 @@ const CONTENT_CACHE_LIMIT = 12;
  */
 export class VersionsModal extends Modal {
 	private rows: Row[] = [];
+	private history: NoteStore | null = null;
 	private baseIndex: VersionBaseIndex<Row> = { byId: new Map(), head: null };
 	private removedRowIds = new Set<string>();
 	private versionParents = new Map<string, string | null>();
@@ -274,6 +276,7 @@ export class VersionsModal extends Modal {
 	}
 
 	private async reload(fresh = false): Promise<void> {
+		this.history = await this.plugin.engine.historyStore(this.file);
 		const state = (await (fresh ? this.plugin.engine.freshState(this.file) : this.plugin.engine.state(this.file)))[
 			this.blockId
 		];
@@ -409,7 +412,7 @@ export class VersionsModal extends Modal {
 		if (this.missing.has(hash)) return Promise.resolve(false);
 		const pending = this.loading.get(hash);
 		if (pending) return pending;
-		const task = readObject(this.plugin.app.vault, this.file, hash)
+		const task = (this.history ? readObject(this.history, hash) : Promise.resolve(null))
 			.then((content) => {
 				if (this.closed) return false;
 				if (content === null) {

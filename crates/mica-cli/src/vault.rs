@@ -1,6 +1,7 @@
 //! Vault discovery and note-path resolution.
 //!
-//! A "vault" is any directory containing `.obsidian/`. Notes may be addressed
+//! A root is explicit, or discovered through `.obsidian/` or `mica-data/root.json`.
+//! Notes may be addressed
 //! by a path relative to the current directory OR relative to the vault root;
 //! resolution tries as-given first, then vault-relative.
 
@@ -97,7 +98,7 @@ pub fn resolve_note_scope(path: &str, vault: Option<&Path>) -> Result<NoteScope>
 
     let metadata = std::fs::metadata(&target).map_err(io_ctx(target.display().to_string()))?;
     let paths = if metadata.is_dir() {
-        vault_notes(&target)?
+        walk_vault_from(&target, &root, true, false)?.notes
     } else if metadata.is_file() && is_markdown_path(&target) {
         vec![target]
     } else {
@@ -159,6 +160,14 @@ fn validate_visible_scope(target: &Path, root: &Path) -> Result<()> {
             target.display()
         ))
     })?;
+    let relative_text = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if mica_core::is_managed_path_impl(&relative_text) {
+        return Err(CliError::BadArgs(
+            "Mica managed storage is not a live note scope".to_string(),
+        ));
+    }
     // O(d), where d is the number of path components beneath the vault root.
     let hidden = relative.components().any(|component| {
         let std::path::Component::Normal(name) = component else {
@@ -187,7 +196,7 @@ impl NoteRef {
 }
 
 /// Find the vault root: `explicit` if given, else walk up from `start`
-/// looking for a directory containing `.obsidian`.
+/// looking for a directory containing `mica-data/root.json` or `.obsidian`.
 ///
 /// Purpose: every command needs the vault root for sidecar-wide operations.
 ///
@@ -214,16 +223,36 @@ pub fn find_vault(explicit: Option<&Path>, start: &Path) -> Result<PathBuf> {
                 abs.display()
             )));
         }
-        return std::fs::canonicalize(&abs).map_err(io_ctx(abs.display().to_string()));
+        let selected = std::fs::canonicalize(&abs).map_err(io_ctx(abs.display().to_string()))?;
+        let layout = mica_core::storage_layout_impl();
+        // Reserve the managed basename even before initialization or when its
+        // marker is damaged; explicit plain roots do not require .obsidian.
+        for ancestor in selected.ancestors() {
+            if ancestor
+                .file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new(&layout.root))
+            {
+                return Err(CliError::BadArgs(
+                    "Mica managed storage cannot be selected as a live root — select the containing root instead".to_string(),
+                ));
+            }
+        }
+        return Ok(selected);
     }
     let mut cur = absolutize(start)?;
+    let layout = mica_core::storage_layout_impl();
     loop {
+        let store_dir = cur.join(&layout.root);
+        if path_exists(&store_dir)? {
+            let selected = crate::sidecar::StoreRoot::open(&cur)?;
+            return Ok(selected.vault);
+        }
         if cur.join(".obsidian").is_dir() {
             return std::fs::canonicalize(&cur).map_err(io_ctx(cur.display().to_string()));
         }
         if !cur.pop() {
             return Err(CliError::NotFound(
-                "no vault found: no `.obsidian` folder in this directory or any parent — run inside a vault or pass --vault".to_string(),
+                "no Mica root found: no `mica-data/root.json` or `.obsidian` directory in this path or its parents — pass --vault with an existing directory".to_string(),
             ));
         }
     }
@@ -279,7 +308,7 @@ pub fn resolve_note(note: &str, vault: Option<&Path>) -> Result<NoteRef> {
 }
 
 /// All markdown notes under `vault`, skipping `.obsidian/`, dotfiles, and
-/// `.mica` sidecar folders.
+/// the managed `mica-data/` root and legacy `.mica` sidecar folders.
 ///
 /// Purpose: vault-wide commands (repair, migrate, watch, doctor).
 ///
@@ -306,17 +335,39 @@ pub(crate) struct VaultInventory {
 }
 
 pub(crate) fn vault_inventory(vault: &Path) -> Result<VaultInventory> {
-    walk_vault(vault, true, true)
+    Ok(VaultInventory {
+        notes: vault_notes(vault)?,
+        sidecars: vault_sidecars(vault)?,
+    })
+}
+
+pub(crate) fn legacy_sidecars(vault: &Path) -> Result<Vec<PathBuf>> {
+    walk_vault(vault, false, true).map(|inventory| inventory.sidecars)
 }
 
 fn walk_vault(vault: &Path, include_notes: bool, include_sidecars: bool) -> Result<VaultInventory> {
+    walk_vault_from(vault, vault, include_notes, include_sidecars)
+}
+
+fn walk_vault_from(
+    scope: &Path,
+    vault: &Path,
+    include_notes: bool,
+    include_sidecars: bool,
+) -> Result<VaultInventory> {
     let mut result = VaultInventory {
         notes: Vec::new(),
         sidecars: Vec::new(),
     };
     // Per vault command: one O(entries) traversal plus stable O(n log n)
     // output ordering; stack and results occupy O(directories + matches).
-    let root = std::fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
+    let vault_root = std::fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
+    let root = if scope == vault {
+        vault_root.clone()
+    } else {
+        std::fs::canonicalize(scope).map_err(io_ctx(scope.display().to_string()))?
+    };
+    let managed = vault_root.join(mica_core::storage_layout_impl().root);
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).map_err(io_ctx(dir.display().to_string()))?;
@@ -332,6 +383,9 @@ fn walk_vault(vault: &Path, include_notes: bool, include_sidecars: bool) -> Resu
                 continue;
             }
             if file_type.is_dir() {
+                if path == managed {
+                    continue;
+                }
                 if name.starts_with('.') {
                     continue;
                 }
@@ -356,7 +410,7 @@ fn walk_vault(vault: &Path, include_notes: bool, include_sidecars: bool) -> Resu
     Ok(result)
 }
 
-/// Sidecar directories under `vault` (folders ending in `.mica`).
+/// Identity-bound central note directories, including orphaned live-note hints.
 ///
 /// Purpose: repair/doctor sweep sidecars even when their note is gone.
 ///
@@ -374,7 +428,8 @@ fn walk_vault(vault: &Path, include_notes: bool, include_sidecars: bool) -> Resu
 /// let sidecars = mica_cli::vault::vault_sidecars(std::path::Path::new(".")).unwrap();
 /// ```
 pub fn vault_sidecars(vault: &Path) -> Result<Vec<PathBuf>> {
-    walk_vault(vault, false, true).map(|inventory| inventory.sidecars)
+    crate::sidecar::enumerate_note_stores(vault)
+        .map(|records| records.iter().map(crate::sidecar::sidecar_dir).collect())
 }
 
 fn contained_note(abs: PathBuf, vault: PathBuf) -> Result<NoteRef> {
@@ -385,6 +440,7 @@ fn contained_note(abs: PathBuf, vault: PathBuf) -> Result<NoteRef> {
             vault.display()
         )));
     }
+    validate_visible_scope(&abs, &vault)?;
     Ok(NoteRef { abs, vault })
 }
 
@@ -571,10 +627,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary directory");
         let vault = temp.path().join("vault");
         std::fs::create_dir_all(vault.join(".obsidian")).expect("vault marker");
-        std::fs::create_dir_all(vault.join("Folder/B.mica")).expect("sidecar");
-        std::fs::create_dir_all(vault.join("A.mica")).expect("sidecar");
+        std::fs::create_dir_all(vault.join("Folder")).expect("note folder");
         std::fs::write(vault.join("Folder/B.md"), "b").expect("note");
         std::fs::write(vault.join("A.md"), "a").expect("note");
+        for (path, id) in [("Folder/B.md", "note-b"), ("A.md", "note-a")] {
+            let store =
+                crate::sidecar::NoteStore::for_id(&vault, &vault.join(path), id).expect("store");
+            crate::sidecar::write_manifest(&store, Some(id), path, &[], 0).expect("manifest");
+        }
 
         let inventory = vault_inventory(&vault).expect("combined inventory");
 

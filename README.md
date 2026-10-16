@@ -4,7 +4,7 @@
 
 - **Tabs & grids** that nest deeply (up to 128 structural levels), without stacking backticks.
 - **Real Markdown and code editors.** Click prose to edit Markdown in place, or expand callouts and fenced code into structured lightboxes. Code blocks expose their optional language/info string and use matching syntax highlighting. Nothing commits merely because an editor loses focus, and unsaved conflicts remain visible to the user.
-- **Block-level versioning.** Give a block an id and Mica snapshots semantic content changes into a sidecar folder you can read, diff, label, and restore — from the app or the shell.
+- **Block-level versioning.** Give a block an id and Mica snapshots semantic content changes into one vault-root history store you can inspect, diff, label, and restore — from the app or the shell.
 - **Drag anything.** Tabs, cells, and whole groups move by pointer with live insertion indicators, spring-loaded tabs, and keyboard alternatives.
 - **Two engines, one brain.** The Obsidian plugin and the `mica` CLI share the same Rust core, so a script at 2 a.m. and a click at noon behave identically.
 
@@ -28,7 +28,7 @@ cargo build --release -p mica-cli     # → target/release/mica
 mica ls "My Note"
 ```
 
-The CLI operates on vault files directly — Obsidian does not need to be running — and writes the exact same sidecar format the plugin reads.
+The CLI operates on vault files directly — Obsidian does not need to be running — and writes the exact same central storage format the plugin reads; Git is optional.
 
 ---
 
@@ -62,7 +62,7 @@ current Mica block—not unrelated Markdown elsewhere in the note. When the
 working block differs from HEAD, **Revert to HEAD** first preserves the working
 copy as a recoverable version and then restores HEAD exactly.
 
-> **Already using `obsidian-tabs`?** Run **`Mica: Migrate tabs → Mica (dry run, whole vault)`**, review, then convert — your manual "archived" callouts become real, labeled version history. Or from the shell: `mica migrate --dry-run`. A retained `<Note>.mica/migration.json` records the transaction status, exact original/migrated object hashes, and replayable ledger events so the plugin or CLI can resume an interrupted migration without guessing.
+> **Already using `obsidian-tabs`?** Run **`Mica: Migrate tabs → Mica (dry run, whole vault)`**, review, then convert — your manual "archived" callouts become real, labeled version history. Or from the shell: `mica migrate --dry-run`. A retained `mica-data/notes/<note-key>/migration.json` records the transaction status, exact original/migrated object hashes, and replayable ledger events so the plugin or CLI can resume an interrupted migration without guessing.
 
 ---
 
@@ -100,11 +100,13 @@ Copy actions exist on blocks, tab groups, individual tabs, grids, cells, text/co
 
 - **Smart auto-snapshots.** A short while after a block's _content_ changes, it's snapshotted. Structure-only churn — adding empty tabs, reordering, renaming — never mints a version. Toggle auto/manual and the idle interval from the version chip's right-click menu.
 - **Pre-image safety.** Content-changing CLI/API mutations first ensure the current semantic content is represented in history. Structure-only layout changes intentionally do not mint versions; destructive editor controls instead offer exact-source, conflict-guarded Undo.
-- **Where it lives.** Next to `My Note.md`, a visible `My Note.mica/` folder holds verified content-addressed version objects (plain Markdown through 4 KiB; larger objects use gzip when the host WebView supports it and otherwise remain plain Markdown), an append-only `ledger.jsonl`, and a human-readable `manifest.json`. Migrated notes also retain `migration.json`; structural history normalization uses `section-normalization.json`, and prompt-block consolidation uses `tab-consolidation.json`. It all rides Obsidian Sync and git.
+> **Storage format change in 0.3.0:** the plugin and CLI use the central store together. Old note-local `.mica` directories are not imported automatically, and old clients must not write after cutover. Back up existing data and complete a verified offline transfer before enabling this version on an existing setup. The product has no automatic layout migration or dual-write mode. Shared objects are retained; this change adds no garbage collection.
+
+- **Where it lives.** One visible vault-root `mica-data/` store holds shared immutable objects under `objects/` and independent note histories under `notes/<note-key>/`. Each note record has an append-only `ledger.jsonl`, a human-readable `manifest.json`, and any existing operation journals. Safe note keys derive from the stable `mica-id`; current note paths are metadata, so renames do not move history. Objects use full plaintext BLAKE3 addresses and are stored once across notes: Markdown through 4 KiB, gzip above it in every supported host. Note-scoped `object-aliases.json` records retain any legacy short-hash references without rewriting ledger or journal bytes. Git is optional. When using Obsidian Sync, enable **Sync all other types** so JSON, JSONL and gzip state travels with the Markdown files; dot-prefixed stores are excluded by Sync. [Official Sync settings](https://obsidian.md/help/sync/settings)
 - **Checkpoint identity.** Each checkpoint has a stable version ID separate from its content hash, so restoring identical bytes can still create a distinct point in history. Parents, HEAD, labels, and visibility use that ID. Visible `vN` numbers are presentation labels and may change when checkpoints are removed from or restored to the timeline; automation should use a version ID or an unambiguous hash.
 - **Coordinated upgrade.** Identity-bearing checkpoints, HEAD moves, labels, and visibility are new typed ledger events. Older readers fail closed instead of guessing. Upgrade the Mica plugin and CLI on every device that touches the vault before creating or managing these checkpoints.
-- **Append-only structural normalization.** `replace-version` events can point an existing `add-version` event at a structure-only replacement object without rewriting the original event or object. Labels, timestamps, origins, lineage, version order, and version count stay attached to the original addition. This ledger event requires a Mica build that understands it: upgrade the plugin and CLI on every device before normalizing history or editing a normalized sidecar.
-- **Rename contract.** The block UUID, not its display name or note path, owns the lineage. Renaming a note moves its sidecar through the same serialized queue and refreshes the manifest; a destination collision is surfaced and neither folder is overwritten. Explicit block-name changes update current metadata but do not create a `vN` row, so the content timeline does not claim to be a rename audit log.
+- **Append-only structural normalization.** `replace-version` events can point an existing `add-version` event at a structure-only replacement object without rewriting the original event or object. Labels, timestamps, origins, lineage, version order, and version count stay attached to the original addition. This ledger event requires a Mica build that understands it: upgrade the plugin and CLI on every device before normalizing history or editing normalized stored history.
+- **Identity and rename contract.** Stable note and block identities own history. A note rename refreshes its manifest path hint through the same serialized queue; its history directory and shared objects stay in place. Duplicate note identities block writes until repaired, preventing copied notes from mixing ledgers. Explicit block-name changes update current metadata without creating a `vN` row. History does not reconstruct historical note names. Moving or exporting a note with history must include its note record and referenced shared objects; copying the Markdown alone carries its current content.
 
 ### The timeline
 
@@ -143,15 +145,15 @@ mica watch                            # daemon: auto-snapshot the vault while Ob
 mica migrate --dry-run                # legacy ```tabs conversion report
 mica normalize-sections Prompts --history --dry-run  # validate one-editor normalization
 mica consolidate-tabs Prompts --history --dry-run    # plan one-block tab consolidation
-mica repair                           # re-home sidecars after renames; report orphans
-mica doctor                           # sidecar health (missing objects, bad ledger lines)
+mica repair                           # repair identities; retain and report orphaned history
+mica doctor                           # central-store health (missing objects, bad ledger lines)
 ````
 
 After reviewing the dry-run JSON, repeat `normalize-sections` without `--dry-run` while Obsidian is closed. The command accepts one note or a directory, wraps each selected body in exactly one logical `:::section`, and uses append-only replacements for stored history. It preserves original objects and ledger lines and can resume an interrupted note transaction from `section-normalization.json`.
 
 `consolidate-tabs` is the recoverable follow-up for prompt collections that were imported as several independent blocks. It creates one unnamed target block with one tab per logical prompt, preserves source history as full target snapshots, and promotes top-level callouts and fenced code to native sections. Single-block notes retain their UUID while receiving the same semantic section correction. The command preserves all source objects/events and resumes from `tab-consolidation.json`.
 
-Global flags: `--vault DIR` (else it walks up to `.obsidian`), `--json` on every read command for scripting. Blocks are addressed by id, `name`, or 1-based index. Interactive version selectors accept visible `vN`, labels, stable version IDs, or unambiguous hash prefixes; durable scripts should use the version ID.
+Global flags: `--vault DIR` accepts any existing plain directory; otherwise Mica walks up to a valid `mica-data/root.json` marker or `.obsidian`. Git does not select the root. The name `mica-data` is reserved for managed state: select its containing root rather than that folder or a descendant. Use `--json` on every read command for scripting. Blocks are addressed by id, `name`, or 1-based index. Interactive version selectors accept visible `vN`, labels, stable version IDs, or unambiguous hash prefixes; durable scripts should use the version ID.
 
 ## Scripting & AI agents
 
@@ -180,7 +182,7 @@ await window.mica.versionsDiff("My Note.md", base, other, "word");
 
 `versionsRevert`, `versionsEdit`, and `versionsLabel` take a stable version ID. For compatibility, each also accepts a full content hash when that hash identifies exactly one checkpoint; duplicate-hash histories require the version ID.
 
-**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-bridge/inbox/`; the result appears in `mica-bridge/outbox/`. Verbs: `block.source` (body, optional name), `block.list/read/update/apply/attr`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. `versions.set-visible` takes the note, block ID, `"true"` or `"false"`, then one or more version IDs; `versions.visibility` remains a compatibility alias. Destructive verbs snapshot first.
+**From any process, via the file-bridge** — drop `{ "verb": "block.apply", "args": ["My Note.md", "<id>", "{\"op\":\"insertTab\",\"path\":[0],\"at\":2}"] }` into `mica-data/bridge/inbox/`; the result appears in `mica-data/bridge/outbox/`. Verbs: `block.source` (body, optional name), `block.list/read/update/apply/attr`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`. `versions.set-visible` takes the note, block ID, `"true"` or `"false"`, then one or more version IDs; `versions.visibility` remains a compatibility alias. Destructive verbs snapshot first.
 
 ---
 

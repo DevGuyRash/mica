@@ -25,3 +25,10 @@
   there is no repair command; deciding whether to offer one is open, since it
   would rewrite stored history.
 - The Jul 2026 `brace-expansion` OOM advisory remains in WDIO/ESLint's dev-only transitive graph: v5 fixes the issue but is export-incompatible with their pinned `minimatch` branches. Production dependencies audit clean; remove this risk when those tools accept the patched major.
+
+- Central storage format 1 has source wiring on the isolated storage
+  branch. Plugin/CLI compilation, storage contract checks, actual history/restore
+  behavior, and the owner's backed-up offline cutover remain unverified. The
+  signed 0.2.1 review-fix candidate is separate; do not use its check results as
+  evidence for this storage change. Retain all old state until cutover and
+  recovery verification complete; no automatic conversion or object GC exists.

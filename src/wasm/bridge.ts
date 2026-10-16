@@ -8,6 +8,14 @@ import init, {
 	fold_ledger,
 	has_content,
 	hash_content,
+	is_managed_path,
+	note_id,
+	note_paths,
+	object_paths,
+	resolve_object_hash,
+	set_note_id,
+	storage_layout,
+	validate_store_marker,
 	make_patch,
 	mica_version,
 	migrate_tabs,
@@ -73,6 +81,78 @@ async function initializeCore(): Promise<void> {
 	// an init failure we never detach, so a retry still has the bytes.
 	const buf = wasmBinary.buffer as { transfer?: (newByteLength?: number) => ArrayBufferLike };
 	if (typeof buf.transfer === "function") buf.transfer(0);
+}
+
+/** Vault-relative paths from the shared Rust store policy. */
+export interface StorageLayout {
+	readonly format: number;
+	readonly root: string;
+	readonly marker: string;
+	readonly objects: string;
+	readonly notes: string;
+	readonly bridgeInbox: string;
+	readonly bridgeOutbox: string;
+	readonly orphaned: string;
+}
+
+/** Identity-derived note paths; authored IDs never become path components. */
+export interface NotePaths {
+	readonly key: string;
+	readonly dir: string;
+	readonly ledger: string;
+	readonly manifest: string;
+	readonly aliases: string;
+	readonly migration: string;
+	readonly sectionNormalization: string;
+	readonly tabConsolidation: string;
+}
+
+/** Alternative representations of one full-hash shared object. */
+export interface ObjectPaths {
+	readonly plain: string;
+	readonly gzip: string;
+}
+
+/** Decoded and validated store marker. */
+export interface StoreMarker {
+	readonly format: number;
+	readonly storeId: string;
+}
+
+export function storageLayout(): StorageLayout {
+	return storage_layout() as StorageLayout;
+}
+
+export function notePaths(id: string): NotePaths {
+	return note_paths(id) as NotePaths;
+}
+
+export function objectPaths(fullHash: string): ObjectPaths {
+	return object_paths(fullHash) as ObjectPaths;
+}
+
+/** Caller normalizes separators and vault containment before this policy check. */
+export function isManagedPath(vaultRelative: string): boolean {
+	return is_managed_path(vaultRelative);
+}
+
+/** Source-backed identity lookup; absence does not create an anchor. */
+export function noteId(source: string): string | null {
+	return note_id(source) ?? null;
+}
+
+/** Exact expected identity guard, with all unrelated source bytes preserved. */
+export function setNoteId(source: string, expected: string | null, id: string): string {
+	return set_note_id(source, expected ?? undefined, id);
+}
+
+/** Pass the standard JSON decoder's unknown result directly to the shared validator. */
+export function validateStoreMarker(value: unknown): StoreMarker {
+	return validate_store_marker(value) as StoreMarker;
+}
+
+export function resolveObjectHash(hash: string, aliases: Readonly<Record<string, string>>): string {
+	return resolve_object_hash(hash, aliases);
 }
 
 export function coreVersion(): string {

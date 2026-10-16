@@ -18,6 +18,18 @@ are delivered through new GitHub Releases. Installed community plugins do not
 update automatically: users select **Settings → Community plugins → Check for
 updates**, then **Update** or **Update all**.
 
+## Storage format 1 cutover
+
+The 0.3 plugin and CLI use one `mica-data/` store. Treat this as a coordinated
+storage-format change: every participating client must understand the new
+marker, note bindings and shared object addresses before it writes. Old
+note-local sidecars are not an automatic import or fallback path. The release
+must not claim existing-vault cutover until an independent backup, writer/Sync
+quiescence, exact object/reference verification, and history/restore checks
+have succeeded. Preserve old state for rollback outside the live vault. The
+one-off owner transfer is external to product code; do not add a permanent
+migration framework, dual writes, or shared-object garbage collection.
+
 ## 1. Establish a release candidate
 
 WHEN you prepare a release candidate THEN you SHALL use one commit for every
@@ -36,7 +48,7 @@ release version in `versions.json`.
 
 WHEN you change the sidecar or ledger format THEN you SHALL document backward
 compatibility and test the plugin and CLI from the same candidate against
-existing sidecars before tagging.
+existing stored histories before tagging.
 
 WHEN the candidate can write `checkpoint`, `move-head`, `version-label`,
 `version-visibility`, or `replace-version` events THEN you SHALL upgrade every

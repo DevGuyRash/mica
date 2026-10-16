@@ -19,6 +19,7 @@ pub mod ops;
 mod parser;
 mod reconcile;
 mod scanner;
+mod store;
 mod util;
 mod versions;
 pub use diff::{diff_impl, make_patch_impl, DiffChange, DiffResult, Hunk, Span};
@@ -35,6 +36,11 @@ pub use ops::{
 pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
+pub use store::{
+    is_managed_path_impl, note_id_impl, note_paths_impl, object_paths_impl, resolve_object_hash_impl,
+    set_note_id_impl, storage_layout_impl, validate_store_marker_impl, NotePaths, ObjectPaths,
+    StorageLayout, StoreError, StoreMarker,
+};
 pub use versions::{
     content_signature_impl, fold_ledger_impl, has_content_impl, resolve_ledger_impl,
     should_snapshot_impl, BlockState, Event, HeadRef, LedgerError, LedgerResolution,
@@ -85,6 +91,72 @@ pub fn hash_content(text: &str) -> String {
 #[wasm_bindgen]
 pub fn new_id() -> String {
     new_id_impl()
+}
+
+/// Return the vault-wide layout without creating any storage.
+#[wasm_bindgen]
+pub fn storage_layout() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&storage_layout_impl())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Derive safe, identity-bound note paths relative to the vault root.
+#[wasm_bindgen]
+pub fn note_paths(note_id: &str) -> Result<JsValue, JsValue> {
+    let paths = note_paths_impl(note_id).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&paths)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Derive shared object paths from a complete canonical BLAKE3 address.
+#[wasm_bindgen]
+pub fn object_paths(full_hash: &str) -> Result<JsValue, JsValue> {
+    let paths = object_paths_impl(full_hash).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&paths)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Test an already-normalized vault-relative path for managed-store membership.
+#[wasm_bindgen]
+pub fn is_managed_path(vault_relative: &str) -> bool {
+    is_managed_path_impl(vault_relative)
+}
+
+/// Read a note's source-backed identity without preparing or stamping it.
+#[wasm_bindgen]
+pub fn note_id(source: &str) -> Result<Option<String>, JsValue> {
+    note_id_impl(source).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Set a note identity under an exact expected-identity guard.
+#[wasm_bindgen]
+pub fn set_note_id(
+    source: &str,
+    expected: Option<String>,
+    id: &str,
+) -> Result<String, JsValue> {
+    set_note_id_impl(source, expected.as_deref(), id)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Validate an already JSON-decoded store marker, rejecting unknown fields.
+#[wasm_bindgen]
+pub fn validate_store_marker(marker: JsValue) -> Result<JsValue, JsValue> {
+    let marker: StoreMarker = serde_wasm_bindgen::from_value(marker)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let marker = validate_store_marker_impl(marker)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&marker)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Resolve a legacy object address through note-scoped aliases only.
+#[wasm_bindgen]
+pub fn resolve_object_hash(hash: &str, aliases: JsValue) -> Result<String, JsValue> {
+    let aliases: std::collections::BTreeMap<String, String> = serde_wasm_bindgen::from_value(aliases)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    resolve_object_hash_impl(hash, &aliases)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Locate every top-level ` ```mica ` block in a document. Returns `BlockSpan[]`.

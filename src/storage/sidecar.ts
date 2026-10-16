@@ -1,9 +1,9 @@
-import { normalizePath, TFile, TFolder, type Vault } from "obsidian";
-import { Gunzip, strFromU8 } from "fflate";
-import { hashContent, type LedgerEvent } from "../wasm/bridge";
+import { TFile, type Vault } from "obsidian";
+import { Gunzip, gzip, strFromU8, strToU8 } from "fflate";
+import { hashContent, objectPaths, resolveObjectHash, type LedgerEvent } from "../wasm/bridge";
+import { assertNoteStoreCurrent, ensureStoreFolder, MAX_ALIASES, MAX_ALIAS_BYTES, parseAliases, readAliases, validateStoreRoot, type NoteStore, type StoreRoot } from "./store";
 import {
 	classifyEventBatch,
-	isObjectHash,
 	MAX_LEDGER_BYTES,
 	MAX_LEDGER_EVENTS,
 	MAX_LEDGER_LINE_BYTES,
@@ -12,38 +12,16 @@ import {
 	validateEventBatch,
 } from "./ledger";
 
-// A note's history lives in a *visible*, co-located sidecar folder, so it rides
-// the normal Vault API + Obsidian Sync and stays human-readable. Version objects
-// are content-addressed and immutable; the ledger is append-only.
-
-export function sidecarDir(file: TFile): string {
-	const base = file.path.slice(0, file.path.length - file.extension.length - 1);
-	return normalizePath(`${base}.mica`);
-}
-
-export function objectsDir(file: TFile): string {
-	return `${sidecarDir(file)}/objects`;
-}
-
-export function ledgerPath(file: TFile): string {
-	return `${sidecarDir(file)}/ledger.jsonl`;
-}
-
-export function objectPath(file: TFile, hash: string): string {
-	return `${objectsDir(file)}/${objectName(hash)}.mica.md`;
-}
-
-/** Compressed variant (large objects only). Hash stays over the PLAINTEXT. */
-export function objectPathGz(file: TFile, hash: string): string {
-	return `${objectsDir(file)}/${objectName(hash)}.mica.gz`;
-}
-
-function objectName(hash: string): string {
-	if (!isObjectHash(hash)) {
-		throw new Error(`Mica: invalid object hash ${JSON.stringify(hash)}`);
-	}
-	const name = hash.replace(":", "-");
-	return name;
+// Ledgers belong to stable note identities; immutable full-hash objects belong to the vault.
+export function sidecarDir(note: NoteStore): string { return note.paths.dir; }
+export function objectsDir(root: StoreRoot): string { return root.paths.objects; }
+export function ledgerPath(note: NoteStore): string { return note.paths.ledger; }
+export function objectPath(_root: StoreRoot, hash: string): string { return objectPaths(hash).plain; }
+export function objectPathGz(_root: StoreRoot, hash: string): string { return objectPaths(hash).gzip; }
+function rootOf(store: StoreRoot | NoteStore): StoreRoot { return "root" in store ? store.root : store; }
+function fullHash(store: StoreRoot | NoteStore, hash: string): string {
+	const alias = "aliases" in store ? store.aliases[hash] : undefined;
+	return resolveObjectHash(hash, alias === undefined ? {} : { [hash]: alias });
 }
 
 /** Objects at or under this size stay human-readable plaintext .md. The rule
@@ -53,10 +31,56 @@ export const COMPRESS_MIN_BYTES = 4096;
 export const MAX_OBJECT_BYTES = 128 * 1024 * 1024;
 const MAX_COMPRESSED_OBJECT_BYTES = MAX_OBJECT_BYTES + 1024 * 1024;
 
-async function gzipText(text: string): Promise<ArrayBuffer | null> {
-	if (typeof CompressionStream !== "function") return null;
-	const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
-	return new Response(stream).arrayBuffer();
+async function runGzip(text: string): Promise<ArrayBuffer> {
+	if (typeof CompressionStream === "function") {
+		const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+		return new Response(stream).arrayBuffer();
+	}
+	return new Promise((resolve, reject) => {
+		gzip(strToU8(text), (error, bytes) => {
+			if (error) reject(error);
+			else resolve(bytes.slice().buffer as ArrayBuffer);
+		});
+	});
+}
+
+interface CompressionJob {
+	readonly text: string;
+	readonly bytes: number;
+	readonly resolve: (value: ArrayBuffer) => void;
+	readonly reject: (error: unknown) => void;
+}
+const MAX_COMPRESSION_QUEUE = 8;
+const compressionQueue: CompressionJob[] = [];
+let compressionActive = false;
+let compressionQueuedBytes = 0;
+
+function gzipText(text: string, bytes: number): Promise<ArrayBuffer> {
+	return new Promise((resolve, reject) => {
+		const job = { text, bytes, resolve, reject };
+		if (!compressionActive) startCompression(job);
+		else {
+			if (compressionQueue.length >= MAX_COMPRESSION_QUEUE || compressionQueuedBytes + bytes > MAX_OBJECT_BYTES) {
+				reject(new Error("Mica: history compression is busy; retry after current writes settle"));
+				return;
+			}
+			compressionQueue.push(job);
+			compressionQueuedBytes += bytes;
+		}
+	});
+}
+
+function startCompression(job: CompressionJob): void {
+	compressionActive = true;
+	void (async () => {
+		try { job.resolve(await runGzip(job.text)); }
+		catch (error) { job.reject(error); }
+		finally {
+			compressionActive = false;
+			const next = compressionQueue.shift();
+			if (next) { compressionQueuedBytes -= next.bytes; startCompression(next); }
+		}
+	})();
 }
 
 async function gunzipToText(buf: ArrayBuffer): Promise<string> {
@@ -102,52 +126,94 @@ function joinChunks(chunks: readonly Uint8Array[], size: number): Uint8Array {
 	return bytes;
 }
 
-export async function ensureSidecar(vault: Vault, file: TFile): Promise<void> {
-	for (const dir of [sidecarDir(file), objectsDir(file)]) {
-		const current = vault.getAbstractFileByPath(dir);
-		if (current instanceof TFolder) continue;
-		if (current) throw new Error(`Mica: sidecar path is not a folder: ${dir}`);
-		try {
-			await vault.createFolder(dir);
-		} catch (error) {
-			// A concurrent creator is harmless; every other failure is real.
-			if (!(vault.getAbstractFileByPath(dir) instanceof TFolder)) throw error;
-		}
+export async function ensureSidecar(note: NoteStore): Promise<void> {
+	await assertNoteStoreCurrent(note, true);
+	for (const dir of [note.root.paths.objects, note.root.paths.notes, note.paths.dir]) await ensureStoreFolder(note.root, dir);
+}
+
+const objectWrites = new WeakMap<Vault, Map<string, Promise<string>>>();
+
+async function assertObjectWriteCurrent(store: StoreRoot | NoteStore, storeId: string): Promise<void> {
+	if ("aliases" in store) await assertNoteStoreCurrent(store);
+	if (await validateStoreRoot(rootOf(store)) !== storeId) throw new Error("Mica: central store identity changed during object write; retry");
+}
+
+/** Fixed representation and per-hash serialization prevent cross-note compression races. */
+export async function writeObject(store: StoreRoot | NoteStore, hash: string, content: string): Promise<void> {
+	const root = rootOf(store);
+	const actual = hashContent(content);
+	if (resolveObjectHash(hash, hash.length === 19 ? { [hash]: actual } : {}) !== actual)
+		throw new Error(`Mica: object hash mismatch (expected ${hash}, got ${actual})`);
+	if (hash.length === 19 && !("aliases" in store)) throw new Error("Mica: legacy hash requires a note store");
+	const byteLength = utf8ByteLength(content);
+	if (byteLength > MAX_OBJECT_BYTES) throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
+	if ("aliases" in store) await assertNoteStoreCurrent(store);
+	const storeId = await validateStoreRoot(root, true);
+	if (storeId === null) throw new Error("Mica: central store could not be initialized");
+	if ("aliases" in store && store.storeId !== null && store.storeId !== storeId)
+		throw new Error("Mica: central store identity changed before object write; retry");
+	// A read handle may predate first initialization; pin its write view for every later guard.
+	const operationStore = "aliases" in store && store.storeId === null ? { ...store, storeId } : store;
+	await assertObjectWriteCurrent(operationStore, storeId);
+	const writes = objectWrites.get(root.vault) ?? new Map<string, Promise<string>>();
+	objectWrites.set(root.vault, writes);
+	let task = writes.get(actual);
+	if (!task) {
+		const write = (async () => {
+			await assertObjectWriteCurrent(operationStore, storeId);
+			await ensureStoreFolder(root, root.paths.objects);
+			const paths = objectPaths(actual);
+			if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) {
+				const compressed = byteLength > COMPRESS_MIN_BYTES ? await gzipText(content, byteLength) : null;
+				// Compression may wait in the bounded queue; no source/root guard survives that await.
+				await assertObjectWriteCurrent(operationStore, storeId);
+				if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) {
+					try {
+						if (compressed === null) await root.vault.create(paths.plain, content);
+						else await root.vault.createBinary(paths.gzip, compressed);
+					} catch (error) { if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) throw error; }
+				}
+			}
+			await requireObject(root, actual);
+			await assertObjectWriteCurrent(operationStore, storeId);
+			return storeId;
+		})().finally(() => { if (writes.get(actual) === write) writes.delete(actual); });
+		writes.set(actual, write);
+		task = write;
+	}
+	if (await task !== storeId) throw new Error("Mica: shared object write belonged to a different central store; retry");
+	await assertObjectWriteCurrent(operationStore, storeId);
+	if (hash.length === 19 && "aliases" in operationStore) {
+		await publishAlias(operationStore, hash, actual);
+		await assertObjectWriteCurrent(operationStore, storeId);
 	}
 }
 
-/** Content-addressed write: objects are immutable, so an existing hash is a
- *  no-op. Small objects stay human-readable plaintext; large ones gzip when
- *  the host WebView supports compression and otherwise remain plaintext. */
-export async function writeObject(vault: Vault, file: TFile, hash: string, content: string): Promise<void> {
-	const actual = hashContent(content);
-	if (!hashMatches(hash, actual)) throw new Error(`Mica: object hash mismatch (expected ${hash}, got ${actual})`);
-	const byteLength = utf8ByteLength(content);
-	if (byteLength > MAX_OBJECT_BYTES)
-		throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
-	const plain = objectPath(file, hash);
-	const gz = objectPathGz(file, hash);
-	if (resolveObjectFile(vault, plain, gz)) {
-		await requireObject(vault, file, hash); // Never bless an existing corrupt object.
-		return;
-	}
-	try {
-		if (byteLength <= COMPRESS_MIN_BYTES || typeof CompressionStream !== "function") {
-			await vault.create(plain, content);
-		} else {
-			const bytes = await gzipText(content);
-			if (bytes === null) {
-				await vault.create(plain, content);
-			} else await vault.createBinary(gz, bytes);
+async function publishAlias(note: NoteStore, short: string, full: string): Promise<void> {
+	await ensureSidecar(note);
+	const merge = (text: string): string => {
+		const aliases = text ? parseAliases(text) : {};
+		if (aliases[short] !== undefined && aliases[short] !== full) throw new Error(`Mica: conflicting object alias ${short}`);
+		aliases[short] = full;
+		if (Object.keys(aliases).length > MAX_ALIASES) throw new Error("Mica: too many object aliases");
+		const body = JSON.stringify(aliases, null, "\t") + "\n";
+		if (utf8ByteLength(body) > MAX_ALIAS_BYTES) throw new Error("Mica: alias document is too large");
+		return body;
+	};
+	await assertNoteStoreCurrent(note, true);
+	const file = note.root.vault.getAbstractFileByPath(note.paths.aliases);
+	if (file instanceof TFile) await note.root.vault.process(file, merge);
+	else {
+		if (file) throw new Error("Mica: alias path is not a file");
+		try { await note.root.vault.create(note.paths.aliases, merge("")); }
+		catch (error) {
+			const raced = note.root.vault.getAbstractFileByPath(note.paths.aliases);
+			if (!(raced instanceof TFile)) throw error;
+			await assertNoteStoreCurrent(note, true);
+			await note.root.vault.process(raced, merge);
 		}
-	} catch (error) {
-		// Content addressing makes a same-hash create race a successful no-op.
-		if (!resolveObjectFile(vault, plain, gz)) throw error;
 	}
-	// Verify our own successful write too: storage adapters can resolve a create
-	// after a short/altered write, and immutable corruption must never reach the
-	// authoritative ledger.
-	await requireObject(vault, file, hash);
+	Object.assign(note.aliases, await readAliases(note.root, note.paths.aliases));
 }
 
 function resolveObjectFile(vault: Vault, plainPath: string, gzPath: string): TFile | null {
@@ -161,9 +227,13 @@ function resolveObjectFile(vault: Vault, plainPath: string, gzPath: string): TFi
 	return plain instanceof TFile ? plain : gz instanceof TFile ? gz : null;
 }
 
-export async function readObject(vault: Vault, file: TFile, hash: string): Promise<string | null> {
-	const plainPath = objectPath(file, hash);
-	const gzPath = objectPathGz(file, hash);
+export async function readObject(store: StoreRoot | NoteStore, hash: string): Promise<string | null> {
+	const root = rootOf(store);
+	if ((await validateStoreRoot(root)) === null) return null;
+	const vault = root.vault;
+	const resolvedHash = fullHash(store, hash);
+	const plainPath = objectPath(root, resolvedHash);
+	const gzPath = objectPathGz(root, resolvedHash);
 	const object = resolveObjectFile(vault, plainPath, gzPath);
 	if (!object) return null;
 	let content: string;
@@ -172,36 +242,30 @@ export async function readObject(vault: Vault, file: TFile, hash: string): Promi
 			throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
 		}
 		content = await vault.read(object);
-		verifyObject(hash, content);
+		if (utf8ByteLength(content) > MAX_OBJECT_BYTES) throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
+		verifyObject(resolvedHash, content);
 		return content;
 	}
 	if (object.stat.size > MAX_COMPRESSED_OBJECT_BYTES) {
 		throw new Error(`Mica: compressed history object ${hash} exceeds ${MAX_COMPRESSED_OBJECT_BYTES} bytes`);
 	}
 	content = await gunzipToText(await vault.readBinary(object));
-	verifyObject(hash, content);
+	verifyObject(resolvedHash, content);
 	return content;
 }
 
 /** Read a referenced object or surface the integrity failure explicitly. */
-export async function requireObject(vault: Vault, file: TFile, hash: string): Promise<string> {
-	const content = await readObject(vault, file, hash);
-	if (content === null) throw new Error(`Mica: missing history object ${hash} for ${file.path}`);
+export async function requireObject(store: StoreRoot | NoteStore, hash: string): Promise<string> {
+	const content = await readObject(store, hash);
+	if (content === null) throw new Error(`Mica: missing history object ${hash}`);
 	return content;
 }
 
 function verifyObject(expected: string, content: string): void {
 	const actual = hashContent(content);
-	if (!hashMatches(expected, actual)) {
+	if (expected !== actual) {
 		throw new Error(`Mica: corrupt history object ${expected} (content hashes to ${actual})`);
 	}
-}
-
-function hashMatches(expected: string, actual: string): boolean {
-	if (!isObjectHash(expected) || !isObjectHash(actual)) return false;
-	return expected.length === actual.length
-		? expected === actual
-		: expected.length === 19 && actual.length === 67 && expected === actual.slice(0, 19);
 }
 
 interface LedgerCacheEntry {
@@ -220,7 +284,9 @@ interface LedgerCacheEntry {
 let ledgerCache: LedgerCacheEntry | null = null;
 const LEDGER_CACHE_TTL_MS = 5000;
 
-export async function readEventsAt(vault: Vault, path: string): Promise<LedgerEvent[]> {
+export async function readEventsAt(root: StoreRoot, path: string): Promise<LedgerEvent[]> {
+	if ((await validateStoreRoot(root)) === null) return [];
+	const vault = root.vault;
 	const af = vault.getAbstractFileByPath(path);
 	if (!af) return [];
 	if (!(af instanceof TFile)) throw new Error(`Mica: ledger path is not a file: ${path}`);
@@ -278,8 +344,8 @@ async function readLedgerSnapshot(vault: Vault, path: string): Promise<LedgerSna
 	throw new Error(`Mica: ledger kept changing while being read: ${path}`);
 }
 
-export async function readLedger(vault: Vault, file: TFile): Promise<LedgerEvent[]> {
-	return readEventsAt(vault, ledgerPath(file));
+export async function readLedger(note: NoteStore): Promise<LedgerEvent[]> {
+	return readEventsAt(note.root, ledgerPath(note));
 }
 
 /** Human/tool-readable sidecar summary: note anchor, path hint, block names. */
@@ -290,28 +356,56 @@ export interface SidecarManifest {
 	updated: number;
 }
 
-export async function writeManifest(vault: Vault, file: TFile, manifest: SidecarManifest): Promise<boolean> {
-	const path = `${sidecarDir(file)}/manifest.json`;
+export async function writeManifest(note: NoteStore, manifest: SidecarManifest): Promise<boolean> {
+	if (manifest.noteId !== note.noteId) throw new Error("Mica: manifest identity does not match its note store");
 	const body = JSON.stringify(manifest, null, "\t") + "\n";
+	if (utf8ByteLength(body) > MAX_LEDGER_BYTES) throw new Error("Mica: note manifest is too large");
+	await ensureSidecar(note);
+	const vault = note.root.vault;
+	const path = note.paths.manifest;
 	const af = vault.getAbstractFileByPath(path);
 	if (af instanceof TFile) {
 		// `updated` describes the last semantic manifest change, not the last
 		// snapshot attempt. Avoid rewriting the summary (and waking Sync) when its
 		// note anchor, path, block order, and names are already current.
-		if (sameManifest(await vault.read(af), manifest)) return false;
-		await vault.process(af, () => body);
+		if (af.stat.size > MAX_LEDGER_BYTES) throw new Error("Mica: note manifest is too large");
+		const existing = await vault.read(af);
+		assertManifestOwner(existing, note.noteId);
+		if (sameManifest(existing, manifest)) return false;
+		await assertNoteStoreCurrent(note, true);
+		await vault.process(af, (current) => {
+			if (current !== existing) throw new Error("Mica: note manifest changed before publication; retry");
+			return body;
+		});
 		return true;
 	}
 	try {
+		await assertNoteStoreCurrent(note, true);
 		await vault.create(path, body);
 		return true;
 	} catch (error) {
 		const raced = vault.getAbstractFileByPath(path);
 		if (!(raced instanceof TFile)) throw error;
-		if (sameManifest(await vault.read(raced), manifest)) return false;
-		await vault.process(raced, () => body);
+		if (raced.stat.size > MAX_LEDGER_BYTES) throw new Error("Mica: note manifest is too large");
+		const existing = await vault.read(raced);
+		assertManifestOwner(existing, note.noteId);
+		if (sameManifest(existing, manifest)) return false;
+		await assertNoteStoreCurrent(note, true);
+		await vault.process(raced, (current) => {
+			if (current !== existing) throw new Error("Mica: note manifest changed before publication; retry");
+			return body;
+		});
 		return true;
 	}
+}
+
+function assertManifestOwner(text: string, id: string): void {
+	if (utf8ByteLength(text) > MAX_LEDGER_BYTES) throw new Error("Mica: note manifest is too large");
+	const value: unknown = JSON.parse(text);
+	if (typeof value !== "object" || value === null || Array.isArray(value) || !("noteId" in value) || value.noteId !== id)
+		throw new Error("Mica: existing manifest has a conflicting note identity");
+	if (Object.keys(value).some((key) => !["noteId", "path", "blocks", "updated"].includes(key)))
+		throw new Error("Mica: existing manifest has unknown fields; history was left unchanged");
 }
 
 function sameManifest(text: string, expected: SidecarManifest): boolean {
@@ -362,11 +456,12 @@ export function ledgerAppendProvesNoCommit(error: unknown): boolean {
 	return error instanceof LedgerAppendError && error.commitState === "none";
 }
 
-export async function appendEvents(vault: Vault, file: TFile, events: readonly LedgerEvent[]): Promise<void> {
+export async function appendEvents(note: NoteStore, events: readonly LedgerEvent[]): Promise<void> {
+	const vault = note.root.vault;
 	if (!events.length) return;
 	validateEventBatch(events);
 	encodeEventLines(events); // Fail before any I/O when one record is not recoverable.
-	const path = ledgerPath(file);
+	const path = ledgerPath(note);
 	const intendedEids = events.map((event) => event.eid);
 	let wroteOrAttempted = false;
 	let lastError: unknown;
@@ -437,6 +532,7 @@ export async function appendEvents(vault: Vault, file: TFile, events: readonly L
 		ledgerCache = null;
 		wroteOrAttempted = true;
 		try {
+			await assertNoteStoreCurrent(note, true);
 			if (snapshot.file) await vault.append(snapshot.file, separator + body);
 			else await vault.create(path, body);
 		} catch (error) {

@@ -1,39 +1,557 @@
-//! Sidecar storage — byte-compatible with the Obsidian plugin's layout.
+//! Central vault storage — byte-compatible with the Obsidian plugin's layout.
 //!
-//! Next to `Note.md` lives `Note.mica/` holding `objects/<b3-hash>.mica.md`
-//! (immutable, content-addressed), `ledger.jsonl` (append-only), and
-//! `manifest.json` (human/tool summary; tab-indented like the plugin writes).
+//! `mica-data/` holds immutable full-hash objects shared by identity-addressed
+//! note records. Each note owns its append-only ledger, current manifest and
+//! retained transaction journals; the live note path is only metadata.
 
 use crate::error::{io_ctx, CliError, Result};
 use crate::fsutil;
 use mica_core::Event;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-/// `Note.md` → `Note.mica` (sidecar directory path).
-pub fn sidecar_dir(note: &Path) -> PathBuf {
-    let stem = note.with_extension("");
-    let mut s = stem.into_os_string();
-    s.push(".mica");
-    PathBuf::from(s)
+/// One explicitly selected vault root. Opening never creates persistent state.
+#[derive(Debug, Clone)]
+pub struct StoreRoot {
+    /// Canonical filesystem root selected independently of Git.
+    pub vault: PathBuf,
+    marker: Arc<Mutex<Option<mica_core::StoreMarker>>>,
+}
+
+#[derive(Debug, Default)]
+struct NoteReadCache {
+    aliases: Option<Arc<BTreeMap<String, String>>>,
+    referenced: Option<Arc<BTreeSet<String>>>,
+}
+
+/// An identity-bound operation context; the source path is only a current hint.
+#[derive(Debug, Clone)]
+pub struct NoteStore {
+    /// Shared object pool and store identity.
+    pub root: StoreRoot,
+    /// Current live-note hint; this file may be absent for orphan inspection.
+    pub note: PathBuf,
+    /// Original validated anchor, never interpolated directly into a path.
+    pub note_id: String,
+    paths: mica_core::NotePaths,
+    cache: Arc<Mutex<NoteReadCache>>,
+}
+
+const MAX_ALIAS_BYTES: usize = 1024 * 1024;
+const MAX_ALIAS_ENTRIES: usize = 16_384;
+const MAX_MARKER_BYTES: usize = 16 * 1024;
+
+impl StoreRoot {
+    /// Validate an existing store, or open a noncreating handle for a fresh root.
+    pub fn open(vault: &Path) -> Result<Self> {
+        let vault = fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
+        if !vault.is_dir() {
+            return Err(CliError::BadArgs(
+                "Mica root must be an existing directory".to_string(),
+            ));
+        }
+        let layout = mica_core::storage_layout_impl();
+        let dir = vault.join(&layout.root);
+        let marker = if validate_regular_directory_or_missing(&dir, "store root")? {
+            let path = vault.join(&layout.marker);
+            let bytes =
+                read_bounded_file(&path, MAX_MARKER_BYTES, "store marker")?.ok_or_else(|| {
+                    CliError::Corrupt(format!(
+                        "Mica store exists without its root marker: {}",
+                        dir.display()
+                    ))
+                })?;
+            let decoded: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+                CliError::Corrupt(format!("invalid Mica store marker: {error}"))
+            })?;
+            let value: mica_core::StoreMarker =
+                serde_json::from_value(decoded).map_err(|error| {
+                    CliError::Corrupt(format!("invalid Mica store marker: {error}"))
+                })?;
+            Some(mica_core::validate_store_marker_impl(value).map_err(store_error)?)
+        } else {
+            if !crate::vault::legacy_sidecars(&vault)?.is_empty() {
+                return Err(CliError::Corrupt("legacy Mica sidecars require an explicit offline cutover before using the central store".to_string()));
+            }
+            None
+        };
+        Ok(Self {
+            vault,
+            marker: Arc::new(Mutex::new(marker)),
+        })
+    }
+
+    fn observed_marker(&self) -> Result<Option<mica_core::StoreMarker>> {
+        self.marker
+            .lock()
+            .map(|marker| marker.clone())
+            .map_err(|_| CliError::Corrupt("Mica store identity lock failed".to_string()))
+    }
+
+    fn observe_marker(&self, marker: mica_core::StoreMarker) -> Result<()> {
+        let mut observed = self
+            .marker
+            .lock()
+            .map_err(|_| CliError::Corrupt("Mica store identity lock failed".to_string()))?;
+        if observed
+            .as_ref()
+            .is_some_and(|expected| expected.store_id != marker.store_id)
+        {
+            return Err(CliError::Corrupt(
+                "Mica store identity changed during the operation".to_string(),
+            ));
+        }
+        *observed = Some(marker);
+        Ok(())
+    }
+
+    fn ensure(&self) -> Result<()> {
+        static ROOT_INITIALIZATION: Mutex<()> = Mutex::new(());
+        let _initialization = ROOT_INITIALIZATION
+            .lock()
+            .map_err(|_| CliError::Corrupt("Mica root initialization lock failed".to_string()))?;
+        let layout = mica_core::storage_layout_impl();
+        let dir = self.vault.join(&layout.root);
+        validate_directory_or_missing(&dir, "store root")?;
+        if self.observed_marker()?.is_some() {
+            let current = Self::open(&self.vault)?.observed_marker()?.ok_or_else(|| {
+                CliError::Corrupt("Mica store disappeared during the operation".to_string())
+            })?;
+            self.observe_marker(current)?;
+        } else {
+            // A missing-store handle can only initialize an empty root. A racing
+            // initializer may have already published the same format marker.
+            if !dir.exists() && !crate::vault::legacy_sidecars(&self.vault)?.is_empty() {
+                return Err(CliError::Corrupt("legacy Mica sidecars require an explicit offline cutover before initializing the central store".to_string()));
+            }
+            ensure_safe_dir(&dir)?;
+            let marker_path = self.vault.join(&layout.marker);
+            if !validate_regular_file_or_missing(&marker_path, "store marker")? {
+                if fs::read_dir(&dir)
+                    .map_err(io_ctx(dir.display().to_string()))?
+                    .next()
+                    .is_some()
+                {
+                    return Err(CliError::Corrupt(
+                        "Mica store has files but no root marker; refusing to adopt it".to_string(),
+                    ));
+                }
+                let marker = mica_core::StoreMarker {
+                    format: layout.format,
+                    store_id: mica_core::new_id_impl(),
+                };
+                let mut bytes = serde_json::to_vec_pretty(&marker)
+                    .map_err(|error| CliError::Corrupt(error.to_string()))?;
+                bytes.push(b'\n');
+                publish_immutable(&marker_path, &bytes)?;
+            }
+            let winner = Self::open(&self.vault)?.observed_marker()?.ok_or_else(|| {
+                CliError::Corrupt("Mica store marker disappeared during initialization".to_string())
+            })?;
+            self.observe_marker(winner)?;
+        }
+        for relative in [&layout.objects, &layout.notes, &layout.orphaned] {
+            ensure_safe_dir(&self.vault.join(relative))?;
+        }
+        let inbox = self.vault.join(&layout.bridge_inbox);
+        let bridge = inbox
+            .parent()
+            .ok_or_else(|| CliError::Corrupt("invalid bridge layout".to_string()))?;
+        ensure_safe_dir(bridge)?;
+        ensure_safe_dir(&inbox)?;
+        ensure_safe_dir(&self.vault.join(&layout.bridge_outbox))
+    }
+}
+
+impl NoteStore {
+    /// Bind the already-read source anchor without stamping or creating state.
+    pub fn from_document(note: &crate::vault::NoteRef, doc: &str) -> Result<Option<Self>> {
+        let root = StoreRoot::open(&note.vault)?;
+        Self::from_document_in(&root, note, doc)
+    }
+
+    /// Reuse a command-owned root while binding one source generation.
+    pub fn from_document_in(
+        root: &StoreRoot,
+        note: &crate::vault::NoteRef,
+        doc: &str,
+    ) -> Result<Option<Self>> {
+        let Some(id) = mica_core::note_id_impl(doc).map_err(store_error)? else {
+            return Ok(None);
+        };
+        Self::bind(root.clone(), &note.abs, &id).map(Some)
+    }
+
+    /// Bind a validated identity for staged writes or retained orphan inspection.
+    /// Writable callers must separately guard the live source and ID uniqueness.
+    pub fn for_id(vault: &Path, note: &Path, id: &str) -> Result<Self> {
+        Self::bind(StoreRoot::open(vault)?, note, id)
+    }
+
+    fn bind(root: StoreRoot, note: &Path, id: &str) -> Result<Self> {
+        let paths = mica_core::note_paths_impl(id).map_err(store_error)?;
+        let note = contained_note_path(&root.vault, note)?;
+        validate_directory_or_missing(&root.vault.join(&paths.dir), "note store")?;
+        Ok(Self {
+            root,
+            note,
+            note_id: id.to_string(),
+            paths,
+            cache: Arc::new(Mutex::new(NoteReadCache::default())),
+        })
+    }
+
+    fn invalidate_references(&self) -> Result<()> {
+        self.cache
+            .lock()
+            .map_err(|_| CliError::Corrupt("Mica note cache lock failed".to_string()))?
+            .referenced = None;
+        Ok(())
+    }
+}
+
+fn store_error(error: mica_core::StoreError) -> CliError {
+    CliError::Corrupt(error.to_string())
+}
+
+fn validate_note_hint(path: &str) -> Result<()> {
+    let bytes = path.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
+    if path.is_empty()
+        || Path::new(path).is_absolute()
+        || Path::new(path)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || mica_core::is_managed_path_impl(path)
+        || path.contains('\\')
+        || drive
+    {
+        return Err(CliError::Corrupt(
+            "note path hint must be vault-relative with forward separators".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn contained_note_path(vault: &Path, note: &Path) -> Result<PathBuf> {
+    let path = if note.is_absolute() {
+        note.to_path_buf()
+    } else {
+        vault.join(note)
+    };
+    let relative = path
+        .strip_prefix(vault)
+        .map_err(|_| CliError::BadArgs("note is outside the selected root".to_string()))?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(CliError::BadArgs(
+            "note path must be a contained relative file path".to_string(),
+        ));
+    }
+    let relative_text = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if mica_core::is_managed_path_impl(&relative_text) {
+        return Err(CliError::BadArgs(
+            "Mica managed state is not a live note".to_string(),
+        ));
+    }
+    let mut current = vault.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CliError::Corrupt(format!(
+                    "note path follows a symlink: {}",
+                    current.display()
+                )))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(io_ctx(current.display().to_string())(error)),
+        }
+    }
+    Ok(path)
+}
+
+fn validate_regular_directory_or_missing(path: &Path, kind: &str) -> Result<bool> {
+    validate_directory_or_missing(path, kind)?;
+    Ok(path.exists())
+}
+
+fn read_bounded_file(path: &Path, limit: usize, kind: &str) -> Result<Option<Vec<u8>>> {
+    let Some(file) = open_regular_for_read(path, kind)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_ctx(path.display().to_string()))?;
+    if bytes.len() > limit {
+        return Err(CliError::Corrupt(format!(
+            "{kind} exceeds {limit} bytes: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(bytes))
+}
+
+/// Publish immutable data without replacing a racing writer's winning file.
+fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::Corrupt("immutable file has no parent".to_string()))?;
+    let mut staged =
+        tempfile::NamedTempFile::new_in(parent).map_err(io_ctx(parent.display().to_string()))?;
+    staged
+        .write_all(bytes)
+        .map_err(io_ctx(path.display().to_string()))?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(io_ctx(path.display().to_string()))?;
+    match staged.persist_noclobber(path) {
+        Ok(_) => fsutil::sync_parent(path),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(io_ctx(path.display().to_string())(error.error)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OrderedStringPairs(
+    #[serde(deserialize_with = "ordered_string_pairs")] Vec<(String, String)>,
+);
+
+fn ordered_string_pairs<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<(String, String)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct PairsVisitor;
+    impl<'de> serde::de::Visitor<'de> for PairsVisitor {
+        type Value = Vec<(String, String)>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with unique string keys and string values")
+        }
+        fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut seen = BTreeSet::new();
+            let mut pairs = Vec::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if !seen.insert(key.clone()) {
+                    return Err(serde::de::Error::custom("duplicate string-map key"));
+                }
+                pairs.push((key, value));
+            }
+            Ok(pairs)
+        }
+    }
+    deserializer.deserialize_map(PairsVisitor)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredManifest<Identity = String> {
+    note_id: Identity,
+    path: String,
+    #[serde(deserialize_with = "ordered_string_pairs")]
+    blocks: Vec<(String, String)>,
+    updated: u64,
+}
+
+/// Validate the record before an operation can publish an anchor or user bytes.
+pub(crate) fn preflight_note_record(note: &NoteStore) -> Result<()> {
+    validate_sidecar_layout_for_write(note)?;
+    let root_path = note.root.vault.join(mica_core::storage_layout_impl().root);
+    if root_path.exists() {
+        let current = StoreRoot::open(&note.root.vault)?
+            .observed_marker()?
+            .ok_or_else(|| {
+                CliError::Corrupt("Mica store marker disappeared during preflight".to_string())
+            })?;
+        note.root.observe_marker(current)?;
+    } else if note.root.observed_marker()?.is_some() {
+        return Err(CliError::Corrupt(
+            "Mica store disappeared during the operation".to_string(),
+        ));
+    }
+    let path = note.root.vault.join(&note.paths.manifest);
+    if let Some(bytes) = read_bounded_file(&path, MAX_LEDGER_BYTES, "note manifest")? {
+        validate_manifest_bytes(note, &bytes)?;
+    }
+    Ok(())
+}
+
+/// Validate a current manifest before it can become a mutable write target.
+/// Historical null identities are accepted only by journal comparison below.
+pub(crate) fn validate_manifest_bytes(note: &NoteStore, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_LEDGER_BYTES {
+        return Err(CliError::Corrupt(
+            "note manifest exceeds its safety limit".to_string(),
+        ));
+    }
+    let manifest: StoredManifest = serde_json::from_slice(bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid note manifest: {error}")))?;
+    if manifest.note_id != note.note_id {
+        return Err(CliError::Corrupt(
+            "note manifest identity mismatch".to_string(),
+        ));
+    }
+    validate_note_hint(&manifest.path)?;
+    contained_note_path(&note.root.vault, Path::new(&manifest.path))?;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum HistoricalNoteId {
+    Present(String),
+    Absent(()),
+}
+
+/// Compare journaled metadata while allowing a moved path and a previously absent anchor.
+/// Only a null historical anchor may bind to this store's now-established identity.
+pub(crate) fn manifest_matches_except_hint(
+    note: &NoteStore,
+    current: &[u8],
+    expected: &[u8],
+) -> Result<bool> {
+    if current.len() > MAX_LEDGER_BYTES || expected.len() > MAX_LEDGER_BYTES {
+        return Err(CliError::Corrupt(
+            "note manifest exceeds its safety limit".to_string(),
+        ));
+    }
+    let current: StoredManifest = serde_json::from_slice(current)
+        .map_err(|error| CliError::Corrupt(format!("invalid current note manifest: {error}")))?;
+    let expected: StoredManifest<HistoricalNoteId> = serde_json::from_slice(expected)
+        .map_err(|error| CliError::Corrupt(format!("invalid expected note manifest: {error}")))?;
+    if current.note_id != note.note_id {
+        return Ok(false);
+    }
+    if let HistoricalNoteId::Present(id) = expected.note_id {
+        mica_core::note_paths_impl(&id).map_err(store_error)?;
+        if id != note.note_id {
+            return Ok(false);
+        }
+    }
+    validate_note_hint(&current.path)?;
+    validate_note_hint(&expected.path)?;
+    Ok(current.blocks == expected.blocks && current.updated == expected.updated)
+}
+
+/// Enumerate central records independently of whether their live note exists.
+pub fn enumerate_note_stores(vault: &Path) -> Result<Vec<NoteStore>> {
+    let root = StoreRoot::open(vault)?;
+    let layout = mica_core::storage_layout_impl();
+    let notes = root.vault.join(&layout.notes);
+    if !validate_regular_directory_or_missing(&notes, "notes directory")? {
+        return Ok(Vec::new());
+    }
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&notes).map_err(io_ctx(notes.display().to_string()))? {
+        let entry = entry.map_err(io_ctx(notes.display().to_string()))?;
+        if !entry
+            .file_type()
+            .map_err(io_ctx(entry.path().display().to_string()))?
+            .is_dir()
+        {
+            return Err(CliError::Corrupt(format!(
+                "note record is not a real directory: {}",
+                entry.path().display()
+            )));
+        }
+        let path = entry.path().join("manifest.json");
+        let bytes =
+            read_bounded_file(&path, MAX_LEDGER_BYTES, "note manifest")?.ok_or_else(|| {
+                CliError::Corrupt(format!(
+                    "note record has no manifest: {}",
+                    entry.path().display()
+                ))
+            })?;
+        let manifest: StoredManifest = serde_json::from_slice(&bytes).map_err(|error| {
+            CliError::Corrupt(format!(
+                "invalid note manifest at {}: {error}",
+                path.display()
+            ))
+        })?;
+        validate_note_hint(&manifest.path)?;
+        let store = NoteStore::bind(root.clone(), Path::new(&manifest.path), &manifest.note_id)?;
+        if sidecar_dir(&store) != entry.path() {
+            return Err(CliError::Corrupt(format!(
+                "note record key disagrees with its identity: {}",
+                entry.path().display()
+            )));
+        }
+        records.push(store);
+    }
+    records.sort_by(|left, right| left.paths.key.cmp(&right.paths.key));
+    Ok(records)
+}
+
+/// Update a rename hint without moving history or changing version identity.
+pub fn update_note_hint(note: &NoteStore) -> Result<()> {
+    preflight_note_record(note)?;
+    let path = note.root.vault.join(&note.paths.manifest);
+    let Some(bytes) = read_bounded_file(&path, MAX_LEDGER_BYTES, "note manifest")? else {
+        return Ok(());
+    };
+    let manifest: StoredManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid note manifest: {error}")))?;
+    if manifest.note_id != note.note_id {
+        return Err(CliError::Corrupt(
+            "note manifest identity mismatch".to_string(),
+        ));
+    }
+    let relative = note
+        .note
+        .strip_prefix(&note.root.vault)
+        .map_err(|_| CliError::BadArgs("note is outside its root".to_string()))?
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if manifest.path == relative {
+        return Ok(());
+    }
+    let next = manifest_bytes(
+        Some(&manifest.note_id),
+        &relative,
+        &manifest.blocks,
+        manifest.updated,
+    );
+    preflight_note_record(note)?;
+    fsutil::atomic_write_if_unchanged(&path, &bytes, &next)
+}
+
+/// Identity-bound central note directory.
+pub fn sidecar_dir(note: &NoteStore) -> PathBuf {
+    note.root.vault.join(&note.paths.dir)
 }
 
 /// The sidecar's `objects/` directory.
-pub fn objects_dir(note: &Path) -> PathBuf {
-    sidecar_dir(note).join("objects")
+pub fn objects_dir(note: &NoteStore) -> PathBuf {
+    note.root
+        .vault
+        .join(mica_core::storage_layout_impl().objects)
 }
 
 /// The sidecar's append-only ledger path.
-pub fn ledger_path(note: &Path) -> PathBuf {
-    sidecar_dir(note).join("ledger.jsonl")
+pub fn ledger_path(note: &NoteStore) -> PathBuf {
+    note.root.vault.join(&note.paths.ledger)
 }
 
 /// Durable migration transaction record. It deliberately remains after a
 /// successful migration so the whole-note pre-image has a named reference.
-pub fn migration_journal_path(note: &Path) -> PathBuf {
-    sidecar_dir(note).join("migration.json")
+pub fn migration_journal_path(note: &NoteStore) -> PathBuf {
+    note.root.vault.join(&note.paths.migration)
 }
 
 /// Recoverable state for one legacy-note migration.
@@ -130,7 +648,7 @@ pub struct TabConsolidationVersion {
     pub target_hash: String,
 }
 
-/// Return the co-located logical-section normalization journal path.
+/// Return the identity-bound logical-section normalization journal path.
 ///
 /// # Arguments
 /// * `note` - Markdown note path
@@ -143,16 +661,17 @@ pub struct TabConsolidationVersion {
 ///
 /// # Examples
 /// ```no_run
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let path = mica_cli::sidecar::section_normalization_journal_path(
-///     std::path::Path::new("Note.md"),
+///     &note,
 /// );
-/// assert!(path.ends_with("Note.mica/section-normalization.json"));
+/// assert!(path.ends_with("section-normalization.json"));
 /// ```
-pub fn section_normalization_journal_path(note: &Path) -> PathBuf {
-    sidecar_dir(note).join("section-normalization.json")
+pub fn section_normalization_journal_path(note: &NoteStore) -> PathBuf {
+    note.root.vault.join(&note.paths.section_normalization)
 }
 
-/// Return the co-located tab-consolidation transaction journal path.
+/// Return the identity-bound tab-consolidation transaction journal path.
 ///
 /// # Arguments
 /// * `note` - Markdown note path
@@ -165,13 +684,14 @@ pub fn section_normalization_journal_path(note: &Path) -> PathBuf {
 ///
 /// # Examples
 /// ```
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let path = mica_cli::sidecar::tab_consolidation_journal_path(
-///     std::path::Path::new("Note.md"),
+///     &note,
 /// );
-/// assert!(path.ends_with("Note.mica/tab-consolidation.json"));
+/// assert!(path.ends_with("tab-consolidation.json"));
 /// ```
-pub fn tab_consolidation_journal_path(note: &Path) -> PathBuf {
-    sidecar_dir(note).join("tab-consolidation.json")
+pub fn tab_consolidation_journal_path(note: &NoteStore) -> PathBuf {
+    note.root.vault.join(&note.paths.tab_consolidation)
 }
 
 /// Read and validate a bounded tab-consolidation transaction journal.
@@ -187,12 +707,14 @@ pub fn tab_consolidation_journal_path(note: &Path) -> PathBuf {
 ///
 /// # Examples
 /// ```no_run
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let journal = mica_cli::sidecar::read_tab_consolidation_journal(
-///     std::path::Path::new("Note.md"),
+///     &note,
 /// )?;
 /// # Ok::<(), mica_cli::CliError>(())
 /// ```
-pub fn read_tab_consolidation_journal(note: &Path) -> Result<Option<TabConsolidationJournal>> {
+pub fn read_tab_consolidation_journal(note: &NoteStore) -> Result<Option<TabConsolidationJournal>> {
+    validate_sidecar_layout_for_write(note)?;
     let path = tab_consolidation_journal_path(note);
     let Some(file) = open_regular_for_read(&path, "tab-consolidation journal")? else {
         return Ok(None);
@@ -231,19 +753,16 @@ pub fn read_tab_consolidation_journal(note: &Path) -> Result<Option<TabConsolida
 ///
 /// # Examples
 /// ```no_run
-/// # fn example(journal: &mica_cli::sidecar::TabConsolidationJournal)
-/// #     -> Result<(), mica_cli::CliError> {
-/// mica_cli::sidecar::write_tab_consolidation_journal(
-///     std::path::Path::new("Note.md"),
-///     journal,
-/// )?;
-/// # Ok(())
-/// # }
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
+/// # let journal: mica_cli::sidecar::TabConsolidationJournal = todo!();
+/// mica_cli::sidecar::write_tab_consolidation_journal(&note, &journal)?;
+/// # Ok::<(), mica_cli::CliError>(())
 /// ```
 pub fn write_tab_consolidation_journal(
-    note: &Path,
+    note: &NoteStore,
     journal: &TabConsolidationJournal,
 ) -> Result<()> {
+    note.invalidate_references()?;
     validate_tab_consolidation_journal_encoding(journal, MAX_LEDGER_BYTES)?;
     let mut bytes =
         serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
@@ -418,14 +937,16 @@ fn validate_tab_consolidation_journal(journal: &TabConsolidationJournal) -> Resu
 ///
 /// # Examples
 /// ```no_run
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let journal = mica_cli::sidecar::read_section_normalization_journal(
-///     std::path::Path::new("Note.md"),
+///     &note,
 /// )?;
 /// # Ok::<(), mica_cli::CliError>(())
 /// ```
 pub fn read_section_normalization_journal(
-    note: &Path,
+    note: &NoteStore,
 ) -> Result<Option<SectionNormalizationJournal>> {
+    validate_sidecar_layout_for_write(note)?;
     let path = section_normalization_journal_path(note);
     let Some(file) = open_regular_for_read(&path, "section-normalization journal")? else {
         return Ok(None);
@@ -464,17 +985,19 @@ pub fn read_section_normalization_journal(
 ///
 /// # Examples
 /// ```no_run
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// # let journal: mica_cli::sidecar::SectionNormalizationJournal = todo!();
 /// mica_cli::sidecar::write_section_normalization_journal(
-///     std::path::Path::new("Note.md"),
+///     &note,
 ///     &journal,
 /// )?;
 /// # Ok::<(), mica_cli::CliError>(())
 /// ```
 pub fn write_section_normalization_journal(
-    note: &Path,
+    note: &NoteStore,
     journal: &SectionNormalizationJournal,
 ) -> Result<()> {
+    note.invalidate_references()?;
     validate_section_normalization_journal_encoding(journal, MAX_LEDGER_BYTES)?;
     let mut bytes =
         serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
@@ -538,8 +1061,9 @@ fn validate_section_normalization_journal(journal: &SectionNormalizationJournal)
 }
 
 /// Compressed-object variant path (large objects). Hash is over PLAINTEXT.
-pub fn object_path_gz(note: &Path, hash: &str) -> PathBuf {
-    objects_dir(note).join(format!("{}.mica.gz", object_stem(hash)))
+pub fn object_path_gz(note: &NoteStore, hash: &str) -> Result<PathBuf> {
+    let paths = mica_core::object_paths_impl(hash).map_err(store_error)?;
+    Ok(note.root.vault.join(paths.gzip))
 }
 
 /// Objects at or under this size stay human-readable plaintext `.md`.
@@ -563,12 +1087,9 @@ pub const MAX_EVENT_TIMESTAMP_MS: u64 = 32_503_680_000_000;
 pub const MAX_FUTURE_EVENT_SKEW_MS: u64 = 86_400_000;
 
 /// Object path for `hash` (`b3:abcd` → `objects/b3-abcd.mica.md`).
-pub fn object_path(note: &Path, hash: &str) -> PathBuf {
-    objects_dir(note).join(format!("{}.mica.md", object_stem(hash)))
-}
-
-fn object_stem(hash: &str) -> String {
-    hash.replace([':', '/', '\\'], "-")
+pub fn object_path(note: &NoteStore, hash: &str) -> Result<PathBuf> {
+    let paths = mica_core::object_paths_impl(hash).map_err(store_error)?;
+    Ok(note.root.vault.join(paths.plain))
 }
 
 /// Read the ledger; malformed or untyped lines are skipped (never lose the
@@ -588,9 +1109,10 @@ fn object_stem(hash: &str) -> String {
 ///
 /// # Examples
 /// ```no_run
-/// let events = mica_cli::sidecar::read_ledger(std::path::Path::new("Note.md")).unwrap();
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
+/// let events = mica_cli::sidecar::read_ledger(&note).unwrap();
 /// ```
-pub fn read_ledger(note: &Path) -> Result<Vec<Event>> {
+pub fn read_ledger(note: &NoteStore) -> Result<Vec<Event>> {
     read_ledger_report(note).map(|report| report.events)
 }
 
@@ -605,7 +1127,8 @@ pub(crate) struct LedgerRead {
     pub(crate) bad_lines: usize,
 }
 
-pub(crate) fn read_ledger_report(note: &Path) -> Result<LedgerRead> {
+pub(crate) fn read_ledger_report(note: &NoteStore) -> Result<LedgerRead> {
+    validate_sidecar_layout_for_write(note)?;
     read_ledger_report_at(&ledger_path(note))
 }
 
@@ -628,7 +1151,8 @@ pub fn ledger_bad_lines(path: &Path) -> Result<usize> {
 }
 
 /// Read the bounded migration journal, if one exists.
-pub fn read_migration_journal(note: &Path) -> Result<Option<MigrationJournal>> {
+pub fn read_migration_journal(note: &NoteStore) -> Result<Option<MigrationJournal>> {
+    validate_sidecar_layout_for_write(note)?;
     let path = migration_journal_path(note);
     let Some(file) = open_regular_for_read(&path, "migration journal")? else {
         return Ok(None);
@@ -654,7 +1178,16 @@ pub fn read_migration_journal(note: &Path) -> Result<Option<MigrationJournal>> {
 }
 
 /// Atomically and durably write a validated migration journal.
-pub fn write_migration_journal(note: &Path, journal: &MigrationJournal) -> Result<()> {
+pub fn write_migration_journal(note: &NoteStore, journal: &MigrationJournal) -> Result<()> {
+    note.invalidate_references()?;
+    let bytes = encode_migration_journal(journal)?;
+    ensure_sidecar(note)?;
+    let path = migration_journal_path(note);
+    validate_regular_file_or_missing(&path, "migration journal")?;
+    fsutil::atomic_write(&path, &bytes)
+}
+
+fn encode_migration_journal(journal: &MigrationJournal) -> Result<Vec<u8>> {
     validate_migration_journal(journal)?;
     let mut bytes =
         serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
@@ -664,10 +1197,18 @@ pub fn write_migration_journal(note: &Path, journal: &MigrationJournal) -> Resul
             "migration journal exceeds the {MAX_LEDGER_BYTES} byte safety limit"
         )));
     }
-    ensure_sidecar(note)?;
-    let path = migration_journal_path(note);
-    validate_regular_file_or_missing(&path, "migration journal")?;
-    fsutil::atomic_write(&path, &bytes)
+    Ok(bytes)
+}
+
+/// Validate a prospective migration journal before any source anchor is published.
+pub(crate) fn preflight_migration_journal(
+    note: &NoteStore,
+    journal: &MigrationJournal,
+) -> Result<()> {
+    encode_migration_journal(journal)?;
+    preflight_note_record(note)?;
+    validate_regular_file_or_missing(&migration_journal_path(note), "migration journal")?;
+    Ok(())
 }
 
 fn validate_migration_journal(journal: &MigrationJournal) -> Result<()> {
@@ -718,9 +1259,11 @@ fn validate_migration_journal(journal: &MigrationJournal) -> Result<()> {
 ///
 /// # Examples
 /// ```no_run
-/// mica_cli::sidecar::append_events(std::path::Path::new("Note.md"), &[]).unwrap();
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
+/// mica_cli::sidecar::append_events(&note, &[]).unwrap();
 /// ```
-pub fn append_events(note: &Path, events: &[Event]) -> Result<()> {
+pub fn append_events(note: &NoteStore, events: &[Event]) -> Result<()> {
+    note.invalidate_references()?;
     if events.is_empty() {
         return Ok(());
     }
@@ -769,7 +1312,7 @@ fn encode_event_batch(events: &[Event]) -> Result<String> {
     Ok(lines)
 }
 
-fn append_encoded_events(note: &Path, lines: &str) -> Result<()> {
+fn append_encoded_events(note: &NoteStore, lines: &str) -> Result<()> {
     ensure_sidecar(note)?;
     let path = ledger_path(note);
     validate_regular_file_or_missing(&path, "ledger")?;
@@ -844,23 +1387,23 @@ fn append_encoded_events(note: &Path, lines: &str) -> Result<()> {
     write_result.and(unlock_result)
 }
 
-pub(crate) fn preflight_object_write(note: &Path, hash: &str, content: &str) -> Result<bool> {
+pub(crate) fn preflight_object_write(note: &NoteStore, hash: &str, content: &str) -> Result<bool> {
     preflight_object_write_with_limit(note, hash, content, MAX_OBJECT_BYTES)
 }
 
 fn preflight_object_write_with_limit(
-    note: &Path,
+    note: &NoteStore,
     hash: &str,
     content: &str,
     max_bytes: usize,
 ) -> Result<bool> {
-    validate_hash(hash)?;
+    mica_core::object_paths_impl(hash).map_err(store_error)?;
     verify_hash(hash, content)?;
     if content.len() > max_bytes {
         return Err(object_too_large(hash, max_bytes));
     }
     validate_sidecar_layout_for_write(note)?;
-    match read_object(note, hash)? {
+    match read_pooled_object(&note.root, hash, max_bytes)? {
         Some(existing) if existing == content => Ok(false),
         Some(_) => Err(CliError::Corrupt(format!(
             "existing object {hash} differs from the planned content"
@@ -870,7 +1413,7 @@ fn preflight_object_write_with_limit(
 }
 
 pub(crate) fn preflight_section_normalization_journal(
-    note: &Path,
+    note: &NoteStore,
     journal: &SectionNormalizationJournal,
 ) -> Result<()> {
     validate_section_normalization_journal_encoding(journal, MAX_LEDGER_BYTES)?;
@@ -883,7 +1426,7 @@ pub(crate) fn preflight_section_normalization_journal(
 }
 
 pub(crate) fn preflight_tab_consolidation_journal(
-    note: &Path,
+    note: &NoteStore,
     journal: &TabConsolidationJournal,
 ) -> Result<()> {
     validate_tab_consolidation_journal_encoding(journal, MAX_LEDGER_BYTES)?;
@@ -927,7 +1470,7 @@ fn validate_tab_consolidation_journal_encoding(
     Ok(())
 }
 
-pub(crate) fn preflight_event_append(note: &Path, events: &[Event]) -> Result<()> {
+pub(crate) fn preflight_event_append(note: &NoteStore, events: &[Event]) -> Result<()> {
     if events.is_empty() {
         return Ok(());
     }
@@ -935,7 +1478,7 @@ pub(crate) fn preflight_event_append(note: &Path, events: &[Event]) -> Result<()
     preflight_encoded_event_append(note, &lines, MAX_LEDGER_BYTES)
 }
 
-fn preflight_encoded_event_append(note: &Path, lines: &str, max_bytes: usize) -> Result<()> {
+fn preflight_encoded_event_append(note: &NoteStore, lines: &str, max_bytes: usize) -> Result<()> {
     validate_sidecar_layout_for_write(note)?;
     let path = ledger_path(note);
     validate_regular_file_or_missing(&path, "ledger")?;
@@ -954,8 +1497,16 @@ fn preflight_encoded_event_append(note: &Path, lines: &str, max_bytes: usize) ->
     Ok(())
 }
 
-fn validate_sidecar_layout_for_write(note: &Path) -> Result<()> {
-    validate_directory_or_missing(&sidecar_dir(note), "sidecar")?;
+fn validate_sidecar_layout_for_write(note: &NoteStore) -> Result<()> {
+    validate_directory_or_missing(
+        &note.root.vault.join(mica_core::storage_layout_impl().root),
+        "store root",
+    )?;
+    validate_directory_or_missing(
+        &note.root.vault.join(mica_core::storage_layout_impl().notes),
+        "notes directory",
+    )?;
+    validate_directory_or_missing(&sidecar_dir(note), "note store")?;
     validate_directory_or_missing(&objects_dir(note), "objects directory")
 }
 
@@ -979,7 +1530,10 @@ pub(crate) struct EventBatchStatus {
     pub(crate) missing: Vec<Event>,
 }
 
-pub(crate) fn classify_event_batch(note: &Path, intended: &[Event]) -> Result<EventBatchStatus> {
+pub(crate) fn classify_event_batch(
+    note: &NoteStore,
+    intended: &[Event],
+) -> Result<EventBatchStatus> {
     let existing = read_ledger(note)?;
     classify_event_batch_in(&existing, intended)
 }
@@ -1010,11 +1564,43 @@ pub(crate) fn classify_event_batch_in(
 }
 
 /// Create the sidecar + objects directories when missing.
-fn ensure_sidecar(note: &Path) -> Result<()> {
-    let sidecar = sidecar_dir(note);
-    ensure_safe_dir(&sidecar)?;
-    let objects = objects_dir(note);
-    ensure_safe_dir(&objects)
+pub(crate) fn initial_manifest_bytes(note: &NoteStore) -> Result<Vec<u8>> {
+    let relative = note
+        .note
+        .strip_prefix(&note.root.vault)
+        .map_err(|_| CliError::BadArgs("note is outside its root".to_string()))?
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    Ok(manifest_bytes(Some(&note.note_id), &relative, &[], 0))
+}
+
+pub(crate) fn ensure_note_record(note: &NoteStore) -> Result<()> {
+    ensure_sidecar(note)
+}
+
+fn ensure_sidecar(note: &NoteStore) -> Result<()> {
+    static RECORD_INITIALIZATION: Mutex<()> = Mutex::new(());
+    let _initialization = RECORD_INITIALIZATION
+        .lock()
+        .map_err(|_| CliError::Corrupt("Mica record initialization lock failed".to_string()))?;
+    preflight_note_record(note)?;
+    note.root.ensure()?;
+    ensure_safe_dir(&sidecar_dir(note))?;
+    let path = note.root.vault.join(&note.paths.manifest);
+    if !validate_regular_file_or_missing(&path, "note manifest")? {
+        publish_immutable(&path, &initial_manifest_bytes(note)?)?;
+    }
+    let bytes = read_bounded_file(&path, MAX_LEDGER_BYTES, "note manifest")?.ok_or_else(|| {
+        CliError::Corrupt("note manifest disappeared during initialization".to_string())
+    })?;
+    let manifest: StoredManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid note manifest: {error}")))?;
+    if manifest.note_id != note.note_id {
+        return Err(CliError::Corrupt(
+            "note manifest identity mismatch".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_safe_dir(path: &Path) -> Result<()> {
@@ -1058,7 +1644,7 @@ fn validate_regular_file_or_missing(path: &Path, kind: &str) -> Result<bool> {
 
 fn open_regular_for_read(path: &Path, kind: &str) -> Result<Option<fs::File>> {
     // Check the sidecar/object directory components themselves. O_NOFOLLOW on
-    // the final file does not stop an intermediate `Note.mica` symlink.
+    // the final file does not stop an intermediate managed-directory symlink.
     for parent in path.ancestors().skip(1).take(2) {
         match fs::symlink_metadata(parent) {
             Ok(metadata) if metadata.file_type().is_dir() => {}
@@ -1430,35 +2016,58 @@ fn current_time_ms() -> u64 {
 ///
 /// # Examples
 /// ```no_run
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let content = "x";
 /// let hash = mica_core::hash_content_impl(content);
-/// mica_cli::sidecar::write_object(std::path::Path::new("Note.md"), &hash, content).unwrap();
+/// mica_cli::sidecar::write_object(&note, &hash, content).unwrap();
 /// ```
-pub fn write_object(note: &Path, hash: &str, content: &str) -> Result<()> {
+pub fn write_object(note: &NoteStore, hash: &str, content: &str) -> Result<()> {
     write_object_with_limit(note, hash, content, MAX_OBJECT_BYTES)
 }
 
-fn write_object_with_limit(note: &Path, hash: &str, content: &str, max_bytes: usize) -> Result<()> {
-    validate_hash(hash)?;
+fn write_object_with_limit(
+    note: &NoteStore,
+    hash: &str,
+    content: &str,
+    max_bytes: usize,
+) -> Result<()> {
+    static OBJECT_WRITES: Mutex<()> = Mutex::new(());
+    let _write = OBJECT_WRITES
+        .lock()
+        .map_err(|_| CliError::Corrupt("Mica object write lock failed".to_string()))?;
+    mica_core::object_paths_impl(hash).map_err(store_error)?;
     verify_hash(hash, content)?;
     if content.len() > max_bytes {
         return Err(object_too_large(hash, max_bytes));
     }
+    validate_sidecar_layout_for_write(note)?;
+    if let Some(stored) = read_pooled_object(&note.root, hash, max_bytes)? {
+        if stored != content {
+            return Err(CliError::Corrupt(format!(
+                "existing object {hash} differs from the planned content"
+            )));
+        }
+        return Ok(());
+    }
     ensure_sidecar(note)?;
-    let plain = object_path(note, hash);
-    let gz = object_path_gz(note, hash);
-    if object_file_exists(&plain, hash)? || object_file_exists(&gz, hash)? {
-        read_object(note, hash)?;
-        return Ok(()); // verified immutable object already exists
-    }
+    let path = if content.len() <= COMPRESS_MIN_BYTES {
+        object_path(note, hash)?
+    } else {
+        object_path_gz(note, hash)?
+    };
     if content.len() <= COMPRESS_MIN_BYTES {
-        return fsutil::atomic_write(&plain, content.as_bytes());
+        publish_immutable(&path, content.as_bytes())?;
+    } else {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(content.as_bytes())
+            .map_err(io_ctx(path.display().to_string()))?;
+        let compressed = encoder
+            .finish()
+            .map_err(io_ctx(path.display().to_string()))?;
+        publish_immutable(&path, &compressed)?;
     }
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    Write::write_all(&mut enc, content.as_bytes())
-        .and_then(|()| enc.finish())
-        .map_err(io_ctx(gz.display().to_string()))
-        .and_then(|bytes| fsutil::atomic_write(&gz, &bytes))
+    verify_written_object(note, hash, content)
 }
 
 /// Read a stored object's content; `None` when the object file is missing.
@@ -1477,17 +2086,158 @@ fn write_object_with_limit(note: &Path, hash: &str, content: &str, max_bytes: us
 ///
 /// # Examples
 /// ```no_run
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let hash = mica_core::hash_content_impl("x");
-/// let c = mica_cli::sidecar::read_object(std::path::Path::new("Note.md"), &hash).unwrap();
+/// let c = mica_cli::sidecar::read_object(&note, &hash).unwrap();
 /// ```
-pub fn read_object(note: &Path, hash: &str) -> Result<Option<String>> {
+pub fn read_object(note: &NoteStore, hash: &str) -> Result<Option<String>> {
     read_object_with_limit(note, hash, MAX_OBJECT_BYTES)
 }
 
-fn read_object_with_limit(note: &Path, hash: &str, max_bytes: usize) -> Result<Option<String>> {
-    validate_hash(hash)?;
-    let plain = object_path(note, hash);
-    let gz = object_path_gz(note, hash);
+/// Canonicalize a validated note-scoped history reference without rewriting it.
+pub(crate) fn resolve_note_hash(note: &NoteStore, hash: &str) -> Result<String> {
+    let aliases = read_aliases(note)?;
+    mica_core::resolve_object_hash_impl(hash, &aliases).map_err(store_error)
+}
+
+fn read_object_with_limit(
+    note: &NoteStore,
+    hash: &str,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    let full = resolve_note_hash(note, hash)?;
+    if !referenced_hashes(note)?.contains(&full) {
+        return Err(CliError::Corrupt(format!(
+            "object {hash} is not referenced by this note's history"
+        )));
+    }
+    read_pooled_object(&note.root, &full, max_bytes)
+}
+
+fn read_aliases(note: &NoteStore) -> Result<Arc<BTreeMap<String, String>>> {
+    validate_sidecar_layout_for_write(note)?;
+    if let Some(aliases) = &note
+        .cache
+        .lock()
+        .map_err(|_| CliError::Corrupt("Mica note cache lock failed".to_string()))?
+        .aliases
+    {
+        return Ok(Arc::clone(aliases));
+    }
+    let path = note.root.vault.join(&note.paths.aliases);
+    let mut aliases = BTreeMap::new();
+    if let Some(bytes) = read_bounded_file(&path, MAX_ALIAS_BYTES, "object aliases")? {
+        let pairs: OrderedStringPairs = serde_json::from_slice(&bytes)
+            .map_err(|error| CliError::Corrupt(format!("invalid object aliases: {error}")))?;
+        if pairs.0.len() > MAX_ALIAS_ENTRIES {
+            return Err(CliError::Corrupt(format!(
+                "object aliases exceed {MAX_ALIAS_ENTRIES} entries"
+            )));
+        }
+        for (short, full) in pairs.0 {
+            if short.len() != 19 {
+                return Err(CliError::Corrupt(
+                    "object aliases may contain only legacy short-hash keys".to_string(),
+                ));
+            }
+            let pair = BTreeMap::from([(short.clone(), full.clone())]);
+            if mica_core::resolve_object_hash_impl(&short, &pair).map_err(store_error)? != full {
+                return Err(CliError::Corrupt(
+                    "object alias does not match its full address".to_string(),
+                ));
+            }
+            aliases.insert(short, full);
+        }
+    }
+    let aliases = Arc::new(aliases);
+    note.cache
+        .lock()
+        .map_err(|_| CliError::Corrupt("Mica note cache lock failed".to_string()))?
+        .aliases = Some(Arc::clone(&aliases));
+    Ok(aliases)
+}
+
+fn event_hashes(events: &[Event], hashes: &mut BTreeSet<String>) {
+    for event in events {
+        match event {
+            Event::AddVersion { hash, parent, .. } => {
+                hashes.insert(hash.clone());
+                if let Some(parent) = parent {
+                    hashes.insert(parent.clone());
+                }
+            }
+            Event::ReplaceVersion { hash, .. }
+            | Event::SetHead { hash, .. }
+            | Event::Label { hash, .. }
+            | Event::Checkpoint { hash, .. } => {
+                hashes.insert(hash.clone());
+            }
+            Event::MoveHead { .. }
+            | Event::VersionLabel { .. }
+            | Event::VersionVisibility { .. } => {}
+        }
+    }
+}
+
+fn referenced_hashes(note: &NoteStore) -> Result<Arc<BTreeSet<String>>> {
+    if let Some(referenced) = &note
+        .cache
+        .lock()
+        .map_err(|_| CliError::Corrupt("Mica note cache lock failed".to_string()))?
+        .referenced
+    {
+        return Ok(Arc::clone(referenced));
+    }
+    let mut raw = BTreeSet::new();
+    event_hashes(&read_ledger(note)?, &mut raw);
+    if let Some(journal) = read_migration_journal(note)? {
+        raw.extend([journal.original, journal.migrated]);
+        event_hashes(&journal.events, &mut raw);
+    }
+    if let Some(journal) = read_section_normalization_journal(note)? {
+        raw.extend([journal.original, journal.normalized]);
+        event_hashes(&journal.events, &mut raw);
+    }
+    if let Some(journal) = read_tab_consolidation_journal(note)? {
+        raw.extend([journal.original, journal.consolidated]);
+        event_hashes(&journal.events, &mut raw);
+        for version in journal.versions {
+            raw.extend([version.source_hash, version.target_hash]);
+        }
+    }
+    let aliases = read_aliases(note)?;
+    let referenced = raw
+        .iter()
+        .map(|hash| mica_core::resolve_object_hash_impl(hash, &aliases).map_err(store_error))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let referenced = Arc::new(referenced);
+    note.cache
+        .lock()
+        .map_err(|_| CliError::Corrupt("Mica note cache lock failed".to_string()))?
+        .referenced = Some(Arc::clone(&referenced));
+    Ok(referenced)
+}
+
+/// Verify objects staged by this operation before their journal or ledger publication.
+pub(crate) fn verify_written_object(note: &NoteStore, hash: &str, content: &str) -> Result<()> {
+    match read_pooled_object(&note.root, hash, MAX_OBJECT_BYTES)? {
+        Some(stored) if stored == content => Ok(()),
+        Some(_) => Err(CliError::Corrupt(format!(
+            "written object {hash} differs from its preimage"
+        ))),
+        None => Err(CliError::Corrupt(format!(
+            "written object {hash} is missing"
+        ))),
+    }
+}
+
+fn read_pooled_object(root: &StoreRoot, hash: &str, max_bytes: usize) -> Result<Option<String>> {
+    let paths = mica_core::object_paths_impl(hash).map_err(store_error)?;
+    let layout = mica_core::storage_layout_impl();
+    validate_directory_or_missing(&root.vault.join(&layout.root), "store root")?;
+    validate_directory_or_missing(&root.vault.join(&layout.objects), "objects directory")?;
+    let plain = root.vault.join(paths.plain);
+    let gz = root.vault.join(paths.gzip);
     let has_plain = object_file_exists(&plain, hash)?;
     let has_gz = object_file_exists(&gz, hash)?;
     if has_plain && has_gz {
@@ -1523,6 +2273,15 @@ fn read_object_with_limit(note: &Path, hash: &str, max_bytes: usize) -> Result<O
     }
     if !has_gz {
         return Ok(None);
+    }
+    if fs::metadata(&gz)
+        .map_err(io_ctx(gz.display().to_string()))?
+        .len()
+        > (MAX_OBJECT_BYTES + 1024 * 1024) as u64
+    {
+        return Err(CliError::Corrupt(format!(
+            "compressed object {hash} exceeds its safety limit"
+        )));
     }
     let limit = u64::try_from(max_bytes).unwrap_or(u64::MAX) + 1;
     let mut out = Vec::new();
@@ -1616,19 +2375,54 @@ fn object_too_large(hash: &str, max_bytes: usize) -> CliError {
 ///
 /// # Examples
 /// ```no_run
-/// mica_cli::sidecar::write_manifest(std::path::Path::new("Note.md"), None, "Note.md", &[], 0).unwrap();
+/// # let note: mica_cli::sidecar::NoteStore = todo!();
+/// mica_cli::sidecar::write_manifest(&note, Some(&note.note_id), "Note.md", &[], 0).unwrap();
 /// ```
 pub fn write_manifest(
-    note: &Path,
+    note: &NoteStore,
     note_id: Option<&str>,
     path: &str,
     blocks: &[(String, String)],
     updated: u64,
 ) -> Result<()> {
-    ensure_sidecar(note)?;
+    if note_id != Some(note.note_id.as_str()) {
+        return Err(CliError::Corrupt(
+            "manifest identity does not match its note store".to_string(),
+        ));
+    }
+    validate_note_hint(path)?;
+    contained_note_path(&note.root.vault, Path::new(path))?;
     let out = manifest_bytes(note_id, path, blocks, updated);
-    let p = sidecar_dir(note).join("manifest.json");
-    fsutil::atomic_write(&p, &out)
+    if out.len() > MAX_LEDGER_BYTES {
+        return Err(CliError::Corrupt(
+            "note manifest exceeds its safety limit".to_string(),
+        ));
+    }
+    ensure_sidecar(note)?;
+    let p = note.root.vault.join(&note.paths.manifest);
+    if let Some(previous) = read_bounded_file(&p, MAX_LEDGER_BYTES, "note manifest")? {
+        let record: StoredManifest = serde_json::from_slice(&previous)
+            .map_err(|error| CliError::Corrupt(format!("invalid note manifest: {error}")))?;
+        if record.note_id != note.note_id {
+            return Err(CliError::Corrupt(
+                "note manifest identity mismatch".to_string(),
+            ));
+        }
+        if record.path == path && record.blocks.as_slice() == blocks {
+            return Ok(());
+        }
+        ensure_sidecar(note)?;
+        return fsutil::atomic_write_if_unchanged(&p, &previous, &out);
+    }
+    ensure_sidecar(note)?;
+    publish_immutable(&p, &out)?;
+    let actual = read_bounded_file(&p, MAX_LEDGER_BYTES, "note manifest")?;
+    if actual.as_deref() != Some(out.as_slice()) {
+        return Err(CliError::Corrupt(
+            "note manifest appeared concurrently; retry the operation".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn manifest_bytes(
@@ -1677,30 +2471,47 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Reason: test-only assertions
     use super::*;
 
+    fn fixture_store(path: PathBuf) -> NoteStore {
+        let vault = path.parent().expect("fixture parent").to_path_buf();
+        NoteStore {
+            root: StoreRoot {
+                vault,
+                marker: Arc::new(Mutex::new(None)),
+            },
+            note: path,
+            note_id: "nid".to_string(),
+            paths: mica_core::note_paths_impl("nid").expect("fixture identity"),
+            cache: Arc::new(Mutex::new(NoteReadCache::default())),
+        }
+    }
+
+    impl AsRef<Path> for NoteStore {
+        fn as_ref(&self) -> &Path {
+            &self.note
+        }
+    }
+
     #[test]
     fn paths_match_plugin_layout() {
-        let note = Path::new("/v/dir/My Note.md");
-        assert_eq!(sidecar_dir(note), Path::new("/v/dir/My Note.mica"));
+        let note = fixture_store(PathBuf::from("/v/Note.md"));
+        let key = mica_core::note_paths_impl("nid").expect("identity").key;
         assert_eq!(
-            ledger_path(note),
-            Path::new("/v/dir/My Note.mica/ledger.jsonl")
+            sidecar_dir(&note),
+            Path::new("/v/mica-data/notes").join(key)
         );
+        assert_eq!(ledger_path(&note), sidecar_dir(&note).join("ledger.jsonl"));
+        let hash = mica_core::hash_content_impl("content");
         assert_eq!(
-            object_path(note, "b3:abc123"),
-            Path::new("/v/dir/My Note.mica/objects/b3-abc123.mica.md")
+            object_path(&note, &hash).expect("object path").parent(),
+            Some(objects_dir(&note).as_path())
         );
-        assert_eq!(
-            object_path(note, "../escape")
-                .parent()
-                .expect("object parent"),
-            objects_dir(note)
-        );
+        assert!(object_path(&note, "../escape").is_err());
     }
 
     #[test]
     fn section_normalization_journal_roundtrips() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "note").expect("seed note");
         let original = mica_core::hash_content_impl("before");
         let normalized = mica_core::hash_content_impl("after");
@@ -1732,7 +2543,7 @@ mod tests {
     #[test]
     fn tab_consolidation_journal_roundtrips() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "before").expect("seed note");
         let original = mica_core::hash_content_impl("before");
         let consolidated = mica_core::hash_content_impl("after");
@@ -1789,7 +2600,7 @@ mod tests {
     #[test]
     fn tab_consolidation_journal_rejects_invalid_mappings_and_history_events() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "before").expect("seed note");
         let hash = mica_core::hash_content_impl("body");
         let mut journal = TabConsolidationJournal {
@@ -1854,7 +2665,7 @@ mod tests {
     #[test]
     fn tab_consolidation_journal_rejects_empty_identity_and_duplicate_event_ids() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "before").expect("seed note");
         let hash = mica_core::hash_content_impl("body");
         let event = Event::SetHead {
@@ -1897,7 +2708,7 @@ mod tests {
     #[test]
     fn tab_consolidation_preflight_allows_head_without_history_and_enforces_bounds() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "before").expect("seed note");
         let hash = mica_core::hash_content_impl("body");
         let journal = TabConsolidationJournal {
@@ -1934,7 +2745,7 @@ mod tests {
     #[test]
     fn journals_reject_wrong_event_kinds_before_writes() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "note").expect("seed note");
         let hash = mica_core::hash_content_impl("body");
         let add = Event::AddVersion {
@@ -1985,7 +2796,7 @@ mod tests {
     #[test]
     fn section_normalization_journal_rejects_empty_event_identity() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "note").expect("seed note");
         let hash = mica_core::hash_content_impl("body");
 
@@ -2020,7 +2831,7 @@ mod tests {
     #[test]
     fn section_normalization_journal_rejects_invalid_state_and_duplicate_eids() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         std::fs::write(&note, "note").expect("seed note");
         let hash = mica_core::hash_content_impl("body");
         let event = Event::ReplaceVersion {
@@ -2059,11 +2870,11 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("Note.md");
+        let note = fixture_store(tmp.path().join("Note.md"));
         let outside = tmp.path().join("outside.json");
         std::fs::write(&note, "note").expect("seed note");
         std::fs::write(&outside, "outside").expect("seed outside file");
-        std::fs::create_dir(sidecar_dir(&note)).expect("sidecar directory");
+        std::fs::create_dir_all(sidecar_dir(&note)).expect("sidecar directory");
         symlink(&outside, section_normalization_journal_path(&note)).expect("journal symlink");
         let hash = mica_core::hash_content_impl("body");
         let journal = SectionNormalizationJournal {
@@ -2093,7 +2904,7 @@ mod tests {
     #[test]
     fn manifest_matches_plugin_bytes() {
         let tmp = tempfile::tempdir().unwrap();
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         write_manifest(
             &note,
             Some("nid"),
@@ -2102,7 +2913,7 @@ mod tests {
             42,
         )
         .unwrap();
-        let got = fs::read_to_string(tmp.path().join("N.mica/manifest.json")).unwrap();
+        let got = fs::read_to_string(sidecar_dir(&note).join("manifest.json")).unwrap();
         // Exactly what JSON.stringify({...}, null, "\t") + "\n" produces.
         let want = "{\n\t\"noteId\": \"nid\",\n\t\"path\": \"N.md\",\n\t\"blocks\": {\n\t\t\"b1\": \"First\",\n\t\t\"b2\": \"\"\n\t},\n\t\"updated\": 42\n}\n";
         assert_eq!(got, want);
@@ -2111,7 +2922,7 @@ mod tests {
     #[test]
     fn ledger_roundtrip_and_bad_line_tolerance() {
         let tmp = tempfile::tempdir().unwrap();
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         let hash = mica_core::hash_content_impl("event");
         let ev = Event::SetHead {
             eid: "e1".into(),
@@ -2340,7 +3151,7 @@ mod tests {
     #[test]
     fn conflicting_ledger_eids_and_duplicate_append_batches_are_rejected() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         let first = Event::SetHead {
             eid: "same-eid".into(),
             ts: 1,
@@ -2377,7 +3188,7 @@ mod tests {
     #[test]
     fn torn_ledger_tail_isolated_before_next_event() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         ensure_sidecar(&note).expect("sidecar");
         std::fs::write(ledger_path(&note), b"{partial").expect("torn ledger");
         let event = Event::SetHead {
@@ -2394,7 +3205,7 @@ mod tests {
     #[test]
     fn ledger_bounds_and_timestamp_are_enforced() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         let hash = mica_core::hash_content_impl("body");
         let oversized = Event::Label {
             eid: "e".into(),
@@ -2479,7 +3290,7 @@ mod tests {
         use std::sync::{Arc, Barrier};
 
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = Arc::new(tmp.path().join("N.md"));
+        let note = Arc::new(fixture_store(tmp.path().join("N.md")));
         let barrier = Arc::new(Barrier::new(8));
         let hash = mica_core::hash_content_impl("body");
         let mut workers = Vec::new();
@@ -2510,12 +3321,28 @@ mod tests {
     #[test]
     fn legacy_short_object_addresses_still_verify() {
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         let content = "legacy body";
         let full = mica_core::hash_content_impl(content);
         let legacy = &full[..19];
         ensure_sidecar(&note).expect("sidecar");
-        std::fs::write(object_path(&note, legacy), content).expect("legacy object");
+        std::fs::write(object_path(&note, &full).expect("object path"), content)
+            .expect("full object");
+        std::fs::write(
+            note.root.vault.join(&note.paths.aliases),
+            serde_json::to_vec(&BTreeMap::from([(legacy, full.as_str())])).expect("aliases"),
+        )
+        .expect("alias file");
+        append_events(
+            &note,
+            &[Event::SetHead {
+                eid: "legacy-ref".to_string(),
+                ts: 0,
+                block: "block".to_string(),
+                hash: legacy.to_string(),
+            }],
+        )
+        .expect("note reference");
         assert_eq!(
             read_object(&note, legacy).expect("read"),
             Some(content.to_string())
@@ -2528,7 +3355,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().expect("temporary directory");
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&outside).expect("outside directory");
         symlink(&outside, sidecar_dir(&note)).expect("sidecar symlink");
@@ -2562,63 +3389,92 @@ mod tests {
     #[test]
     fn objects_are_immutable() {
         let tmp = tempfile::tempdir().unwrap();
-        let note = tmp.path().join("N.md");
+        let note = fixture_store(tmp.path().join("N.md"));
         let hash = mica_core::hash_content_impl("first");
         write_object(&note, &hash, "first").unwrap();
         let error = write_object(&note, &hash, "SECOND WRITE MUST NOT REPLACE").unwrap_err();
         assert!(matches!(error, CliError::Corrupt(_)));
-        assert_eq!(read_object(&note, &hash).unwrap().as_deref(), Some("first"));
+        assert_eq!(
+            read_pooled_object(&note.root, &hash, MAX_OBJECT_BYTES)
+                .unwrap()
+                .as_deref(),
+            Some("first")
+        );
         let missing_hash = mica_core::hash_content_impl("missing");
-        assert_eq!(read_object(&note, &missing_hash).unwrap(), None);
+        assert_eq!(
+            read_pooled_object(&note.root, &missing_hash, MAX_OBJECT_BYTES).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn large_objects_compress_small_stay_plaintext_and_both_read_back() {
         let dir = tempfile::tempdir().expect("tmp");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         std::fs::write(&note, "x").expect("note");
         let small = "small body";
         let small_hash = mica_core::hash_content_impl(small);
         write_object(&note, &small_hash, small).expect("small write");
-        assert!(object_path(&note, &small_hash).is_file(), "small stays .md");
+        assert!(
+            object_path(&note, &small_hash)
+                .expect("object path")
+                .is_file(),
+            "small stays .md"
+        );
         let large = "L".repeat(COMPRESS_MIN_BYTES + 100);
         let large_hash = mica_core::hash_content_impl(&large);
         write_object(&note, &large_hash, &large).expect("large write");
         assert!(
-            object_path_gz(&note, &large_hash).is_file(),
+            object_path_gz(&note, &large_hash)
+                .expect("object path")
+                .is_file(),
             "large becomes .gz"
         );
-        assert!(!object_path(&note, &large_hash).exists());
+        assert!(!object_path(&note, &large_hash)
+            .expect("object path")
+            .exists());
         assert_eq!(
-            read_object(&note, &small_hash).expect("r1"),
+            read_pooled_object(&note.root, &small_hash, MAX_OBJECT_BYTES).expect("r1"),
             Some(small.to_string())
         );
-        assert_eq!(read_object(&note, &large_hash).expect("r2"), Some(large));
+        assert_eq!(
+            read_pooled_object(&note.root, &large_hash, MAX_OBJECT_BYTES).expect("r2"),
+            Some(large)
+        );
         let missing_hash = mica_core::hash_content_impl("absent");
-        assert_eq!(read_object(&note, &missing_hash).expect("r3"), None);
+        assert_eq!(
+            read_pooled_object(&note.root, &missing_hash, MAX_OBJECT_BYTES).expect("r3"),
+            None
+        );
     }
 
     #[test]
     fn corrupt_object_and_invalid_hash_are_rejected() {
         let dir = tempfile::tempdir().expect("temporary directory");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         let hash = mica_core::hash_content_impl("expected");
         std::fs::create_dir_all(objects_dir(&note)).expect("objects directory");
-        std::fs::write(object_path(&note, &hash), "CORRUPT").expect("corrupt object");
+        std::fs::write(object_path(&note, &hash).expect("object path"), "CORRUPT")
+            .expect("corrupt object");
 
         assert!(matches!(
-            read_object(&note, &hash),
+            read_pooled_object(&note.root, &hash, MAX_OBJECT_BYTES),
             Err(CliError::Corrupt(_))
         ));
         assert!(matches!(
-            read_object(&note, "../escape"),
+            read_pooled_object(&note.root, "../escape", MAX_OBJECT_BYTES),
             Err(CliError::Corrupt(_))
         ));
 
-        std::fs::remove_file(object_path(&note, &hash)).expect("remove plaintext");
-        std::fs::write(object_path_gz(&note, &hash), b"not gzip").expect("malformed gzip");
+        std::fs::remove_file(object_path(&note, &hash).expect("object path"))
+            .expect("remove plaintext");
+        std::fs::write(
+            object_path_gz(&note, &hash).expect("object path"),
+            b"not gzip",
+        )
+        .expect("malformed gzip");
         assert!(matches!(
-            read_object(&note, &hash),
+            read_pooled_object(&note.root, &hash, MAX_OBJECT_BYTES),
             Err(CliError::Corrupt(_))
         ));
     }
@@ -2626,7 +3482,7 @@ mod tests {
     #[test]
     fn decompression_is_bounded() {
         let dir = tempfile::tempdir().expect("temporary directory");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         const TEST_LIMIT: usize = 1024;
         let oversized = "x".repeat(TEST_LIMIT + 1);
         let hash = mica_core::hash_content_impl(&oversized);
@@ -2636,10 +3492,11 @@ mod tests {
             .write_all(oversized.as_bytes())
             .expect("compress oversized object");
         let bytes = encoder.finish().expect("finish gzip");
-        std::fs::write(object_path_gz(&note, &hash), bytes).expect("write gzip");
+        std::fs::write(object_path_gz(&note, &hash).expect("object path"), bytes)
+            .expect("write gzip");
 
         assert!(matches!(
-            read_object_with_limit(&note, &hash, TEST_LIMIT),
+            read_pooled_object(&note.root, &hash, TEST_LIMIT),
             Err(CliError::Corrupt(_))
         ));
     }
@@ -2648,7 +3505,7 @@ mod tests {
     fn oversized_object_write_is_rejected_before_persistence() {
         const TEST_LIMIT: usize = 1024;
         let dir = tempfile::tempdir().expect("temporary directory");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         let oversized = "x".repeat(TEST_LIMIT + 1);
         let hash = mica_core::hash_content_impl(&oversized);
 
@@ -2663,7 +3520,7 @@ mod tests {
     fn object_preflight_rejects_capacity_without_persistence() {
         const TEST_LIMIT: usize = 8;
         let dir = tempfile::tempdir().expect("temporary directory");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         let content = "too many bytes";
         let hash = mica_core::hash_content_impl(content);
 
@@ -2697,7 +3554,7 @@ mod tests {
     fn event_preflight_rejects_capacity_without_mutating_ledger() {
         const TEST_LIMIT: usize = 16;
         let dir = tempfile::tempdir().expect("temporary directory");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         let ledger = ledger_path(&note);
         std::fs::create_dir_all(sidecar_dir(&note)).expect("sidecar directory");
         std::fs::write(&ledger, "existing-ledger").expect("seed ledger");
@@ -2716,16 +3573,16 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().expect("temporary directory");
-        let note = dir.path().join("n.md");
+        let note = fixture_store(dir.path().join("n.md"));
         let content = "outside";
         let hash = mica_core::hash_content_impl(content);
         let outside = dir.path().join("outside.txt");
         std::fs::write(&outside, content).expect("outside file");
         std::fs::create_dir_all(objects_dir(&note)).expect("objects directory");
-        symlink(&outside, object_path(&note, &hash)).expect("object symlink");
+        symlink(&outside, object_path(&note, &hash).expect("object path")).expect("object symlink");
 
         assert!(matches!(
-            read_object(&note, &hash),
+            read_pooled_object(&note.root, &hash, MAX_OBJECT_BYTES),
             Err(CliError::Corrupt(_))
         ));
     }

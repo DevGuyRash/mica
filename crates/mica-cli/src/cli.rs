@@ -14,7 +14,7 @@ use std::path::PathBuf;
                   Version addressing: a stable checkpoint id, unambiguous hash, label, or visible vN (v1 = oldest)."
 )]
 pub struct Cli {
-    /// Vault root (default: walk up from the note / cwd to a `.obsidian` folder)
+    /// Vault root; plain directories are valid (default: nearest `mica-data/root.json` or `.obsidian`)
     #[arg(long, global = true, value_name = "DIR")]
     pub vault: Option<PathBuf>,
     /// Machine-readable JSON output
@@ -228,9 +228,9 @@ pub enum Cmd {
         /// Note path
         note: String,
     },
-    /// Reconcile sidecars ↔ notes across the vault (rehome renamed notes)
+    /// Reconcile central history records and refresh renamed-note path hints
     Repair,
-    /// Vault/sidecar health report (missing objects, orphans, parse errors)
+    /// Central-store health report (missing objects, orphan records, parse errors)
     Doctor,
 }
 

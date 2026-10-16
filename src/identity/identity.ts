@@ -1,29 +1,19 @@
 import { TFile } from "obsidian";
 import type MicaPlugin from "../main";
-import { ensureIds, newId, scanBlocksView } from "../wasm/bridge";
+import { ensureNoteStore, storeRoot, isLiveNote } from "../storage/store";
+import { ensureIds, scanBlocksView } from "../wasm/bridge";
 
-/**
- * Ensure the note has a stable `mica-id` in frontmatter (written via
- * `processFrontMatter`, so it never clobbers an existing `uuid`). Returns the id.
- */
+/** Prepare the shared source-backed note anchor under the existing note queue. */
 export async function ensureNoteId(plugin: MicaPlugin, file: TFile): Promise<string> {
 	return plugin.engine.withFileLock(file, async () => {
-		let id = "";
-		await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-			const current = fm["mica-id"];
-			if (typeof current === "string" && current) {
-				id = current;
-				return;
-			}
-			id = newId();
-			fm["mica-id"] = id;
-		});
-		return id;
+		const root = storeRoot(plugin.app.vault);
+		return (await ensureNoteStore(root, file, await root.vault.read(file))).store.noteId;
 	});
 }
 
 /** Ensure every ` ```mica ` block carries an `id=`. Returns true if the note changed. */
 export async function ensureBlockIds(plugin: MicaPlugin, file: TFile): Promise<boolean> {
+	if (!isLiveNote(file)) throw new Error("Mica: managed storage is not a live note");
 	return plugin.engine.withFileLock(file, async () => {
 		const initial = await plugin.app.vault.read(file);
 		if (!scanBlocksView(initial).some((block) => !block.id)) return false;

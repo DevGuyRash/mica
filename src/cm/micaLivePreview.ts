@@ -17,6 +17,7 @@ import type { DecorationSet } from "@codemirror/view";
 import type MicaPlugin from "../main";
 import {
 	guardedBlockContentEdit,
+	isManagedPath,
 	guardedBlockContentEditAt,
 	parseBlock,
 	scanBlocksView,
@@ -31,6 +32,7 @@ import type { BlockApplyHost, CrossBlockMove } from "../ui/dnd";
 import { noteBasenameFromPath, unnamedBlockOrdinals } from "../identity/blockLabel";
 import { VersionsModal, type WorkingCopyProvider } from "../ui/versionsModal";
 import { readObject } from "../storage/sidecar";
+import { isLiveNote } from "../storage/store";
 import { blockEditHistory } from "./blockEditHistory";
 import { revertBlockToHead, saveBlockVersion } from "../ui/versionActions";
 import { copyOptionsFromSettings } from "../ui/copyPayload";
@@ -234,9 +236,16 @@ class MicaWidget extends WidgetType {
 		});
 	}
 
+	/** Retained editors must recheck the live file after moves and view changes. */
+	private canMutate(view: EditorView): boolean {
+		const file = view.state.field(editorInfoField, false)?.file;
+		return file instanceof TFile && isLiveNote(file) && this.plugin.app.vault.getAbstractFileByPath(file.path) === file;
+	}
+
 	/** Reduce a source deletion and target insertion from one fresh document,
 	 * then dispatch both non-overlapping changes as one CodeMirror transaction. */
 	private moveAcross(view: EditorView, move: CrossBlockMove): boolean {
+		if (!this.canMutate(view)) return false;
 		if (!this.id || move.sourceId === this.id) return false;
 		const doc = view.state.doc.toString();
 		const blocks = scanBlocksView(doc);
@@ -262,6 +271,7 @@ class MicaWidget extends WidgetType {
 
 	/** Replace the whole block body (undo toasts, whole-block lightbox edits). */
 	private replaceAll(view: EditorView, expected: string, content: string): boolean {
+		if (!this.canMutate(view)) return false;
 		if (this.id) {
 			const edit = guardedBlockContentEdit(view.state.doc.toString(), this.id, expected, content);
 			if (!edit) return false;
@@ -274,6 +284,7 @@ class MicaWidget extends WidgetType {
 
 	/** Write / remove one fence-header attribute (name, accent, density, …). */
 	private setAttr(view: EditorView, key: string, value: string | null): void {
+		if (!this.canMutate(view)) return;
 		if (!this.id) return;
 		const doc = view.state.doc.toString();
 		const edit = setBlockAttrEdit(doc, this.id, key, value);
@@ -283,6 +294,7 @@ class MicaWidget extends WidgetType {
 	}
 
 	private structuralEdit(view: EditorView, mutate: (content: string) => string | null): boolean {
+		if (!this.canMutate(view)) return false;
 		const doc = view.state.doc.toString();
 		const matches = scanBlocksView(doc).filter((b) => (this.id ? b.id === this.id : b.start === this.start));
 		// An id must identify exactly one live block. Choosing the first duplicate
@@ -364,7 +376,7 @@ export function scanCached(state: EditorState): ScanCache {
  * accepts block-level decorations when they are provided directly.
  */
 function build(plugin: MicaPlugin, state: EditorState, sel: RevealSel): DecorationSet {
-	if (!state.field(editorLivePreviewField, false)) return Decoration.none;
+	if (!state.field(editorLivePreviewField, false) || isManagedPath(state.field(editorInfoField, false)?.file?.path ?? "")) return Decoration.none;
 	const ranges = [];
 	const { blocks, attrs, tos, contents, unnamedOrdinals } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
@@ -647,6 +659,7 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 					);
 				if (
 					!block ||
+					isManagedPath(info?.file?.path ?? "") ||
 					mode === "off" ||
 					rendered ||
 					block.end < this.view.viewport.from ||
@@ -1095,7 +1108,8 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 					if (generation !== this.generation || this.current !== block) return;
 					count.setText(String(state?.versions.length ?? 0));
 					const currentHead = state?.rawHead ?? state?.head;
-					const head = currentHead ? await readObject(plugin.app.vault, info.file, currentHead) : "";
+					const store = currentHead ? await plugin.engine.historyStore(info.file) : null;
+					const head = currentHead ? (store ? await readObject(store, currentHead) : null) : "";
 					if (generation !== this.generation || this.current !== block) return;
 					const document = this.view.state.doc.toString();
 					const current = document.slice(block.content_start, block.content_end);

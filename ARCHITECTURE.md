@@ -20,7 +20,7 @@ crates/mica-core (pure Rust)         hosts
   diff (similar) · BLAKE3 · UUIDv7      versions timeline · settings · window.mica
   block edits · header attrs            file-bridge
   migration                           mica CLI (crates/mica-cli, native)
-                                        vault discovery · sidecar I/O (byte-
+                                        vault discovery · central-store I/O (byte-
                                         compatible) · watch daemon · doctor
 ```
 
@@ -112,8 +112,8 @@ separate from the durable version ledger.
 
 ## Storage & versioning
 
-- Current version stays inline (portable plain markdown). History lives in a **visible, co-located** `<Note>.mica/` sidecar: verified content-addressed objects (`objects/b3-….mica.md`, or `.mica.gz` above 4 KiB when the host WebView supports compression; older WebViews retain larger objects as `.mica.md`), an append-only `ledger.jsonl` authoritative under `(ts, eid)` ordering, and a `manifest.json` summary. Legacy `add-version` rows retain hash lineage and append-only `replace-version` normalization. New `checkpoint` rows use a stable logical version ID plus content hash, parent version ID, optional restore source, and cause. `move-head`, `version-label`, and `version-visibility` target logical IDs, so identical content hashes remain distinct checkpoints and hidden versions retain their original lineage. The folded model keeps both the raw ledger HEAD and the effective visible HEAD: dirty checks and new checkpoint parentage use raw HEAD, while timeline display and explicit visible-Head comparison use effective HEAD. Effective visible parents and HEAD splice over hidden ancestors without changing live bytes or falsely dirtying a working copy that still matches a hidden raw HEAD. Conflicting IDs, absent/cross-block targets, inconsistent legacy replacements, or ambiguous hash references fail closed. Original events and objects remain immutable and readable. Note renames serialize with snapshots, move only into an absent destination, and surface collisions without merging; the manifest also refreshes on metadata-only maintenance without timestamp-only rewrites. UUIDs alone anchor block lineage. Note paths and block names are current non-versioned metadata, so the content ledger intentionally cannot reconstruct historical renames. Hosts recompute the plaintext hash on every object read/write, reject malformed identities and oversized/decompression-bomb objects, and share the same 128 MiB limit. Repair moves fully orphaned sidecars into the root `.mica-graveyard/`; a derived `state.json` cache remains planned (see `state.md`).
-- Legacy migrations additionally retain `<Note>.mica/migration.json`, a shared
+- Current version stays inline (portable plain markdown). History lives in one **visible vault-root** `mica-data/` store. `root.json` identifies storage format 1 and the store UUID. The shared `objects/` pool contains verified full-BLAKE3-addressed immutable objects (plain Markdown through 4 KiB; gzip above it in every host). Independent note records under `notes/<safe-note-key>/` hold an append-only `ledger.jsonl` authoritative under `(ts, eid)` ordering, a `manifest.json` summary, and operation journals. A safe key is a domain-separated full hash of the original stable note identity; arbitrary identity text never becomes a path component. Note-scoped `object-aliases.json` resolves retained legacy short hashes against verified full objects without changing ledger or journal bytes. Legacy `add-version` rows retain hash lineage and append-only `replace-version` normalization. New `checkpoint` rows use a stable logical version ID plus content hash, parent version ID, optional restore source, and cause. `move-head`, `version-label`, and `version-visibility` target logical IDs, so identical content hashes remain distinct checkpoints and hidden versions retain their original lineage. The folded model keeps both the raw ledger HEAD and the effective visible HEAD: dirty checks and new checkpoint parentage use raw HEAD, while timeline display and explicit visible-Head comparison use effective HEAD. Effective visible parents and HEAD splice over hidden ancestors without changing live bytes or falsely dirtying a working copy that still matches a hidden raw HEAD. Conflicting IDs, absent/cross-block targets, inconsistent legacy replacements, or ambiguous hash references fail closed. Original events and objects remain immutable and readable. Note renames serialize with snapshots and refresh only the current path hint; history directories never follow note paths. Duplicate live note identities block writable bindings. The manifest refreshes on metadata-only maintenance without timestamp-only rewrites. UUIDs alone anchor block lineage. Note paths and block names are current non-versioned metadata, so the content ledger intentionally cannot reconstruct historical renames. Hosts recompute the plaintext hash on every object read/write, reject malformed identities and oversized/decompression-bomb objects, and share the same 128 MiB limit. Repair enumerates central note records by manifest identity and retains orphaned history for recovery. No shared-object deletion or garbage collection is part of this format change; a derived `state.json` cache remains planned (see `state.md`).
+- Legacy migrations additionally retain `mica-data/notes/<note-key>/migration.json`, a shared
   plugin/CLI transaction record with schema
   `{format,status,note,original,migrated,events}`. `original` and `migrated`
   name verified whole-note objects; stable event ids make a `pending` record
@@ -121,14 +121,14 @@ separate from the durable version ledger.
   recovery reference instead of turning successful migration evidence into an
   unreachable object.
 - Logical-section history normalization retains a separate
-  `<Note>.mica/section-normalization.json` transaction record with exact
+  `mica-data/notes/<note-key>/section-normalization.json` transaction record with exact
   pre/post whole-note hashes and stable `replace-version` events. The command
   writes and verifies immutable objects first, publishes a pending journal,
   compare-and-swaps the note, appends only missing events, verifies the folded
   result, and then marks the journal complete. It never repurposes the legacy
   migration record or refreshes the manifest.
 - Prompt-collection consolidation retains
-  `<Note>.mica/tab-consolidation.json`. It replaces the selected live prompt
+  `mica-data/notes/<note-key>/tab-consolidation.json`. It replaces the selected live prompt
   collection with one fresh unnamed block, maps source blocks to tabs, and
   composes each source legacy version or identity-bearing checkpoint into a
   whole-target checkpoint while preserving source timestamps, labels,
@@ -136,8 +136,8 @@ separate from the durable version ledger.
   and fenced code remain native leaves; only
   contiguous ordinary Markdown runs receive reversible `:::section` wrappers.
   Exact note and manifest generations make interrupted publication resumable.
-- Visible (not hidden) because hidden dot-folders emit no Vault events — which would break self-healing — and visible files ride Obsidian Sync / obsidian-git and stay human-readable.
-- Snapshot-on-save is change-gated by a domain-separated, length-framed full BLAKE3 content signature (no structural snapshot storms or leaf-boundary collisions). Per-note plugin work is serialized; exact-content preconditions and guarded rollback protect the note when a sidecar append fails. The CLI stages replacements beside their target, syncs them, atomically publishes them, and verifies the result. Append-only + content-addressed means Sync/git normally see additions rather than object rewrites.
+- The managed root is visible because hidden dot-folders do not participate in the normal Vault event model and Obsidian Sync excludes them. Sync must include other file types for JSON/JSONL/gzip state. Managed paths are excluded from live-note scans, rendering mutations, snapshots, migration and watch, so object files never produce history of history. Git is an optional transport/backup tool and never selects the root.
+- Snapshot-on-save is change-gated by a domain-separated, length-framed full BLAKE3 content signature (no structural snapshot storms or leaf-boundary collisions). Per-note plugin work is serialized; exact-content preconditions and guarded rollback protect the note when a ledger append fails. The CLI stages replacements beside their target, syncs them, atomically publishes them, and verifies the result. Append-only + content-addressed means Sync/git normally see additions rather than object rewrites.
 - Explicit snapshots return the block ids whose `checkpoint`/`move-head` pairs
   reached the ledger. A block status control targets only its own id; the
   command-palette action remains note-wide. Manifest refreshes and identity
@@ -286,8 +286,11 @@ logical wrapper; callouts and code are conservatively excluded.
 
 ## The standalone CLI
 
-`crates/mica-cli` is a native binary over the same core: vault discovery (walk
-up to `.obsidian`), sidecar I/O byte-compatible with the plugin (same paths,
+`crates/mica-cli` is a native binary over the same core: explicit `--vault DIR`
+accepts an existing plain directory; automatic discovery recognizes an Obsidian
+configuration marker or a validated `mica-data/root.json`. Shared Rust path and
+source-backed identity rules select central storage independently of Git. Host
+I/O is byte-compatible with the plugin (same paths,
 same tab-indented manifest, same append-only ledger), the same snapshot gate,
 and the same reducer for structural edits. Note, object, and manifest replacements
 are guarded, atomic, and post-write verified; vault walks do not follow symlinks
@@ -314,7 +317,7 @@ normalization or identity-bearing checkpoint operation.
 
 ## Scriptable API
 
-`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`) plus `createBlockSource({name?, body})`, the canonical template constructor. It returns a complete UUIDv7-addressed block, validates the optional explicit name through the core header writer, and sizes the outer fence above body backticks; `block.source` mirrors it in the file bridge. Revert, branch edit, and label selectors resolve a stable checkpoint ID first; a full content hash remains a compatibility selector only when it identifies one checkpoint. The other APIs are mirrored by palette commands and that bridge: an agent drops `{verb,args}` JSON in `mica-bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, **trashes the consumed inbox file**, and writes `mica-bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. The bridge names visibility changes `versions.set-visible`; `versions.visibility` remains an alias for existing callers. Mutating verbs run through the per-file transaction queue, reject duplicate identities, and surface failures to callers. A desktop loopback transport into a running Obsidian instance remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
+`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`) plus `createBlockSource({name?, body})`, the canonical template constructor. It returns a complete UUIDv7-addressed block, validates the optional explicit name through the core header writer, and sizes the outer fence above body backticks; `block.source` mirrors it in the file bridge. Revert, branch edit, and label selectors resolve a stable checkpoint ID first; a full content hash remains a compatibility selector only when it identifies one checkpoint. The other APIs are mirrored by palette commands and that bridge: an agent drops `{verb,args}` JSON in `mica-data/bridge/inbox/`; the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, replaces the exact executed inbox bytes with a consumed marker (preserving any newer content), and writes `mica-data/bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. The bridge names visibility changes `versions.set-visible`; `versions.visibility` remains an alias for existing callers. Post-registration create and modify events are serialized through a bounded inbox queue, so reusing a filename works without replaying consumed generations. Mutating verbs run through the per-file transaction queue, reject duplicate identities, and surface failures to callers. A desktop loopback transport into a running Obsidian instance remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
 
 ## Build & distribution
 
@@ -322,7 +325,7 @@ pnpm + esbuild (bundle `src/main.ts` → `main.js`, CommonJS, externalizing `obs
 
 ## Load-bearing files
 
-Rust: `crates/mica-core/src/{scanner,parser,edit,versions,diff,reconcile,migrate}.rs` (+ `lib.rs` wasm exports). TS: `src/cm/micaLivePreview.ts`, `src/render/{layoutEngine,readingRenderer}.ts`, `src/storage/sidecar.ts`, `src/version/engine.ts`, `src/identity/{identity,reconcile}.ts`, `src/api/mica.ts`, `src/main.ts` (commands incl. migration).
+Rust: `crates/mica-core/src/{scanner,parser,edit,versions,diff,reconcile,migrate,store}.rs` (+ `lib.rs` wasm exports). TS: `src/cm/micaLivePreview.ts`, `src/render/{layoutEngine,readingRenderer}.ts`, `src/storage/sidecar.ts`, `src/version/engine.ts`, `src/identity/{identity,reconcile}.ts`, `src/api/mica.ts`, `src/main.ts` (commands incl. migration).
 
 ## Testing tiers
 
