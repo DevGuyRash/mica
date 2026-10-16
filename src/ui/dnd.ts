@@ -319,7 +319,7 @@ function swallowClick(e: MouseEvent): void {
 }
 
 function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (op: StructOp) => boolean | void): void {
-	const root = item.closest(".mica") as HTMLElement | null;
+	const root = item.closest<HTMLElement>(".mica");
 	if (!root) return;
 
 	const rect = item.getBoundingClientRect();
@@ -353,7 +353,7 @@ function beginDrag(e: PointerEvent, spec: DragSpec, item: HTMLElement, apply: (o
 		home: rect,
 		ghost,
 		indicator,
-		scroller: root.closest(".cm-scroller, .markdown-preview-view") as HTMLElement | null,
+		scroller: root.closest<HTMLElement>(".cm-scroller, .markdown-preview-view"),
 		containers,
 		slots: computeSlots(containers, spec, root),
 		current: null,
@@ -875,7 +875,7 @@ function clearCombineIntent(d: ActiveDrag): void {
 function paintDropIndicator(d: ActiveDrag): void {
 	const ready = d.combineReady;
 	if (ready) {
-		d.indicator.style.display = "block";
+		d.indicator.setCssStyles({ display: "block" });
 		d.indicator.style.transform = `translate(${ready.left}px, ${ready.top}px)`;
 		d.indicator.style.width = `${Math.max(0, ready.right - ready.left)}px`;
 		d.indicator.style.height = `${Math.max(0, ready.bottom - ready.top)}px`;
@@ -887,10 +887,10 @@ function paintDropIndicator(d: ActiveDrag): void {
 	d.indicator.removeClass("is-combine-ready");
 	const slot = d.current;
 	if (!slot) {
-		d.indicator.style.display = "none";
+		d.indicator.setCssStyles({ display: "none" });
 		return;
 	}
-	d.indicator.style.display = "block";
+	d.indicator.setCssStyles({ display: "block" });
 	d.indicator.style.transform = `translate(${slot.x}px, ${slot.y}px)`;
 	d.indicator.style.width = `${slot.w}px`;
 	d.indicator.style.height = `${slot.h}px`;

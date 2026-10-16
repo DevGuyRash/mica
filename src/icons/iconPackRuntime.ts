@@ -78,7 +78,7 @@ export function rebuildSvg(markup: string): SVGSVGElement | null {
 function copyElement(source: Element): SVGElement | null {
 	const name = source.nodeName;
 	if (!isAllowedSvgElement(name)) return null;
-	const copy = document.createElementNS("http://www.w3.org/2000/svg", name);
+	const copy = createSvg(name as keyof SVGElementTagNameMap);
 	for (const attribute of Array.from(source.attributes)) {
 		if (!isAllowedSvgAttribute(attribute.name, attribute.value)) continue;
 		copy.setAttribute(attribute.name, attribute.value);
@@ -165,7 +165,7 @@ export async function loadPackIcon(pack: IconPack, icon: string): Promise<SVGSVG
 	cache.icons.set(key, markup);
 	// Bounded: a long session browsing a large pack must not grow without end.
 	while (cache.icons.size > MAX_CACHED_ICONS_PER_PACK) {
-		const oldest = cache.icons.keys().next().value as string | undefined;
+		const oldest = cache.icons.keys().next().value;
 		if (oldest === undefined) break;
 		cache.icons.delete(oldest);
 	}

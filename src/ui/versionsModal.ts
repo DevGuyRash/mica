@@ -241,14 +241,12 @@ export class VersionsModal extends Modal {
 		actions
 			.createEl("button", { text: "Close", attr: { type: "button" } })
 			.addEventListener("click", () => this.close());
-		retry.addEventListener("click", async () => {
+		retry.addEventListener("click", () => {
 			retry.disabled = true;
 			retry.setText("Retrying…");
-			try {
-				await this.reload(true);
-			} catch (nextError) {
+			void this.reload(true).catch((nextError: unknown) => {
 				this.renderUnavailable(nextError);
-			}
+			});
 		});
 	}
 
@@ -420,7 +418,7 @@ export class VersionsModal extends Modal {
 				}
 				this.contents.set(hash, content);
 				while (this.contents.size > CONTENT_CACHE_LIMIT) {
-					const oldest = this.contents.keys().next().value as string | undefined;
+					const oldest = this.contents.keys().next().value;
 					if (!oldest) break;
 					this.contents.delete(oldest);
 					this.scopeIndexes.delete(oldest);
@@ -1332,7 +1330,7 @@ export class VersionsModal extends Modal {
 		const index = buildScopeIndex(this.text(key));
 		this.scopeIndexes.set(key, index);
 		while (this.scopeIndexes.size > CONTENT_CACHE_LIMIT) {
-			const oldest = this.scopeIndexes.keys().next().value as string | undefined;
+			const oldest = this.scopeIndexes.keys().next().value;
 			if (oldest === undefined) break;
 			this.scopeIndexes.delete(oldest);
 		}
@@ -1350,7 +1348,7 @@ export class VersionsModal extends Modal {
 		const transition = buildScopeTransition(this.scopeIndexFor(base), this.scopeIndexFor(selected));
 		this.scopeTransitions.set(key, transition);
 		while (this.scopeTransitions.size > CONTENT_CACHE_LIMIT) {
-			const oldest = this.scopeTransitions.keys().next().value as string | undefined;
+			const oldest = this.scopeTransitions.keys().next().value;
 			if (oldest === undefined) break;
 			this.scopeTransitions.delete(oldest);
 		}
@@ -1411,7 +1409,7 @@ export class VersionsModal extends Modal {
 				if (generation === this.lineageGeneration) {
 					this.lineageResults.set(key, resolution);
 					while (this.lineageResults.size > CONTENT_CACHE_LIMIT) {
-						const oldest = this.lineageResults.keys().next().value as string | undefined;
+						const oldest = this.lineageResults.keys().next().value;
 						if (oldest === undefined) break;
 						this.lineageResults.delete(oldest);
 					}
@@ -2142,7 +2140,7 @@ export class VersionsModal extends Modal {
 			if (pending) status.setText(pending);
 			else {
 				const preview = this.focusedPair(
-					document.createElement("div"),
+					createDiv(),
 					baseKey,
 					plan.targets[0]?.key ?? baseKey,
 				);
@@ -2385,7 +2383,7 @@ export class VersionsModal extends Modal {
 					const resolution = resolveScope(this.scopeIndexFor(cell.target.key), selection.locator);
 					if (resolution.kind === "exact")
 						await this.ensureLineageCounterpart(plan.base.key, cell.target.key, resolution.scope);
-					const pair = this.focusedPair(document.createElement("div"), plan.base.key, cell.target.key);
+					const pair = this.focusedPair(createDiv(), plan.base.key, cell.target.key);
 					if (!pair) {
 						new Notice("Choose every selected element’s counterpart before copying comparisons.");
 						return;

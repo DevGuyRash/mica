@@ -329,9 +329,7 @@ body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn,
 }
 body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is-active,
 .mica[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
-	/* v0.2: never-ambiguous active state — accent underline + tinted fill on
-	   EVERY tab style, so heavily translucent community themes can't wash it out. */
-	box-shadow: inset 0 -2px 0 0 var(--mica-accent);
+	/* Tinted fill keeps the active pill clear on translucent community themes. */
 	font-weight: 600;
 	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
 	color: var(--mica-accent);
@@ -1353,6 +1351,10 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 }
 
 /* ---------- Wide settings field ---------- */
+.mica-settings-accent-probe {
+	color: var(--mica-accent);
+}
+
 .mica-settings-wide {
 	width: 100%;
 	min-height: 64px;

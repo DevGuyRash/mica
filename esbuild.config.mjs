@@ -1,9 +1,10 @@
 import esbuild from "esbuild";
 import process from "node:process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import builtins from "builtin-modules";
+import { builtinModules } from "node:module";
+import { isAbsolute, join, resolve } from "node:path";
 
 const production = process.argv[2] === "production";
 
@@ -50,13 +51,41 @@ const buildOptions = {
 		"@lezer/common",
 		"@lezer/highlight",
 		"@lezer/lr",
-		...builtins,
+		...builtinModules,
+		"node:*",
 	],
 };
 
 if (process.argv[2] === "wasm") {
 	const env = { ...process.env };
-	const remaps = [`--remap-path-prefix=${homedir()}=/build`, `--remap-path-prefix=${process.cwd()}=/src/mica`];
+	const home = homedir();
+	// Resolve relative cache homes before wasm-pack changes the working directory.
+	for (const name of ["CARGO_HOME", "RUSTUP_HOME"]) {
+		if (env[name] && !isAbsolute(env[name])) env[name] = resolve(env[name]);
+	}
+	const roots = [
+		[home, "/build"],
+		[resolve(env.CARGO_HOME || join(home, ".cargo")), "/build/.cargo"],
+		[resolve(env.RUSTUP_HOME || join(home, ".rustup")), "/build/.rustup"],
+	];
+	if (env.RUSTUP_TOOLCHAIN && isAbsolute(env.RUSTUP_TOOLCHAIN)) {
+		roots.push([env.RUSTUP_TOOLCHAIN, "/build/.rustup/toolchains/selected"]);
+	}
+	roots.push([process.cwd(), "/src/mica"]);
+	const prefixes = new Map();
+	for (const [from, to] of roots) {
+		prefixes.set(from, to);
+		try {
+			prefixes.set(realpathSync(from), to);
+		} catch (error) {
+			// Cargo/rustup may create a missing home during the build.
+			if (error.code !== "ENOENT") throw error;
+		}
+	}
+	// Rust uses the last matching prefix; nested source/cache roots must win.
+	const remaps = [...prefixes]
+		.sort(([left], [right]) => left.length - right.length)
+		.map(([from, to]) => `--remap-path-prefix=${from}=${to}`);
 	const args = [
 		"build",
 		"crates/mica-core",

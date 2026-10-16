@@ -89,7 +89,9 @@ class MicaWidget extends WidgetType {
 	}
 
 	toDOM(view: EditorView): HTMLElement {
-		const el = document.createElement("div");
+		const win = view.dom.win;
+		// Obsidian installs global DOM helpers in every workspace window.
+		const el = (win as Window & { createDiv: typeof createDiv }).createDiv();
 		el.className = "mica-lp";
 		const child = new MarkdownRenderChild(el);
 		this.child = child;
@@ -185,11 +187,11 @@ class MicaWidget extends WidgetType {
 					resumeBlockAppearance(el, renderCtx);
 					return;
 				}
-				if (++attempts < 120) frame = requestAnimationFrame(resume);
+				if (++attempts < 120) frame = win.requestAnimationFrame(resume);
 			};
-			frame = requestAnimationFrame(resume);
+			frame = win.requestAnimationFrame(resume);
 			child.register(() => {
-				if (frame) cancelAnimationFrame(frame);
+				if (frame) win.cancelAnimationFrame(frame);
 			});
 		}
 		return el;
@@ -523,8 +525,9 @@ function allowKeyboardReveal(event: KeyboardEvent, view: EditorView): boolean {
 }
 
 function guardWidgetChrome(event: Event, view: EditorView): boolean {
-	const target = event.target instanceof HTMLElement ? event.target : null;
-	if (!target?.closest(".mica-lp") || target.closest("a, .internal-link")) return false;
+	const target = event.target as Node | null;
+	if (!target?.instanceOf(HTMLElement)) return false;
+	if (!target.closest(".mica-lp") || target.closest("a, .internal-link")) return false;
 	const markdown = target.closest<HTMLElement>(".mica-md");
 	const selectableProse = Boolean(markdown?.textContent?.trim() && !markdown.querySelector(".mica-ghost"));
 	const editor = target.closest('input, textarea, [contenteditable="true"], .mica-mdeditor');
@@ -556,6 +559,7 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 		class {
 			private readonly dock: HTMLElement;
 			private readonly liveDockOverlay: HTMLElement;
+			private readonly win: Window;
 			private generation = 0;
 			private current: BlockView | null = null;
 			private frame = 0;
@@ -573,12 +577,9 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 			private readonly onScroll = (): void => this.scheduleRender();
 
 			constructor(private readonly view: EditorView) {
-				this.liveDockOverlay = document.createElement("div");
-				this.liveDockOverlay.className = "mica-live-long-dock-overlay";
-				this.view.dom.appendChild(this.liveDockOverlay);
-				this.dock = document.createElement("div");
-				this.dock.className = "mica-source-dock";
-				this.view.dom.appendChild(this.dock);
+				this.win = view.dom.win;
+				this.liveDockOverlay = this.view.dom.createDiv({ cls: "mica-live-long-dock-overlay" });
+				this.dock = this.view.dom.createDiv({ cls: "mica-source-dock" });
 				this.view.scrollDOM.addEventListener("scroll", this.onScroll, { passive: true });
 				this.scheduleRender();
 			}
@@ -601,8 +602,8 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 
 			destroy(): void {
 				this.generation++;
-				if (this.frame) cancelAnimationFrame(this.frame);
-				if (this.renderFallback) window.clearTimeout(this.renderFallback);
+				if (this.frame) this.win.cancelAnimationFrame(this.frame);
+				if (this.renderFallback) this.win.clearTimeout(this.renderFallback);
 				this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
 				this.menu?.hide();
 				this.menu = null;
@@ -619,14 +620,14 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 				if (this.frame || this.renderFallback) return;
 				const run = (): void => {
 					if (!this.frame && !this.renderFallback) return;
-					if (this.frame) cancelAnimationFrame(this.frame);
-					if (this.renderFallback) window.clearTimeout(this.renderFallback);
+					if (this.frame) this.win.cancelAnimationFrame(this.frame);
+					if (this.renderFallback) this.win.clearTimeout(this.renderFallback);
 					this.frame = 0;
 					this.renderFallback = 0;
 					this.render();
 				};
-				this.frame = requestAnimationFrame(run);
-				this.renderFallback = window.setTimeout(run, 50);
+				this.frame = this.win.requestAnimationFrame(run);
+				this.renderFallback = this.win.setTimeout(run, 50);
 			}
 
 			private render(): void {

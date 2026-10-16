@@ -242,7 +242,7 @@ class SearchReplacementWidget extends WidgetType {
 	}
 
 	toDOM(): HTMLElement {
-		const span = document.createElement("span");
+		const span = createSpan();
 		span.className = this.className;
 		span.textContent = this.replacement;
 		span.setAttribute("aria-label", this.replacement ? `Replacement: ${this.replacement}` : "Empty replacement");
@@ -515,9 +515,8 @@ export class MdEditor {
 	constructor(parent: HTMLElement, opts: MdEditorOpts) {
 		this.host = parent.createDiv({ cls: "mica-mdeditor" });
 		const root = this.host.attachShadow({ mode: "open" });
-		const mount = document.createElement("div");
-		mount.style.display = "contents";
-		root.appendChild(mount);
+		const mount = root.createDiv();
+		mount.setCssStyles({ display: "contents" });
 		// CodeMirror normalizes line endings internally unless a separator is
 		// configured. Match the incoming text so editing a stored CRLF version
 		// cannot silently rewrite it as LF on save.
@@ -619,7 +618,7 @@ export class MdEditor {
 		// clicks below the shadow's content never reach a shadow-internal
 		// listener, and composedPath() still lets us skip real content hits.
 		this.host.addEventListener("mousedown", (e) => {
-			const path = e.composedPath() as HTMLElement[];
+			const path = e.composedPath();
 			if (
 				path.some(
 					(n) =>
@@ -633,7 +632,7 @@ export class MdEditor {
 				return;
 			// Only the scroller's own empty area represents space below the last
 			// line. Scrollbars and unrelated shadow chrome keep their native action.
-			const target = path.find((node) => node instanceof HTMLElement) as HTMLElement | undefined;
+			const target = path.find((node) => node instanceof HTMLElement);
 			if (target !== this.host && !target?.classList.contains("cm-scroller")) return;
 			if (target?.classList.contains("cm-scroller")) {
 				const rect = target.getBoundingClientRect();

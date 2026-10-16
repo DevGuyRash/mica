@@ -4,14 +4,32 @@ This is the human decision gate for the Obsidian plugin and CLI. Automation
 checks reproducible facts; the release owner records the external evidence that
 CI cannot produce.
 
+## Update delivery
+
+This is a manual release process. Source pushes, local builds and CI artifact
+uploads do not publish a plugin update. A published GitHub Release with the
+matching version tag and runtime attachments is what Obsidian distributes.
+The existing workflow files contain verification/artifact jobs, not a GitHub
+Release publisher. Use local verification within the user's authorized scope;
+this procedure does not require enabling hosted Actions.
+
+Only the initial Community directory submission is needed. Subsequent versions
+are delivered through new GitHub Releases. Installed community plugins do not
+update automatically: users select **Settings → Community plugins → Check for
+updates**, then **Update** or **Update all**.
+
 ## 1. Establish a release candidate
 
 WHEN you prepare a release candidate THEN you SHALL use one commit for every
 automated and manual check below.
 
 WHEN you choose the release version THEN you SHALL set the same version in
-`package.json`, `manifest.json`, the Rust workspace package metadata, and the
-corresponding `versions.json` key.
+`package.json`, `manifest.json`, the Rust workspace package metadata, the
+`mica-core` and `mica-cli` entries in `Cargo.lock`, and the corresponding
+`versions.json` key. Preserve historical released mappings in `versions.json`.
+Use `x.y.z` semantic versions. There is no package version lifecycle hook that
+synchronizes these files; `npm version` or `pnpm version` alone is insufficient
+and may create a tag before the candidate is ready.
 
 WHEN you choose `minAppVersion` THEN you SHALL map that exact value from the
 release version in `versions.json`.
@@ -51,8 +69,10 @@ pnpm run smoke
 xvfb-run -a pnpm run e2e
 ```
 
-WHEN the default gate passes THEN you SHALL run the GitHub `Compatibility`
-workflow for both the `minimum` and `mobile` profiles on the same commit.
+WHEN the default gate passes THEN you SHALL run the existing local
+`pnpm run e2e:minimum` and `pnpm run e2e:mobile` profiles on the same commit.
+`pnpm run e2e:latest` is the existing advisory moving-latest canary. A hosted
+workflow definition does not establish that any of these checks ran.
 
 IF the minimum-app profile fails THEN you SHALL fix compatibility or raise
 `minAppVersion` before release.
@@ -104,6 +124,23 @@ WHEN publishing the CLI from the same tag THEN you SHALL build it from the same
 commit and SHALL NOT combine it with plugin artifacts built from another
 revision.
 
+WHEN building plugin assets THEN you SHALL use the existing `pnpm run build`,
+which rebuilds WASM before the production JavaScript bundle. The build maps
+source, user home, Cargo home and Rustup home to fixed WASM paths, including
+overridden cache homes, while preserving Rust flag precedence and explicitly
+empty encoded flags. Reproduce with the pinned toolchain and locked dependencies
+and compare `main.js` bytes with the selected release; path remapping alone does
+not establish equality. The public default branch's committed root manifest and
+source SHALL match the selected release candidate. Demo files, private settings/evidence and standalone CLI binaries
+are separate from the three Obsidian runtime attachments.
+
+WHEN publication finishes THEN you SHALL download the three release attachments
+and compare their bytes and SHA-256 hashes with the reviewed candidate; verify
+the tag target and public release access. A workflow artifact upload is not a
+GitHub Release attachment. Record build, publication, installation, activation
+and directory review separately.
+
+
 WHEN the release assets exist THEN you SHALL install those assets, rather than a
 development symlink, into a clean vault and smoke-test block creation, tabs,
 grids, editing, the versions timeline, restore, and the CLI against that vault.
@@ -138,3 +175,10 @@ vault smoke test using the community-installed copy.
 IF a release check fails after publication THEN you SHALL preserve the failed
 artifacts and evidence, publish a corrected version, and SHALL NOT replace assets
 under an existing tag.
+
+## Official references
+
+- [Submission and later releases](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin)
+- [Manifest](https://docs.obsidian.md/Reference/Manifest)
+- [Official sample: release metadata and versions.json](https://github.com/obsidianmd/obsidian-sample-plugin#releasing-new-releases)
+- [Community plugin updates](https://obsidian.md/help/Extending%2BObsidian/Community%2Bplugins)

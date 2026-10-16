@@ -79,9 +79,9 @@ function showRevertNotice(
 	headHash: string,
 	bridge: VersionMutationBridge,
 ): void {
-	const message = document.createDocumentFragment();
+	const message = createFragment();
 	message.append("Mica: reverted to HEAD. ");
-	const undo = document.createElement("button");
+	const undo = createEl("button");
 	undo.type = "button";
 	undo.className = "mica-undo-btn";
 	undo.textContent = "Undo";

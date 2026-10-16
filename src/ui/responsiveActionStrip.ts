@@ -39,6 +39,7 @@ function observer(): ResizeObserver {
 
 function styleObserver(): MutationObserver {
 	sharedStyleObserver ??= new MutationObserver((entries) => {
+		// Only Element keys from widthSubscribers are registered with this observer.
 		for (const entry of entries)
 			for (const subscriber of widthSubscribers.get(entry.target as Element) ?? []) subscriber();
 	});
@@ -114,7 +115,7 @@ export function mountResponsiveActionStrip(
 		options.app,
 	);
 	menu.button.dataset.micaResponsiveRole = "overflow";
-	menu.button.style.display = "none";
+	menu.button.setCssStyles({ display: "none" });
 	const initialActionIds = initialActions.map((action) => action.id).join(" ");
 	root.dataset.micaActionStrip = initialActionIds;
 	menu.button.dataset.micaActions = initialActionIds;
@@ -203,8 +204,8 @@ export function mountResponsiveActionStrip(
 		const gap = Number.parseFloat(getComputedStyle(root).gap) || 0;
 		if (forceMeasure) {
 			root.addClass("is-measuring");
-			for (const button of directButtons.values()) button.style.display = "inline-flex";
-			menu.button.style.display = "inline-flex";
+			for (const button of directButtons.values()) button.setCssStyles({ display: "inline-flex" });
+			menu.button.setCssStyles({ display: "inline-flex" });
 		}
 		const menuWidth = menu.button.getBoundingClientRect().width || menu.button.offsetWidth || 30;
 		const candidates: ResponsiveActionCandidate[] = [];

@@ -117,7 +117,7 @@ function buildToolbarOnce(
 		attr: { type: "button", "aria-label": "More tools…" },
 	});
 	setIcon(more, "chevrons-right");
-	more.style.display = "none";
+	more.setCssStyles({ display: "none" });
 	const restorePieceOrder = (): void => {
 		for (const piece of pieces) bar.insertBefore(piece.el, more);
 	};
@@ -130,14 +130,14 @@ function buildToolbarOnce(
 				panel.addClass("mica-overflow-panel");
 				// Relocate the REAL elements (their handlers travel with them).
 				for (const el of hidden) {
-					el.style.display = "";
+					el.setCssStyles({ display: "" });
 					panel.appendChild(el);
 				}
 			},
 			() => {
 				// The panel is about to be removed — bring the pieces home
 				// (still overflowed, so hidden until the bar grows).
-				for (const el of hidden) el.style.display = "none";
+				for (const el of hidden) el.setCssStyles({ display: "none" });
 				restorePieceOrder();
 			},
 			more,
@@ -169,9 +169,9 @@ function buildToolbarOnce(
 			if (geometryDirty) {
 				// Restore in source order and measure synchronously before paint. This
 				// avoids zero widths from display:none without a second visible frame.
-				for (const piece of pieces) piece.el.style.display = "";
+				for (const piece of pieces) piece.el.setCssStyles({ display: "" });
 				restorePieceOrder();
-				more.style.display = "";
+				more.setCssStyles({ display: "" });
 				for (let i = 0; i < pieces.length; i++) {
 					const width = outerWidth(pieces[i].el);
 					measured[i].width = width;
@@ -360,11 +360,11 @@ function openPopover(
 	opener?.setAttribute("aria-haspopup", "dialog");
 	opener?.setAttribute("aria-expanded", "true");
 	const r = bar.getBoundingClientRect();
-	panel.style.position = "fixed";
+	panel.setCssStyles({ position: "fixed" });
 	panel.style.left = `${Math.min(Math.max(8, r.left), window.innerWidth - 356)}px`;
 	panel.style.top = `${Math.min(r.bottom + 4, window.innerHeight - 120)}px`;
 	panel.style.maxHeight = `${Math.max(120, window.innerHeight - r.bottom - 20)}px`;
-	panel.style.overflowY = "auto";
+	panel.setCssStyles({ overflowY: "auto" });
 	let closed = false;
 	let restoreFocus = false;
 	const close = (): void => {

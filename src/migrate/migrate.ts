@@ -68,7 +68,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 		const staged = result as ReturnType<typeof migrateTabs> | null;
 		if (!staged?.changed) return null;
 
-		const existingNoteId = plugin.app.metadataCache.getFileCache(file)?.frontmatter?.["mica-id"];
+		const existingNoteId: unknown = plugin.app.metadataCache.getFileCache(file)?.frontmatter?.["mica-id"];
 		const finalized = ensureMicaId(staged.doc, typeof existingNoteId === "string" ? existingNoteId : null);
 		await ensureSidecar(vault, file);
 		const originalHash = hashContent(original);

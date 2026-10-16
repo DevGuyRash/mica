@@ -1,6 +1,7 @@
 import type { VersionLookupRow } from "./versionWindow";
 
-export type VersionBaseMode = "auto" | "head" | string;
+/** "auto" and "head" are special selectors; other strings name a version. */
+export type VersionBaseMode = string;
 export type AutoBaseReason = "current-head" | "parent" | "before-first" | "unavailable-parent";
 
 export interface ResolvedVersionBase {

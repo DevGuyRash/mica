@@ -54,14 +54,14 @@ export const MAX_OBJECT_BYTES = 128 * 1024 * 1024;
 const MAX_COMPRESSED_OBJECT_BYTES = MAX_OBJECT_BYTES + 1024 * 1024;
 
 async function gzipText(text: string): Promise<ArrayBuffer | null> {
-	if (typeof globalThis.CompressionStream !== "function") return null;
+	if (typeof CompressionStream !== "function") return null;
 	const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
 	return new Response(stream).arrayBuffer();
 }
 
 async function gunzipToText(buf: ArrayBuffer): Promise<string> {
-	if (typeof globalThis.DecompressionStream === "function") {
-		const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+	if (typeof DecompressionStream === "function") {
+		const stream = new Blob([buf]).stream().pipeThrough<Uint8Array>(new DecompressionStream("gzip"));
 		const reader = stream.getReader();
 		const chunks: Uint8Array[] = [];
 		let size = 0;
@@ -132,7 +132,7 @@ export async function writeObject(vault: Vault, file: TFile, hash: string, conte
 		return;
 	}
 	try {
-		if (byteLength <= COMPRESS_MIN_BYTES || typeof globalThis.CompressionStream !== "function") {
+		if (byteLength <= COMPRESS_MIN_BYTES || typeof CompressionStream !== "function") {
 			await vault.create(plain, content);
 		} else {
 			const bytes = await gzipText(content);

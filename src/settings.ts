@@ -1,4 +1,13 @@
-import { getIcon, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import {
+	getIcon,
+	Modal,
+	Notice,
+	PluginSettingTab,
+	Setting,
+	setIcon,
+	type SettingDefinitionItem,
+	type SliderComponent,
+} from "obsidian";
 import { ICON_PACKS, requiredAttribution } from "./icons/iconPacks";
 import { forgetIconPack } from "./icons/iconPackRuntime";
 import { builtinTools, DEFAULT_TOOLBAR_LAYOUT, type CustomTool } from "./ui/toolSpec";
@@ -269,17 +278,61 @@ export async function commitSetting(plugin: MicaPlugin, key: keyof MicaSettings)
 	await plugin.saveSettings();
 }
 
+interface MicaSettingDefinition {
+	name: string;
+	desc: string;
+	render: (setting: Setting) => void;
+}
+
+interface MicaSettingGroup {
+	type: "group";
+	heading: string;
+	items: MicaSettingDefinition[];
+}
+
+/** Current hosts show slider values inline; retain native value feedback on 1.12.7. */
+function showSliderValue(slider: SliderComponent): void {
+	const updateTitle = (): void => {
+		slider.sliderEl.title = slider.getValuePretty();
+	};
+	updateTitle();
+	slider.sliderEl.addEventListener("input", updateTitle);
+}
+
 export class MicaSettingTab extends PluginSettingTab {
 	constructor(private readonly micaPlugin: MicaPlugin) {
 		super(micaPlugin.app, micaPlugin);
+	}
+
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return this.settingGroups();
+	}
+
+	/** Compatibility fallback for Obsidian before 1.13. */
+	display(): void {
+		this.renderLegacySettings();
+	}
+
+	private renderLegacySettings(): void {
+		this.containerEl.empty();
+		for (const group of this.settingGroups()) {
+			new Setting(this.containerEl).setHeading().setName(group.heading);
+			for (const item of group.items) {
+				item.render(new Setting(this.containerEl).setName(item.name).setDesc(item.desc));
+			}
+		}
+	}
+
+	private refreshSettings(): void {
+		if (typeof this.update === "function") this.update();
+		else this.renderLegacySettings();
 	}
 
 	/** The accent as a hex for the color picker: the user's override if set, else
 	 * the theme/Obsidian accent resolved to a concrete color via a probe element. */
 	private resolvedAccent(): string {
 		if (this.micaPlugin.settings.accentColor) return this.micaPlugin.settings.accentColor;
-		const probe = document.body.createSpan();
-		probe.style.color = "var(--mica-accent)";
+		const probe = document.body.createSpan({ cls: "mica-settings-accent-probe" });
 		const rgb = getComputedStyle(probe).color;
 		probe.remove();
 		const m = rgb.match(/\d+/g);
@@ -291,90 +344,106 @@ export class MicaSettingTab extends PluginSettingTab {
 	}
 
 	/** Grouped by intent: Versioning, Comparing, Appearance, Migration. Knobs that
-	 * only matter when a toggle is on are hidden until then, and fine-grained
-	 * visual tuning is left to CSS variables rather than a wall of sliders. */
-	display(): void {
-		const { containerEl } = this;
+	 * only matter when a toggle is on are hidden until then. Metadata is shared
+	 * with the legacy renderer; callbacks retain each setting’s lifecycle effects. */
+	private settingGroups(): MicaSettingGroup[] {
 		const s = this.micaPlugin.settings;
 		const commit = (key: keyof MicaSettings): Promise<void> => commitSetting(this.micaPlugin, key);
-		containerEl.empty();
+		const groups: MicaSettingGroup[] = [];
+		let items: MicaSettingDefinition[] = [];
+		const group = (heading: string): void => {
+			items = [];
+			groups.push({ type: "group", heading, items });
+		};
+		const add = (name: string, desc: string, render: (setting: Setting) => void = () => undefined): void => {
+			items.push({ name, desc, render });
+		};
 
 		// ---------- Versioning ----------
-		new Setting(containerEl).setHeading().setName("Versioning");
+		group("Versioning");
 
-		new Setting(containerEl)
-			.setName("Auto-save versions")
-			.setDesc(
-				"Snapshot a version as you edit content. Structural changes — adding empty tabs or cells, reordering, renaming — never create a version; only real edits do. Also toggleable per session from the dot in each block's footer.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.autoSnapshotEnabled).onChange(async (v) => {
-					s.autoSnapshotEnabled = v;
-					await commit("autoSnapshotEnabled");
-					this.display(); // reveal/hide the interval knob
-				}),
-			);
+		add(
+			"Auto-save versions",
+			"Snapshot a version as you edit content. Structural changes — adding empty tabs or cells, reordering, renaming — never create a version; only real edits do. Also toggleable per session from the dot in each block's footer.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.autoSnapshotEnabled).onChange(async (v) => {
+						s.autoSnapshotEnabled = v;
+						await commit("autoSnapshotEnabled");
+						this.refreshSettings(); // reveal/hide the interval knob
+					}),
+				);
+			},
+		);
 
 		if (s.autoSnapshotEnabled) {
-			new Setting(containerEl)
-				.setName("Idle before saving")
-				.setDesc("How long after you stop editing before a version is saved (seconds).")
-				.addSlider((sl) =>
-					sl
-						.setLimits(1, 15, 1)
-						.setValue(Math.round(s.snapshotDebounceMs / 1000))
-						.setDynamicTooltip()
-						.onChange(async (v) => {
-							s.snapshotDebounceMs = v * 1000;
-							await commit("snapshotDebounceMs");
-						}),
-				);
+			add(
+				"Idle before saving",
+				"How long after you stop editing before a version is saved (seconds).",
+				(setting) => {
+					setting.addSlider((sl) =>
+						sl
+							.setLimits(1, 15, 1)
+							.setValue(Math.round(s.snapshotDebounceMs / 1000))
+							.then(showSliderValue)
+							.onChange(async (v) => {
+								s.snapshotDebounceMs = v * 1000;
+								await commit("snapshotDebounceMs");
+							}),
+					);
+				},
+			);
 		}
 
-		new Setting(containerEl)
-			.setName("Auto-add block ids")
-			.setDesc(
-				"Stamp a stable id onto each block shortly after you edit, so history and inline editing work without running a command.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.autoAddIds).onChange(async (v) => {
-					s.autoAddIds = v;
-					await commit("autoAddIds");
-				}),
-			);
+		add(
+			"Auto-add block ids",
+			"Stamp a stable id onto each block shortly after you edit, so history and inline editing work without running a command.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.autoAddIds).onChange(async (v) => {
+						s.autoAddIds = v;
+						await commit("autoAddIds");
+					}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Reconcile history on startup")
-			.setDesc("On vault open, re-home version histories whose notes were renamed or moved, and report orphans.")
-			.addToggle((t) =>
-				t.setValue(s.reconcileOnLoad).onChange(async (v) => {
-					s.reconcileOnLoad = v;
-					await commit("reconcileOnLoad");
-				}),
-			);
+		add(
+			"Reconcile history on startup",
+			"On vault open, re-home version histories whose notes were renamed or moved, and report orphans.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.reconcileOnLoad).onChange(async (v) => {
+						s.reconcileOnLoad = v;
+						await commit("reconcileOnLoad");
+					}),
+				);
+			},
+		);
 
 		// ---------- Comparing ----------
-		new Setting(containerEl).setHeading().setName("Comparing");
+		group("Comparing");
 
-		new Setting(containerEl)
-			.setName("Highlight changes within lines")
-			.setDesc("Meld-style sub-line emphasis on changed lines: by word, by character, or off.")
-			.addDropdown((d) =>
-				d
-					.addOption("word", "Word")
-					.addOption("char", "Character")
-					.addOption("none", "Off")
-					.setValue(s.diffRefine)
-					.onChange(async (v) => {
-						s.diffRefine = v as MicaSettings["diffRefine"];
-						await commit("diffRefine");
-					}),
-			);
+		add(
+			"Highlight changes within lines",
+			"Meld-style sub-line emphasis on changed lines: by word, by character, or off.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("word", "Word")
+						.addOption("char", "Character")
+						.addOption("none", "Off")
+						.setValue(s.diffRefine)
+						.onChange(async (v) => {
+							s.diffRefine = v as MicaSettings["diffRefine"];
+							await commit("diffRefine");
+						}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Default layout")
-			.setDesc("How the compare view first arranges the two versions.")
-			.addDropdown((d) =>
+		add("Default layout", "How the compare view first arranges the two versions.", (setting) => {
+			setting.addDropdown((d) =>
 				d
 					.addOption("inline", "Inline")
 					.addOption("side-by-side", "Side by side")
@@ -385,40 +454,47 @@ export class MicaSettingTab extends PluginSettingTab {
 						await commit("defaultDiffMode");
 					}),
 			);
+		});
 
-		new Setting(containerEl)
-			.setName("Show exact version times")
-			.setDesc("Append the local date and time to each relative age in version history.")
-			.addToggle((t) =>
-				t.setValue(s.showVersionExactTimestamps).onChange(async (v) => {
-					s.showVersionExactTimestamps = v;
-					await commit("showVersionExactTimestamps");
-				}),
-			);
+		add(
+			"Show exact version times",
+			"Append the local date and time to each relative age in version history.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.showVersionExactTimestamps).onChange(async (v) => {
+						s.showVersionExactTimestamps = v;
+						await commit("showVersionExactTimestamps");
+					}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Hide mica syntax in diffs")
-			.setDesc("Ignore layout lines (:::, tab:) when comparing — only real content differences show.")
-			.addToggle((t) =>
-				t.setValue(s.diffHideSyntax).onChange(async (v) => {
-					s.diffHideSyntax = v;
-					await commit("diffHideSyntax");
-				}),
-			);
+		add(
+			"Hide mica syntax in diffs",
+			"Ignore layout lines (:::, tab:) when comparing — only real content differences show.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.diffHideSyntax).onChange(async (v) => {
+						s.diffHideSyntax = v;
+						await commit("diffHideSyntax");
+					}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Ignore whitespace in diffs")
-			.setDesc("Collapse runs of spaces and tabs before comparing.")
-			.addToggle((t) =>
+		add("Ignore whitespace in diffs", "Collapse runs of spaces and tabs before comparing.", (setting) => {
+			setting.addToggle((t) =>
 				t.setValue(s.diffIgnoreWs).onChange(async (v) => {
 					s.diffIgnoreWs = v;
 					await commit("diffIgnoreWs");
 				}),
 			);
+		});
 
 		// ---------- Appearance ----------
-		new Setting(containerEl).setHeading().setName("Icon packs");
-		new Setting(containerEl).setDesc(
+		group("Icon packs");
+		add(
+			"",
 			"Obsidian's built-in icons are always available. Extra packs are downloaded from jsDelivr the first time you use one, and only while enabled.",
 		);
 		for (const pack of ICON_PACKS) {
@@ -426,85 +502,93 @@ export class MicaSettingTab extends PluginSettingTab {
 				? `${Math.round(pack.approxBytes / 1024)} KB, loaded once`
 				: "loaded one icon at a time";
 			const credit = pack.license.attribution ? " · credit shown with the icons" : "";
-			new Setting(containerEl)
-				.setName(pack.name)
-				.setDesc(`${pack.license.spdx} · ${size}${credit}${pack.license.note ? ` · ${pack.license.note}` : ""}`)
-				.addToggle((toggle) =>
-					toggle.setValue(s.enabledIconPacks.includes(pack.id)).onChange(async (on) => {
-						const next = new Set(s.enabledIconPacks);
-						if (on) next.add(pack.id);
-						else {
-							next.delete(pack.id);
-							// Disabling releases whatever the pack had loaded.
-							forgetIconPack(pack.id);
-						}
-						s.enabledIconPacks = [...next];
-						await commitSetting(this.micaPlugin, "enabledIconPacks");
-						this.display();
-					}),
-				);
+			add(
+				pack.name,
+				`${pack.license.spdx} · ${size}${credit}${pack.license.note ? ` · ${pack.license.note}` : ""}`,
+				(setting) => {
+					setting.addToggle((toggle) =>
+						toggle.setValue(s.enabledIconPacks.includes(pack.id)).onChange(async (on) => {
+							const next = new Set(s.enabledIconPacks);
+							if (on) next.add(pack.id);
+							else {
+								next.delete(pack.id);
+								// Disabling releases whatever the pack had loaded.
+								forgetIconPack(pack.id);
+							}
+							s.enabledIconPacks = [...next];
+							await commitSetting(this.micaPlugin, "enabledIconPacks");
+							this.refreshSettings();
+						}),
+					);
+				},
+			);
 		}
 		const credits = requiredAttribution(s.enabledIconPacks);
-		if (credits.length)
-			new Setting(containerEl)
-				.setName("Attribution")
-				.setDesc(`${credits.join(" · ")} — required by these packs' licences.`);
+		if (credits.length) add("Attribution", `${credits.join(" · ")} — required by these packs' licences.`);
 
-		new Setting(containerEl).setHeading().setName("Appearance");
+		group("Appearance");
 
-		new Setting(containerEl)
-			.setName("Theme")
-			.setDesc(
-				"A named look. Each sets an accent that retints the whole block; “Match Obsidian” follows your theme's accent.",
-			);
-		const gallery = containerEl.createDiv({ cls: "mica-theme-gallery" });
-		const paintGallery = (): void => {
-			gallery.empty();
-			for (const t of MICA_THEMES) {
-				const card = gallery.createEl("button", {
-					cls: `mica-theme-card mica-theme-${t.id} ${s.theme === t.id ? "is-on" : ""}`,
-					attr: { type: "button", "aria-label": `Use the ${t.name} theme` },
-				});
-				const mini = card.createDiv({ cls: "mica-theme-mini" });
-				const tabs = mini.createDiv({ cls: "mica-theme-mini-tabs" });
-				tabs.createSpan({ cls: "is-active" });
-				tabs.createSpan();
-				tabs.createSpan();
-				mini.createDiv({ cls: "mica-theme-mini-body" });
-				card.createDiv({ cls: "mica-theme-card-name", text: t.name });
-				card.addEventListener("click", async () => {
-					s.theme = t.id;
-					await commit("theme");
+		add(
+			"Theme",
+			"A named look. Each sets an accent that retints the whole block; “Match Obsidian” follows your theme's accent.",
+			(setting) => {
+				setting.setClass("mica-setting-stack").then((setting) => {
+					const gallery = setting.settingEl.createDiv({ cls: "mica-theme-gallery" });
+					const paintGallery = (): void => {
+						gallery.empty();
+						for (const t of MICA_THEMES) {
+							const card = gallery.createEl("button", {
+								cls: `mica-theme-card mica-theme-${t.id} ${s.theme === t.id ? "is-on" : ""}`,
+								attr: { type: "button", "aria-label": `Use the ${t.name} theme` },
+							});
+							const mini = card.createDiv({ cls: "mica-theme-mini" });
+							const tabs = mini.createDiv({ cls: "mica-theme-mini-tabs" });
+							tabs.createSpan({ cls: "is-active" });
+							tabs.createSpan();
+							tabs.createSpan();
+							mini.createDiv({ cls: "mica-theme-mini-body" });
+							card.createDiv({ cls: "mica-theme-card-name", text: t.name });
+							card.addEventListener("click", () => {
+								s.theme = t.id;
+								void commit("theme").then(paintGallery).catch((error: unknown) => {
+									const detail = error instanceof Error ? error.message : String(error);
+									console.error("Mica: could not update theme", error);
+									new Notice(`Mica: could not update theme — ${detail}`);
+								});
+							});
+						}
+					};
 					paintGallery();
 				});
-			}
-		};
-		paintGallery();
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Accent color")
-			.setDesc("Override the theme's accent — it drives tabs, borders, and state. Reset to follow the theme.")
-			.addColorPicker((c) =>
-				c.setValue(this.resolvedAccent()).onChange(async (v) => {
-					s.accentColor = v;
-					await commit("accentColor");
-				}),
-			)
-			.addExtraButton((b) =>
-				b
-					.setIcon("rotate-ccw")
-					.setTooltip("Follow the theme's accent")
-					.onClick(async () => {
-						s.accentColor = "";
-						await commit("accentColor");
-						this.display();
-					}),
-			);
+		add(
+			"Accent color",
+			"Override the theme's accent — it drives tabs, borders, and state. Reset to follow the theme.",
+			(setting) => {
+				setting
+					.addColorPicker((c) =>
+						c.setValue(this.resolvedAccent()).onChange(async (v) => {
+							s.accentColor = v;
+							await commit("accentColor");
+						}),
+					)
+					.addExtraButton((b) =>
+						b
+							.setIcon("rotate-ccw")
+							.setTooltip("Follow the theme's accent")
+							.onClick(async () => {
+								s.accentColor = "";
+								await commit("accentColor");
+								this.refreshSettings();
+							}),
+					);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Density")
-			.setDesc("Comfortable or compact padding and control sizes.")
-			.addDropdown((d) =>
+		add("Density", "Comfortable or compact padding and control sizes.", (setting) => {
+			setting.addDropdown((d) =>
 				d
 					.addOption("comfortable", "Comfortable")
 					.addOption("compact", "Compact")
@@ -514,469 +598,527 @@ export class MicaSettingTab extends PluginSettingTab {
 						await commit("density");
 					}),
 			);
+		});
 
-		new Setting(containerEl)
-			.setName("Corner radius")
-			.setDesc("Roundness of the block's corners (px).")
-			.addSlider((sl) =>
+		add("Corner radius", "Roundness of the block's corners (px).", (setting) => {
+			setting.addSlider((sl) =>
 				sl
 					.setLimits(0, 20, 1)
 					.setValue(s.cardRadiusPx)
-					.setDynamicTooltip()
+					.then(showSliderValue)
 					.onChange(async (v) => {
 						s.cardRadiusPx = v;
 						await commit("cardRadiusPx");
 					}),
 			);
+		});
 
-		new Setting(containerEl)
-			.setName("Tab style")
-			.setDesc("How the active tab is drawn: connected to its panel, a minimal underline, or a filled pill.")
-			.addDropdown((d) =>
-				d
-					.addOption("connected", "Connected")
-					.addOption("underline", "Underline")
-					.addOption("pill", "Pill")
-					.setValue(s.tabStyle)
-					.onChange(async (v) => {
-						s.tabStyle = v as MicaTabStyle;
-						await commit("tabStyle");
-					}),
-			);
+		add(
+			"Tab style",
+			"How the active tab is drawn: connected to its panel, a minimal underline, or a filled pill.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("connected", "Connected")
+						.addOption("underline", "Underline")
+						.addOption("pill", "Pill")
+						.setValue(s.tabStyle)
+						.onChange(async (v) => {
+							s.tabStyle = v as MicaTabStyle;
+							await commit("tabStyle");
+						}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Block header")
-			.setDesc("The per-block bar with the name and action menu: show on hover, always, or never.")
-			.addDropdown((d) =>
-				d
-					.addOption("hover", "On hover")
-					.addOption("always", "Always")
-					.addOption("never", "Never")
-					.setValue(s.blockHeaderMode)
-					.onChange(async (v) => {
-						s.blockHeaderMode = v as MicaSettings["blockHeaderMode"];
-						await commit("blockHeaderMode");
-					}),
-			);
+		add(
+			"Block header",
+			"The per-block bar with the name and action menu: show on hover, always, or never.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("hover", "On hover")
+						.addOption("always", "Always")
+						.addOption("never", "Never")
+						.setValue(s.blockHeaderMode)
+						.onChange(async (v) => {
+							s.blockHeaderMode = v as MicaSettings["blockHeaderMode"];
+							await commit("blockHeaderMode");
+						}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Hover tools position")
-			.setDesc("Which corner a section's drag grip and action menu (and a cell's controls) appear in.")
-			.addDropdown((d) =>
-				d
-					.addOption("right", "Top right")
-					.addOption("left", "Top left")
-					.setValue(s.dragHandlePosition)
-					.onChange(async (v) => {
-						s.dragHandlePosition = v as MicaSettings["dragHandlePosition"];
-						await commit("dragHandlePosition");
-					}),
-			);
+		add(
+			"Hover tools position",
+			"Which corner a section's drag grip and action menu (and a cell's controls) appear in.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("right", "Top right")
+						.addOption("left", "Top left")
+						.setValue(s.dragHandlePosition)
+						.onChange(async (v) => {
+							s.dragHandlePosition = v as MicaSettings["dragHandlePosition"];
+							await commit("dragHandlePosition");
+						}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Action menus")
-			.setDesc(
-				"Open section, grid, cell, and tab ellipsis menus on click or after a short hover. Click always works.",
-			)
-			.addDropdown((d) =>
-				d
-					.addOption("click", "Click")
-					.addOption("hover", "Hover")
-					.setValue(s.actionMenuTrigger)
-					.onChange(async (v) => {
-						s.actionMenuTrigger = v as MicaSettings["actionMenuTrigger"];
-						await commit("actionMenuTrigger");
-					}),
-			);
+		add(
+			"Action menus",
+			"Open section, grid, cell, and tab ellipsis menus on click or after a short hover. Click always works.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("click", "Click")
+						.addOption("hover", "Hover")
+						.setValue(s.actionMenuTrigger)
+						.onChange(async (v) => {
+							s.actionMenuTrigger = v as MicaSettings["actionMenuTrigger"];
+							await commit("actionMenuTrigger");
+						}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Rendered action layout")
-			.setDesc(
-				"Show copy, edit, fold, and other actions directly when they fit, or always keep secondary actions in the three-dot menu. Tabs are always menu-only; drag stays direct.",
-			)
-			.addDropdown((d) =>
-				d
-					.addOption("responsive", "Responsive")
-					.addOption("menu-only", "Always use three-dot menu")
-					.setValue(s.entityActionLayout)
-					.onChange(async (v) => {
-						s.entityActionLayout = v as MicaSettings["entityActionLayout"];
-						await commit("entityActionLayout");
-					}),
-			);
+		add(
+			"Rendered action layout",
+			"Show copy, edit, fold, and other actions directly when they fit, or always keep secondary actions in the three-dot menu. Tabs are always menu-only; drag stays direct.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("responsive", "Responsive")
+						.addOption("menu-only", "Always use three-dot menu")
+						.setValue(s.entityActionLayout)
+						.onChange(async (v) => {
+							s.entityActionLayout = v as MicaSettings["entityActionLayout"];
+							await commit("entityActionLayout");
+						}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Show tab action dots on hover")
-			.setDesc(
-				"Reveal each tab’s three-dot action menu on hover or keyboard focus. Right-click and keyboard context-menu access remain available when disabled.",
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(s.showTabActionMenuOnHover).onChange(async (value) => {
-					s.showTabActionMenuOnHover = value;
-					await commit("showTabActionMenuOnHover");
-				}),
-			);
-
-		const sectionActionsSetting = new Setting(containerEl)
-			.setClass("mica-setting-stack")
-			.setName("Section actions")
-			.setDesc(
-				"Choose which commands appear on text, callout, code, and combined sections. Drag and drop is always available and is not part of this list.",
-			);
-		this.renderSectionActionEditor(sectionActionsSetting.controlEl);
-
-		new Setting(containerEl)
-			.setName("Animations")
-			.setDesc(
-				"Subtle motion on tab switches and version saves. Always off if your system prefers reduced motion.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.animations).onChange(async (v) => {
-					s.animations = v;
-					await commit("animations");
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Version chip on blocks")
-			.setDesc("Show the history-count chip (and unsaved-changes dot) in each block's footer.")
-			.addToggle((t) =>
-				t.setValue(s.showVersionChip).onChange(async (v) => {
-					s.showVersionChip = v;
-					await commit("showVersionChip");
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Controls for long blocks")
-			.setDesc(
-				"Keep navigation and version status reachable while scrolling a very tall Mica block, show only jump controls, or leave controls at the block edges.",
-			)
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("contextual", "Contextual status dock")
-					.addOption("jumps-only", "Jump controls only")
-					.addOption("off", "Off")
-					.setValue(s.longBlockControls)
-					.onChange(async (value) => {
-						s.longBlockControls = value as MicaSettings["longBlockControls"];
-						await commit("longBlockControls");
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Dock clipboard target")
-			.setDesc(
-				"Follow the stable reading context, always copy the whole block, or change scope only through the dock picker.",
-			)
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("contextual", "Follow reading context")
-					.addOption("block", "Always copy the whole block")
-					.addOption("manual", "Manual scope only")
-					.setValue(s.dockCopyTargetMode)
-					.onChange(async (value) => {
-						s.dockCopyTargetMode = value as DockCopyTargetMode;
-						await commit("dockCopyTargetMode");
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Floating dock surface")
-			.setDesc(
-				"Choose an opaque Obsidian surface, the current frosted treatment, a block-accent tint, or custom colors.",
-			)
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("theme", "Theme surface")
-					.addOption("frosted", "Frosted glass")
-					.addOption("accent", "Block accent")
-					.addOption("custom", "Custom colors")
-					.setValue(s.dockSurface)
-					.onChange(async (value) => {
-						s.dockSurface = value as DockSurfaceMode;
-						await commit("dockSurface");
-						this.display();
-					}),
-			);
-
-		if (s.dockSurface === "custom") {
-			new Setting(containerEl)
-				.setName("Custom dock colors")
-				.setDesc("Background and foreground for the floating dock. The preview warns when contrast is low.")
-				.addColorPicker((picker) =>
-					picker.setValue(s.dockCustomBackground).onChange(async (value) => {
-						s.dockCustomBackground = value;
-						await commit("dockCustomBackground");
-						this.paintDockContrast(containerEl);
-					}),
-				)
-				.addColorPicker((picker) =>
-					picker.setValue(s.dockCustomForeground).onChange(async (value) => {
-						s.dockCustomForeground = value;
-						await commit("dockCustomForeground");
-						this.paintDockContrast(containerEl);
+		add(
+			"Show tab action dots on hover",
+			"Reveal each tab’s three-dot action menu on hover or keyboard focus. Right-click and keyboard context-menu access remain available when disabled.",
+			(setting) => {
+				setting.addToggle((toggle) =>
+					toggle.setValue(s.showTabActionMenuOnHover).onChange(async (value) => {
+						s.showTabActionMenuOnHover = value;
+						await commit("showTabActionMenuOnHover");
 					}),
 				);
-			const preview = containerEl.createDiv({ cls: "mica-dock-settings-preview" });
-			preview.createSpan({ text: "Scope · Active tab" });
-			const contrast = preview.createSpan({ cls: "mica-dock-contrast", attr: { "aria-live": "polite" } });
-			contrast.dataset.micaDockContrast = "1";
-			this.paintDockContrast(containerEl);
+			},
+		);
+
+		add(
+			"Section actions",
+			"Choose which commands appear on text, callout, code, and combined sections. Drag and drop is always available and is not part of this list.",
+			(setting) => {
+				setting
+					.setClass("mica-setting-stack")
+					.then((setting) => this.renderSectionActionEditor(setting.controlEl));
+			},
+		);
+
+		add(
+			"Animations",
+			"Subtle motion on tab switches and version saves. Always off if your system prefers reduced motion.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.animations).onChange(async (v) => {
+						s.animations = v;
+						await commit("animations");
+					}),
+				);
+			},
+		);
+
+		add(
+			"Version chip on blocks",
+			"Show the history-count chip (and unsaved-changes dot) in each block's footer.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.showVersionChip).onChange(async (v) => {
+						s.showVersionChip = v;
+						await commit("showVersionChip");
+					}),
+				);
+			},
+		);
+
+		add(
+			"Controls for long blocks",
+			"Keep navigation and version status reachable while scrolling a very tall Mica block, show only jump controls, or leave controls at the block edges.",
+			(setting) => {
+				setting.addDropdown((dropdown) =>
+					dropdown
+						.addOption("contextual", "Contextual status dock")
+						.addOption("jumps-only", "Jump controls only")
+						.addOption("off", "Off")
+						.setValue(s.longBlockControls)
+						.onChange(async (value) => {
+							s.longBlockControls = value as MicaSettings["longBlockControls"];
+							await commit("longBlockControls");
+						}),
+				);
+			},
+		);
+
+		add(
+			"Dock clipboard target",
+			"Follow the stable reading context, always copy the whole block, or change scope only through the dock picker.",
+			(setting) => {
+				setting.addDropdown((dropdown) =>
+					dropdown
+						.addOption("contextual", "Follow reading context")
+						.addOption("block", "Always copy the whole block")
+						.addOption("manual", "Manual scope only")
+						.setValue(s.dockCopyTargetMode)
+						.onChange(async (value) => {
+							s.dockCopyTargetMode = value as DockCopyTargetMode;
+							await commit("dockCopyTargetMode");
+						}),
+				);
+			},
+		);
+
+		add(
+			"Floating dock surface",
+			"Choose an opaque Obsidian surface, the current frosted treatment, a block-accent tint, or custom colors.",
+			(setting) => {
+				setting.addDropdown((dropdown) =>
+					dropdown
+						.addOption("theme", "Theme surface")
+						.addOption("frosted", "Frosted glass")
+						.addOption("accent", "Block accent")
+						.addOption("custom", "Custom colors")
+						.setValue(s.dockSurface)
+						.onChange(async (value) => {
+							s.dockSurface = value as DockSurfaceMode;
+							await commit("dockSurface");
+							this.refreshSettings();
+						}),
+				);
+			},
+		);
+
+		if (s.dockSurface === "custom") {
+			add(
+				"Custom dock colors",
+				"Background and foreground for the floating dock. The preview warns when contrast is low.",
+				(setting) => {
+					setting
+						.setClass("mica-setting-stack")
+						.addColorPicker((picker) =>
+							picker.setValue(s.dockCustomBackground).onChange(async (value) => {
+								s.dockCustomBackground = value;
+								await commit("dockCustomBackground");
+								this.paintDockContrast(setting.settingEl);
+							}),
+						)
+						.addColorPicker((picker) =>
+							picker.setValue(s.dockCustomForeground).onChange(async (value) => {
+								s.dockCustomForeground = value;
+								await commit("dockCustomForeground");
+								this.paintDockContrast(setting.settingEl);
+							}),
+						)
+						.then((setting) => {
+							const preview = setting.settingEl.createDiv({ cls: "mica-dock-settings-preview" });
+							preview.createSpan({ text: "Scope · Active tab" });
+							const contrast = preview.createSpan({
+								cls: "mica-dock-contrast",
+								attr: { "aria-live": "polite" },
+							});
+							contrast.dataset.micaDockContrast = "1";
+							this.paintDockContrast(setting.settingEl);
+						});
+				},
+			);
 		}
 
-		const dockActions = new Setting(containerEl)
-			.setName("Traveling dock actions")
-			.setDesc(
-				"Choose and order block-wide controls. Hidden actions remain available from their normal block or entity controls.",
-			);
-		dockActions.settingEl.addClass("mica-setting-stack");
-		this.renderDockActionEditor(dockActions.controlEl);
+		add(
+			"Traveling dock actions",
+			"Choose and order block-wide controls. Hidden actions remain available from their normal block or entity controls.",
+			(setting) => {
+				setting
+					.setClass("mica-setting-stack")
+					.then((setting) => this.renderDockActionEditor(setting.controlEl));
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Structural outlines")
-			.setDesc(
-				"Draw subtle borders around tabs, sections, and grid cells so the structure is always visible. Each block can override this via its appearance popover.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.showOutlines).onChange(async (v) => {
-					s.showOutlines = v;
-					await commit("showOutlines");
-				}),
-			);
+		add(
+			"Structural outlines",
+			"Draw subtle borders around tabs, sections, and grid cells so the structure is always visible. Each block can override this via its appearance popover.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.showOutlines).onChange(async (v) => {
+						s.showOutlines = v;
+						await commit("showOutlines");
+					}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Tab spacing")
-			.setDesc("Gap between tab chips in the tab bar.")
-			.addSlider((sl) =>
+		add("Tab spacing", "Gap between tab chips in the tab bar.", (setting) => {
+			setting.addSlider((sl) =>
 				sl
 					.setLimits(0, 24, 1)
 					.setValue(s.tabGapPx)
-					.setDynamicTooltip()
+					.then(showSliderValue)
 					.onChange(async (v) => {
 						s.tabGapPx = v;
 						await commit("tabGapPx");
 					}),
 			);
+		});
 
-		new Setting(containerEl)
-			.setName("Cap content height")
-			.setDesc("Limit a tab or grid cell's height and scroll past it, instead of letting it grow unbounded.")
-			.addToggle((t) =>
-				t.setValue(s.limitContentHeight).onChange(async (v) => {
-					s.limitContentHeight = v;
-					await commit("limitContentHeight");
-					this.display(); // reveal/hide the height knob
-				}),
-			);
+		add(
+			"Cap content height",
+			"Limit a tab or grid cell's height and scroll past it, instead of letting it grow unbounded.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.limitContentHeight).onChange(async (v) => {
+						s.limitContentHeight = v;
+						await commit("limitContentHeight");
+						this.refreshSettings(); // reveal/hide the height knob
+					}),
+				);
+			},
+		);
 
 		if (s.limitContentHeight) {
-			new Setting(containerEl)
-				.setName("Content max height")
-				.setDesc("Height (px) at which a tab/cell starts scrolling.")
-				.addSlider((sl) =>
+			add("Content max height", "Height (px) at which a tab/cell starts scrolling.", (setting) => {
+				setting.addSlider((sl) =>
 					sl
 						.setLimits(120, 1200, 20)
 						.setValue(s.contentMaxHeightPx)
-						.setDynamicTooltip()
+						.then(showSliderValue)
 						.onChange(async (v) => {
 							s.contentMaxHeightPx = v;
 							await commit("contentMaxHeightPx");
 						}),
 				);
+			});
 		}
 
-		new Setting(containerEl).setDesc(
+		add(
+			"",
 			"Finer visual tuning — colors, radii, control sizes — is exposed as CSS custom properties on `body` (see the plugin's styles.css). Override them with the Style Settings plugin or your theme.",
 		);
 
 		// ---------- Copying ----------
-		new Setting(containerEl).setHeading().setName("Copying");
+		group("Copying");
 
-		new Setting(containerEl)
-			.setName("Include Mica layout syntax")
-			.setDesc(
-				"Keep tab, grid, and cell wrapper lines in section copies. Standard Markdown such as callouts and code fences is always preserved.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.copyIncludeMicaSyntax).onChange(async (v) => {
-					s.copyIncludeMicaSyntax = v;
-					await commit("copyIncludeMicaSyntax");
-				}),
-			);
+		add(
+			"Include Mica layout syntax",
+			"Keep tab, grid, and cell wrapper lines in section copies. Standard Markdown such as callouts and code fences is always preserved.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.copyIncludeMicaSyntax).onChange(async (v) => {
+						s.copyIncludeMicaSyntax = v;
+						await commit("copyIncludeMicaSyntax");
+					}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Wrap copies in an outer Mica block")
-			.setDesc(
-				"Put copied content inside a safely sized Mica code fence. The source block id and appearance attributes are never copied.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.copyIncludeOuterContainer).onChange(async (v) => {
-					s.copyIncludeOuterContainer = v;
-					await commit("copyIncludeOuterContainer");
-				}),
-			);
+		add(
+			"Wrap copies in an outer Mica block",
+			"Put copied content inside a safely sized Mica code fence. The source block id and appearance attributes are never copied.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.copyIncludeOuterContainer).onChange(async (v) => {
+						s.copyIncludeOuterContainer = v;
+						await commit("copyIncludeOuterContainer");
+					}),
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Include line numbers")
-			.setDesc("Prefix copied lines with aligned plain-text numbers, such as “10 │ text”.")
-			.addToggle((t) =>
-				t.setValue(s.copyIncludeLineNumbers).onChange(async (v) => {
-					s.copyIncludeLineNumbers = v;
-					await commit("copyIncludeLineNumbers");
-					this.display();
-				}),
-			);
+		add(
+			"Include line numbers",
+			"Prefix copied lines with aligned plain-text numbers, such as “10 │ text”.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.copyIncludeLineNumbers).onChange(async (v) => {
+						s.copyIncludeLineNumbers = v;
+						await commit("copyIncludeLineNumbers");
+						this.refreshSettings();
+					}),
+				);
+			},
+		);
 
 		if (s.copyIncludeLineNumbers) {
-			new Setting(containerEl)
-				.setName("Lines to number")
-				.setDesc("Number authored content only, or every final line including Mica wrappers.")
-				.addDropdown((d) =>
-					d
-						.addOption("content", "Content only")
-						.addOption("output", "Complete copied output")
-						.setValue(s.copyLineNumberScope)
-						.onChange(async (v) => {
-							s.copyLineNumberScope = v as MicaSettings["copyLineNumberScope"];
-							await commit("copyLineNumberScope");
-						}),
-				);
+			add(
+				"Lines to number",
+				"Number authored content only, or every final line including Mica wrappers.",
+				(setting) => {
+					setting.addDropdown((d) =>
+						d
+							.addOption("content", "Content only")
+							.addOption("output", "Complete copied output")
+							.setValue(s.copyLineNumberScope)
+							.onChange(async (v) => {
+								s.copyLineNumberScope = v as MicaSettings["copyLineNumberScope"];
+								await commit("copyLineNumberScope");
+							}),
+					);
+				},
+			);
 		}
 
 		// ---------- Editors ----------
-		new Setting(containerEl).setHeading().setName("Editors");
+		group("Editors");
 
-		new Setting(containerEl)
-			.setName("Clicking outside an editor")
-			.setDesc(
-				"What happens to an open inline editor when you click elsewhere: keep editing, discard, or save & close (also prevents several cells editing at once).",
-			)
-			.addDropdown((d) =>
-				d
-					.addOption("nothing", "Keep editing")
-					.addOption("cancel", "Discard changes")
-					.addOption("save", "Save & close")
-					.setValue(s.editorClickOutside)
-					.onChange(async (v) => {
-						s.editorClickOutside = v as MicaSettings["editorClickOutside"];
-						await commit("editorClickOutside");
+		add(
+			"Clicking outside an editor",
+			"What happens to an open inline editor when you click elsewhere: keep editing, discard, or save & close (also prevents several cells editing at once).",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("nothing", "Keep editing")
+						.addOption("cancel", "Discard changes")
+						.addOption("save", "Save & close")
+						.setValue(s.editorClickOutside)
+						.onChange(async (v) => {
+							s.editorClickOutside = v as MicaSettings["editorClickOutside"];
+							await commit("editorClickOutside");
+						}),
+				);
+			},
+		);
+
+		add(
+			"Editor save shortcut",
+			"The key that saves and closes an editor. New editors, placeholders, and tooltips use the selected shortcut. Esc always cancels.",
+			(setting) => {
+				setting.addDropdown((d) =>
+					d
+						.addOption("mod-enter", "Ctrl/Cmd+Enter")
+						.addOption("mod-s", "Ctrl/Cmd+S")
+						.addOption("shift-enter", "Shift+Enter")
+						.addOption("none", "None (buttons only)")
+						.setValue(s.saveShortcut)
+						.onChange(async (v) => {
+							s.saveShortcut = v as MicaSettings["saveShortcut"];
+							await commit("saveShortcut");
+						}),
+				);
+			},
+		);
+
+		add(
+			"Editor grows with content",
+			"The inline editor expands as you type (up to its max); off = a fixed height with a scrollbar.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.editorAutosize).onChange(async (v) => {
+						s.editorAutosize = v;
+						await commit("editorAutosize");
 					}),
-			);
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Editor save shortcut")
-			.setDesc(
-				"The key that saves and closes an editor. New editors, placeholders, and tooltips use the selected shortcut. Esc always cancels.",
-			)
-			.addDropdown((d) =>
-				d
-					.addOption("mod-enter", "Ctrl/Cmd+Enter")
-					.addOption("mod-s", "Ctrl/Cmd+S")
-					.addOption("shift-enter", "Shift+Enter")
-					.addOption("none", "None (buttons only)")
-					.setValue(s.saveShortcut)
-					.onChange(async (v) => {
-						s.saveShortcut = v as MicaSettings["saveShortcut"];
-						await commit("saveShortcut");
+		add(
+			"Editor max height",
+			"Where the inline editor stops growing and scrolls (px). Drag its corner to resize within this bound.",
+			(setting) => {
+				setting.addSlider((sl) =>
+					sl
+						.setLimits(120, 1200, 20)
+						.setValue(s.editorMaxHeightPx)
+						.then(showSliderValue)
+						.onChange(async (v) => {
+							s.editorMaxHeightPx = v;
+							await commit("editorMaxHeightPx");
+						}),
+				);
+			},
+		);
+
+		add(
+			"Line numbers",
+			"Show line numbers in every Mica source editor: text, cells, combined sections, callouts, code blocks, whole blocks, and version branches. Also toggleable from editor chrome.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.editorLineNumbers).onChange(async (v) => {
+						s.editorLineNumbers = v;
+						await commit("editorLineNumbers");
 					}),
-			);
+				);
+			},
+		);
 
-		new Setting(containerEl)
-			.setName("Editor grows with content")
-			.setDesc("The inline editor expands as you type (up to its max); off = a fixed height with a scrollbar.")
-			.addToggle((t) =>
-				t.setValue(s.editorAutosize).onChange(async (v) => {
-					s.editorAutosize = v;
-					await commit("editorAutosize");
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Editor max height")
-			.setDesc(
-				"Where the inline editor stops growing and scrolls (px). Drag its corner to resize within this bound.",
-			)
-			.addSlider((sl) =>
-				sl
-					.setLimits(120, 1200, 20)
-					.setValue(s.editorMaxHeightPx)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						s.editorMaxHeightPx = v;
-						await commit("editorMaxHeightPx");
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Line numbers")
-			.setDesc(
-				"Show line numbers in every Mica source editor: text, cells, combined sections, callouts, code blocks, whole blocks, and version branches. Also toggleable from editor chrome.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.editorLineNumbers).onChange(async (v) => {
-					s.editorLineNumbers = v;
-					await commit("editorLineNumbers");
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Whitespace characters")
-			.setDesc("Render spaces and tabs visibly in every Mica source editor.")
-			.addToggle((t) =>
+		add("Whitespace characters", "Render spaces and tabs visibly in every Mica source editor.", (setting) => {
+			setting.addToggle((t) =>
 				t.setValue(s.editorWhitespace).onChange(async (v) => {
 					s.editorWhitespace = v;
 					await commit("editorWhitespace");
 				}),
 			);
+		});
 
-		new Setting(containerEl)
-			.setName("Style Markdown while editing")
-			.setDesc(
-				"Keep source markers visible while applying bold, italic, comment, link, quote, and heading styling.",
-			)
-			.addToggle((t) =>
-				t.setValue(s.editorLiveSyntaxStyling).onChange(async (v) => {
-					s.editorLiveSyntaxStyling = v;
-					await commit("editorLiveSyntaxStyling");
-				}),
-			);
-
-		new Setting(containerEl).setHeading().setName("Editor toolbar");
-		new Setting(containerEl).setDesc(
-			"Compose the Markdown authoring ribbon shown in quick editors and full lightboxes. Built-ins remain Markdown-only; custom buttons can target Markdown editors, code editors, or both.",
+		add(
+			"Style Markdown while editing",
+			"Keep source markers visible while applying bold, italic, comment, link, quote, and heading styling.",
+			(setting) => {
+				setting.addToggle((t) =>
+					t.setValue(s.editorLiveSyntaxStyling).onChange(async (v) => {
+						s.editorLiveSyntaxStyling = v;
+						await commit("editorLiveSyntaxStyling");
+					}),
+				);
+			},
 		);
-		this.renderToolbarEditor(containerEl);
+
+		group("Editor toolbar");
+		add(
+			"Toolbar layout",
+			"Compose the Markdown authoring ribbon shown in quick editors and full lightboxes. Built-ins remain Markdown-only; custom buttons can target Markdown editors, code editors, or both.",
+			(setting) => {
+				setting.setClass("mica-setting-stack").then((setting) => this.renderToolbarEditor(setting.controlEl));
+			},
+		);
+		items.push(...this.customToolDefinitions());
 
 		// ---------- Migration ----------
-		new Setting(containerEl).setHeading().setName("Migration");
+		group("Migration");
 
-		new Setting(containerEl)
-			.setClass("mica-setting-stack")
-			.setName("Import callouts as versions")
-			.setDesc(
-				"When migrating from obsidian-tabs, callouts of these comma-separated types become version history. Defaults to every built-in Obsidian type; leave empty to import ANY type (including custom ones), or narrow it (e.g. “success, bug, todo”).",
-			)
-			.addTextArea((t) => {
-				t.setPlaceholder(OBSIDIAN_CALLOUT_TYPES)
-					.setValue(s.versionCalloutTypes)
-					.onChange(async (v) => {
-						s.versionCalloutTypes = v;
-						await commit("versionCalloutTypes");
-					});
-				t.inputEl.rows = 3;
-				t.inputEl.addClass("mica-settings-wide");
-			})
-			.addExtraButton((b) =>
-				b
-					.setIcon("reset")
-					.setTooltip("Reset to all built-in Obsidian callout types")
-					.onClick(async () => {
-						s.versionCalloutTypes = OBSIDIAN_CALLOUT_TYPES;
-						await commit("versionCalloutTypes");
-						this.display();
-					}),
-			);
+		add(
+			"Import callouts as versions",
+			"When migrating from obsidian-tabs, callouts of these comma-separated types become version history. Defaults to every built-in Obsidian type; leave empty to import ANY type (including custom ones), or narrow it (e.g. “success, bug, todo”).",
+			(setting) => {
+				setting
+					.setClass("mica-setting-stack")
+					.addTextArea((t) => {
+						t.setPlaceholder(OBSIDIAN_CALLOUT_TYPES)
+							.setValue(s.versionCalloutTypes)
+							.onChange(async (v) => {
+								s.versionCalloutTypes = v;
+								await commit("versionCalloutTypes");
+							});
+						t.inputEl.rows = 3;
+						t.inputEl.addClass("mica-settings-wide");
+					})
+					.addExtraButton((b) =>
+						b
+							.setIcon("reset")
+							.setTooltip("Reset to all built-in Obsidian callout types")
+							.onClick(async () => {
+								s.versionCalloutTypes = OBSIDIAN_CALLOUT_TYPES;
+								await commit("versionCalloutTypes");
+								this.refreshSettings();
+							}),
+					);
+			},
+		);
+		return groups;
 	}
 
 	/** A compact two-pane chooser. Preferences hide action groups rather than
@@ -1342,45 +1484,57 @@ export class MicaSettingTab extends PluginSettingTab {
 			});
 		};
 		paint();
+	}
 
-		new Setting(containerEl)
-			.setName("Custom buttons")
-			.setDesc(
-				"Your own Markdown/code insert buttons. Templates support {selection}, {all}, {date}, {time}, {datetime}, and {cursor} (where the caret lands).",
-			)
-			.addButton((b) =>
-				b.setButtonText("New custom button…").onClick(() => {
-					new CustomToolModal(this.micaPlugin, null, () => this.display()).open();
-				}),
-			);
-		for (const tool of s.customTools) {
-			new Setting(containerEl)
-				.setName(tool.name)
-				.setDesc(
-					`${tool.surface === "both" ? "Markdown + code" : tool.surface === "code" ? "Code" : "Markdown"} · ${
-						tool.template.length > 80 ? tool.template.slice(0, 80) + "…" : tool.template
-					}`,
-				)
-				.addExtraButton((b) =>
-					b
-						.setIcon("pencil")
-						.setTooltip("Edit")
-						.onClick(() => {
-							new CustomToolModal(this.micaPlugin, tool, () => this.display()).open();
-						}),
-				)
-				.addExtraButton((b) =>
-					b
-						.setIcon("trash-2")
-						.setTooltip("Delete")
-						.onClick(async () => {
-							s.customTools = s.customTools.filter((t) => t.id !== tool.id);
-							s.toolbarLayout = s.toolbarLayout.filter((id) => id !== `custom:${tool.id}`);
-							await commitSetting(this.micaPlugin, "customTools");
-							this.display();
-						}),
+	private customToolDefinitions(): MicaSettingDefinition[] {
+		const s = this.micaPlugin.settings;
+		const items: MicaSettingDefinition[] = [];
+		const add = (name: string, desc: string, render: (setting: Setting) => void): void => {
+			items.push({ name, desc, render });
+		};
+
+		add(
+			"Custom buttons",
+			"Your own Markdown/code insert buttons. Templates support {selection}, {all}, {date}, {time}, {datetime}, and {cursor} (where the caret lands).",
+			(setting) => {
+				setting.addButton((b) =>
+					b.setButtonText("New custom button…").onClick(() => {
+						new CustomToolModal(this.micaPlugin, null, () => this.refreshSettings()).open();
+					}),
 				);
+			},
+		);
+		for (const tool of s.customTools) {
+			add(
+				tool.name,
+				`${tool.surface === "both" ? "Markdown + code" : tool.surface === "code" ? "Code" : "Markdown"} · ${
+					tool.template.length > 80 ? tool.template.slice(0, 80) + "…" : tool.template
+				}`,
+				(setting) => {
+					setting
+						.addExtraButton((b) =>
+							b
+								.setIcon("pencil")
+								.setTooltip("Edit")
+								.onClick(() => {
+									new CustomToolModal(this.micaPlugin, tool, () => this.refreshSettings()).open();
+								}),
+						)
+						.addExtraButton((b) =>
+							b
+								.setIcon("trash-2")
+								.setTooltip("Delete")
+								.onClick(async () => {
+									s.customTools = s.customTools.filter((t) => t.id !== tool.id);
+									s.toolbarLayout = s.toolbarLayout.filter((id) => id !== `custom:${tool.id}`);
+									await commitSetting(this.micaPlugin, "customTools");
+									this.refreshSettings();
+								}),
+						);
+				},
+			);
 		}
+		return items;
 	}
 }
 

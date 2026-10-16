@@ -1,5 +1,5 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
-import { coreVersion, initCore, scanBlocksView } from "./wasm/bridge";
+import { initCore, scanBlocksView } from "./wasm/bridge";
 import { installQuickEditGlobalListeners, setEditorBehavior } from "./ui/quickEdit";
 import { registerViewPrefsPersistence, setEditorViewPrefs, setSaveShortcut } from "./ui/mdEditor";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
@@ -71,7 +71,7 @@ export default class MicaPlugin extends Plugin {
 				if (file instanceof TFile && file.extension === "md") {
 					void this.engine
 						.handleRename(file, oldPath)
-						.catch((error) => {
+						.catch((error: unknown) => {
 							const detail = error instanceof Error ? error.message : String(error);
 							console.error("Mica: note rename follow-up failed", { oldPath, newPath: file.path, error });
 							new Notice(
@@ -92,7 +92,7 @@ export default class MicaPlugin extends Plugin {
 
 		this.addCommand({
 			id: "prepare-note",
-			name: "Prepare note for Mica (add ids)",
+			name: "Prepare note (add ids)",
 			callback: () => void this.prepareActiveNote(),
 		});
 		this.addCommand({
@@ -107,7 +107,7 @@ export default class MicaPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "insert-block",
-			name: "Insert Mica block (tabs) here",
+			name: "Insert block (tabs) here",
 			editorCallback: (editor) => {
 				const cur = editor.getCursor();
 				editor.replaceRange(`\n${createBlockSource({ body: "tab: New tab\n\n" })}`, cur);
@@ -116,7 +116,7 @@ export default class MicaPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "wrap-selection",
-			name: "Wrap selection in a Mica block",
+			name: "Wrap selection in a block",
 			editorCallback: (editor) => {
 				const sel = editor.getSelection();
 				if (!sel.trim()) {
@@ -128,7 +128,7 @@ export default class MicaPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "toggle-collapse",
-			name: "Collapse / expand all Mica blocks in this note",
+			name: "Collapse / expand all blocks in this note",
 			callback: () => {
 				const anyOpen = Array.from(this.micaUi.values()).some((u) => !u.collapsed);
 				for (const u of this.micaUi.values()) u.collapsed = anyOpen;
@@ -156,26 +156,24 @@ export default class MicaPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "migrate-tabs-dry-run",
-			name: "Migrate tabs → Mica (dry run, active note)",
+			name: "Migrate legacy tabs (dry run, active note)",
 			callback: () => void this.migrateActive(true),
 		});
 		this.addCommand({
 			id: "migrate-tabs",
-			name: "Migrate tabs → Mica (active note)",
+			name: "Migrate legacy tabs (active note)",
 			callback: () => void this.migrateActive(false),
 		});
 		this.addCommand({
 			id: "migrate-vault-dry-run",
-			name: "Migrate tabs → Mica (dry run, whole vault)",
+			name: "Migrate legacy tabs (dry run, whole vault)",
 			callback: () => void this.migrateWholeVault(true),
 		});
 		this.addCommand({
 			id: "migrate-vault",
-			name: "Migrate tabs → Mica (whole vault)",
+			name: "Migrate legacy tabs (whole vault)",
 			callback: () => void this.migrateWholeVault(false),
 		});
-
-		console.info(`Mica: loaded (plugin v${this.manifest.version}, core v${coreVersion()})`);
 	}
 
 	onunload(): void {
@@ -199,7 +197,6 @@ export default class MicaPlugin extends Plugin {
 		]) {
 			b.style.removeProperty(k);
 		}
-		console.info("Mica: unloaded");
 	}
 
 	async saveSettings(): Promise<void> {
@@ -345,7 +342,7 @@ export default class MicaPlugin extends Plugin {
 		}
 		const block = blocks.find((candidate) => candidate.id);
 		if (!block?.id) {
-			new Notice("No Mica block with an id in this note. Run “Prepare note for Mica” first.");
+			new Notice("No Mica block with an id in this note. Run “Prepare note” first.");
 			return;
 		}
 		new VersionsModal(this, file, block.id).open();
@@ -373,7 +370,20 @@ export default class MicaPlugin extends Plugin {
 
 	private async runInstructionFromClipboard(): Promise<void> {
 		try {
-			const result = await this.api.runInstruction(JSON.parse(await navigator.clipboard.readText()));
+			const value: unknown = JSON.parse(await navigator.clipboard.readText());
+			if (typeof value !== "object" || value === null || Array.isArray(value)) {
+				throw new Error("Instruction must be an object with a verb and optional string arguments.");
+			}
+			const instruction = value as Record<string, unknown>;
+			const { verb, args } = instruction;
+			if (
+				typeof verb !== "string" ||
+				(args !== undefined &&
+					(!Array.isArray(args) || !args.every((argument: unknown) => typeof argument === "string")))
+			) {
+				throw new Error("Instruction must have a string verb and optional string arguments.");
+			}
+			const result = await this.api.runInstruction({ verb, args });
 			new Notice("Mica: instruction ran (result in console).");
 			console.info("Mica instruction result:", result);
 		} catch (e) {

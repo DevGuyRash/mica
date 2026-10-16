@@ -567,6 +567,12 @@ collision.
 
 ## Shipping and active state
 
+WHEN preparing a plugin update THEN you SHALL follow `RELEASING.md`: synchronize
+package, manifest, Rust workspace/lockfile and version mappings; publish the
+exact version tag with matching runtime attachments; then verify downloaded
+release bytes. A completed plugin delivery is a verified GitHub Release.
+Repository pushes and workflow artifacts have their own completion state.
+
 WHEN shipping through the GitOps workflow THEN you SHALL use its scripts for
 sync, inventory, staged sensitive-data scanning, signed Conventional Commit
 batches, push, and receipt generation. WHEN writing commit bodies THEN you

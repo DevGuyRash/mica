@@ -649,7 +649,7 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): HTMLElement | 
 				attr: { type: "text", placeholder: fallbackName },
 			});
 			head.insertBefore(input, nameBtn);
-			nameBtn.style.display = "none";
+			nameBtn.setCssStyles({ display: "none" });
 			input.value = name;
 			input.focus();
 			input.select();
@@ -669,7 +669,7 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): HTMLElement | 
 				if (v !== name) ctx.editable?.setAttr("name", v || null);
 				else {
 					input.remove();
-					nameBtn.style.display = "";
+					nameBtn.setCssStyles({ display: "" });
 				}
 			};
 			input.addEventListener("input", () => input.setCustomValidity(""));
@@ -678,7 +678,7 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): HTMLElement | 
 				else if (e.key === "Escape") {
 					done = true;
 					input.remove();
-					nameBtn.style.display = "";
+					nameBtn.setCssStyles({ display: "" });
 				}
 			});
 			input.addEventListener("blur", commit);
@@ -1433,7 +1433,7 @@ function revealNode(ctx: RenderCtx, root: HTMLElement, spec: RevealSpec): void {
 /** The block's effective accent as #rrggbb (for the color input's initial). */
 function resolveAccentHex(el: HTMLElement): string {
 	const probe = el.createSpan();
-	probe.style.color = "var(--mica-accent)";
+	probe.setCssStyles({ color: "var(--mica-accent)" });
 	const resolved = getComputedStyle(probe).color;
 	probe.remove();
 	const toHex = (channels: readonly number[]): string =>
@@ -1471,7 +1471,7 @@ function resolveAccentHex(el: HTMLElement): string {
 		// oklch() depending on Obsidian and the active theme. Let the browser
 		// color engine rasterize one pixel rather than guessing from numbers in
 		// an arbitrary color-space string.
-		const canvas = document.createElement("canvas");
+		const canvas = createEl("canvas");
 		canvas.width = 1;
 		canvas.height = 1;
 		const painter = canvas.getContext("2d", { willReadFrequently: true });
@@ -1489,8 +1489,9 @@ function resolveAccentHex(el: HTMLElement): string {
 }
 
 function openAppearance(el: HTMLElement, ctx: RenderCtx, resume = false, trackComponent = true): void {
-	const existing = el.querySelector(".mica-appearance") as
-		(HTMLElement & { micaClose?: (endSession?: boolean) => void }) | null;
+	const existing = el.querySelector<HTMLElement & { micaClose?: (endSession?: boolean) => void }>(
+		".mica-appearance",
+	);
 	if (existing) {
 		existing.micaClose?.();
 		if (!existing.micaClose) existing.remove();
@@ -1961,7 +1962,7 @@ function combineRunActions(region: HTMLElement, ctx: RenderCtx, target: RegionTa
 	// Built once per render by `rebuildCombineIndex`; rescanning here would make
 	// every menu cost a document-wide pass.
 	const ordered = ctx.combineOrder ?? [];
-	const at = ctx.combineNeighbors?.get(region as CombineTargetElement)?.index ?? -1;
+	const at = ctx.combineNeighbors?.get(region)?.index ?? -1;
 	if (at < 0 || at >= ordered.length) return [];
 
 	// A run is only meaningful among siblings of one container whose child
@@ -2028,7 +2029,7 @@ const COMBINE_KIND_NOUN: Record<CombineKind, string> = {
 function combineActions(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): ActionSpec[] {
 	const source = combineSpecFor(target);
 	if (!source || !ctx.editable) return [];
-	const indexed = ctx.combineNeighbors?.get(region as CombineTargetElement);
+	const indexed = ctx.combineNeighbors?.get(region);
 	if (!indexed) return [];
 	const neighbors = [
 		{ destination: indexed.previous, direction: "previous" },
@@ -2386,7 +2387,7 @@ function wireNestedCodeBlocks(
 	nested.forEach((code, i) => {
 		const pre = rendered[i];
 		if (!pre) return;
-		const host = (pre.closest(".el-pre") as HTMLElement | null) ?? pre.parentElement;
+		const host = pre.closest<HTMLElement>(".el-pre") ?? pre.parentElement;
 		if (!host || host.closest(".mica-region") !== view.parentElement) return;
 		host.addClass("mica-nested-code");
 		const tools = host.createDiv({ cls: "mica-region-tools mica-nested-tools mica-nested-code-tools" });
@@ -2928,7 +2929,7 @@ function startRename(
 		ctx.ui.tabRename = { path: pathKey, index, display, value: display };
 	}
 	const pending = ctx.ui?.tabRename;
-	btn.style.display = "none";
+	btn.setCssStyles({ display: "none" });
 	const input = chip.createEl("input", { cls: "mica-rename", attr: { type: "text" } });
 	input.value = pending?.path === pathKey && pending.index === index ? pending.value : display;
 	input.focus();
@@ -2945,7 +2946,7 @@ function startRename(
 		if (endSession && ctx.ui?.tabRename?.path === pathKey && ctx.ui.tabRename.index === index)
 			ctx.ui.tabRename = undefined;
 		input.remove();
-		btn.style.display = "";
+		btn.setCssStyles({ display: "" });
 	};
 	const commit = (): void => {
 		if (done) return;
@@ -3065,10 +3066,10 @@ function mountGridResizers(
 			const left = right;
 			right = cells[b]?.getBoundingClientRect();
 			if (!left || !right || right.left <= left.right - 1) {
-				strip.style.display = "none"; // boundary has no cells yet
+				strip.setCssStyles({ display: "none" }); // boundary has no cells yet
 				continue;
 			}
-			strip.style.display = "";
+			strip.setCssStyles({ display: "" });
 			strip.style.left = `${(left.right + right.left) / 2 - g.left - 4}px`;
 		}
 		// Row boundaries: the first cell of each row carries the row's box.
@@ -3077,10 +3078,10 @@ function mountGridResizers(
 			const above = cells[r * cols]?.getBoundingClientRect();
 			const below = cells[(r + 1) * cols]?.getBoundingClientRect();
 			if (!above || !below || below.top <= above.bottom - 1) {
-				strip.style.display = "none";
+				strip.setCssStyles({ display: "none" });
 				continue;
 			}
-			strip.style.display = "";
+			strip.setCssStyles({ display: "" });
 			strip.style.top = `${(above.bottom + below.top) / 2 - g.top - 4}px`;
 		}
 	};
@@ -3536,7 +3537,7 @@ function mountGridHandles(
 				document.body.removeClass("mica-handle-dragging");
 				handle.removeClass("is-dragging");
 				movers.forEach((m) => m.removeClass("mica-move-source"));
-				indicator.style.display = "none";
+				indicator.setCssStyles({ display: "none" });
 			};
 			const onEsc = (ke: KeyboardEvent): void => {
 				if (ke.key !== "Escape") return;
@@ -3583,10 +3584,10 @@ function mountGridHandles(
 				const er = edgeEl?.getBoundingClientRect();
 				if (!er) return;
 				const x = (b < cols ? er.left : er.right) - rect.left;
-				indicator.style.display = "block";
+				indicator.setCssStyles({ display: "block" });
 				indicator.style.left = `${x - 1.5}px`;
-				indicator.style.top = "4px";
-				indicator.style.width = "3px";
+				indicator.setCssStyles({ top: "4px" });
+				indicator.setCssStyles({ width: "3px" });
 				indicator.style.height = `${rect.height - 8}px`;
 			},
 		);
@@ -3612,10 +3613,10 @@ function mountGridHandles(
 				const er = edgeEl?.getBoundingClientRect();
 				if (!er) return;
 				const y = (b < rowCount ? er.top : er.bottom) - rect.top;
-				indicator.style.display = "block";
+				indicator.setCssStyles({ display: "block" });
 				indicator.style.top = `${y - 1.5}px`;
-				indicator.style.left = "4px";
-				indicator.style.height = "3px";
+				indicator.setCssStyles({ left: "4px" });
+				indicator.setCssStyles({ height: "3px" });
 				indicator.style.width = `${rect.width - 8}px`;
 			},
 		);
@@ -3628,10 +3629,10 @@ function mountGridHandles(
 			const h = colHandles[c];
 			const r0 = cells[c]?.getBoundingClientRect();
 			if (!r0) {
-				h.style.display = "none";
+				h.setCssStyles({ display: "none" });
 				continue;
 			}
-			h.style.display = "";
+			h.setCssStyles({ display: "" });
 			h.style.left = `${r0.left - rect.left + r0.width / 2}px`;
 			h.style.top = `${r0.top - rect.top - 2}px`;
 		}
@@ -3639,10 +3640,10 @@ function mountGridHandles(
 			const h = rowHandles[r];
 			const r0 = cells[r * cols]?.getBoundingClientRect();
 			if (!r0) {
-				h.style.display = "none";
+				h.setCssStyles({ display: "none" });
 				continue;
 			}
-			h.style.display = "";
+			h.setCssStyles({ display: "" });
 			h.style.top = `${r0.top - rect.top + r0.height / 2}px`;
 			h.style.left = `${r0.left - rect.left - 2}px`;
 		}
@@ -3817,7 +3818,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				attr: { type: "number", min: "1", max: "24" },
 			});
 			bar.insertBefore(input, colsBtn);
-			colsBtn.style.display = "none";
+			colsBtn.setCssStyles({ display: "none" });
 			input.value = String(cols);
 			input.focus();
 			input.select();
@@ -3829,7 +3830,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				if (v !== cols) ctx.editable?.apply({ op: "setCols", path, cols: v });
 				else {
 					input.remove();
-					colsBtn.style.display = "";
+					colsBtn.setCssStyles({ display: "" });
 				}
 			};
 			input.addEventListener("keydown", (ev) => {
@@ -3837,7 +3838,7 @@ function renderGrid(node: Container, el: HTMLElement, ctx: RenderCtx, path: numb
 				else if (ev.key === "Escape") {
 					done = true;
 					input.remove();
-					colsBtn.style.display = "";
+					colsBtn.setCssStyles({ display: "" });
 				}
 			});
 			input.addEventListener("blur", commit);
@@ -3876,9 +3877,9 @@ function applyWithUndo(ctx: RenderCtx, op: StructOp, what: string): boolean {
 	// that exact pre-image is still live; later edits must never be overwritten.
 	const after = ctx.preImage?.();
 	if (after === undefined) return true;
-	const frag = document.createDocumentFragment();
-	frag.appendChild(document.createTextNode(`${what}. `));
-	const undo = document.createElement("button");
+	const frag = createFragment();
+	frag.appendText(`${what}. `);
+	const undo = createEl("button");
 	undo.textContent = "Undo";
 	undo.className = "mica-undo-btn";
 	const notice = new Notice(frag, 8000);
@@ -3985,7 +3986,7 @@ function mountLongBlockStatus(
 ): void {
 	const mode = ctx.longBlockControls ?? "contextual";
 	const headerSlot = header?.querySelector<HTMLElement>(".mica-long-head-slot") ?? null;
-	const dockHost = document.createElement("div");
+	const dockHost = createDiv();
 	dockHost.className = "mica-long-dock-host";
 	root.insertBefore(dockHost, root.querySelector(".mica-block-body"));
 	// A sticky descendant of a CodeMirror block widget is vulnerable to the
@@ -4068,7 +4069,7 @@ function mountLongBlockStatus(
 			`${wholeBlock ? "Whole block" : described.label} copied.`,
 		);
 	};
-	const travel = document.createElement("div");
+	const travel = createDiv();
 	travel.className = "mica-long-travel";
 	const name = travel.createSpan({
 		cls: "mica-long-dock-name",
@@ -4174,7 +4175,7 @@ function mountLongBlockStatus(
 		appearance.addEventListener("click", () => openAppearance(root, ctx));
 		optionalActions.set("appearance", appearance);
 	}
-	const responsiveHost = document.createElement("div");
+	const responsiveHost = createDiv();
 	responsiveHost.className = "mica-long-responsive-host";
 	travel.insertBefore(responsiveHost, jumps);
 	const responsiveActions = mountResponsiveActionStrip(
@@ -4225,7 +4226,7 @@ function mountLongBlockStatus(
 		const y = Math.max(rect.top + 1, Math.min(rect.bottom - 1, viewport.top + viewport.height * 0.35));
 		const owner = document
 			.elementsFromPoint(x, y)
-			.map((element) => (element as HTMLElement).closest<HTMLElement>("[data-mica-dock-scope]"))
+			.map((element) => element.closest<HTMLElement>("[data-mica-dock-scope]"))
 			.find((element): element is HTMLElement => Boolean(element && root.contains(element)));
 		controller.setAutomatic(owner?.dataset.micaDockScope ?? "block:");
 	};

@@ -495,10 +495,10 @@ export class VersionEngine {
 		if (!(folder instanceof TFolder)) throw new Error(`Mica: sidecar path is not a folder: ${sidecarDir(file)}`);
 		const names: Record<string, string> = {};
 		for (const block of blocks) if (block.id) names[block.id] = block.name ?? "";
-		const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
-			Record<string, unknown> | undefined;
+		const frontmatter: Record<string, unknown> | undefined =
+			this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
 		return writeManifest(vault, file, {
-			noteId: typeof frontmatter?.["mica-id"] === "string" ? (frontmatter["mica-id"] as string) : null,
+			noteId: typeof frontmatter?.["mica-id"] === "string" ? frontmatter["mica-id"] : null,
 			path: file.path,
 			blocks: names,
 			updated: Date.now(),

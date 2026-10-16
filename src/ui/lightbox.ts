@@ -309,7 +309,7 @@ export class EditorLightbox extends Modal {
 		// Escape aimed at a popover INSIDE the lightbox (the callout type
 		// grid, a toolbar picker) dismisses that popover — it must never arm
 		// "Discard changes?" on the whole editor.
-		const pop = this.contentEl.querySelector(".mica-popover") as (HTMLElement & { micaClose?: () => void }) | null;
+		const pop = this.contentEl.querySelector<HTMLElement & { micaClose?: () => void }>(".mica-popover");
 		if (pop) {
 			if (pop.micaClose) pop.micaClose();
 			else pop.remove();
