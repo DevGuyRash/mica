@@ -11,7 +11,7 @@ use crate::error::{io_ctx, CliError, Result};
 use crate::fsutil;
 use crate::sidecar;
 use crate::vault::{self, NoteRef};
-use crate::sidecar::{NoteStore, StoreRoot};
+use crate::sidecar::NoteStore;
 use mica_core::{
     ensure_ids_impl, fold_ledger_impl, hash_content_impl, new_id_impl, replace_block_content_impl,
     scan_impl, should_snapshot_impl, note_id_impl, set_note_id_impl, BlockState, Event, HeadRef,
@@ -51,6 +51,7 @@ pub struct SnapshotAction {
 /// let st = mica_cli::engine::state(&note).unwrap();
 /// ```
 pub fn state(note: &NoteRef) -> Result<BTreeMap<String, BlockState>> {
+    note.store_root()?.require_ready()?;
     state_from_document(note, &read_doc(&note.abs)?)
 }
 
@@ -77,7 +78,7 @@ pub(crate) fn require_store(note: &NoteRef, doc: &str) -> Result<NoteStore> {
 
 /// Derive an anchor for an authorized write without publishing it yet.
 pub(crate) fn prepare_history_document(note: &NoteRef, doc: &str) -> Result<String> {
-    StoreRoot::open(&note.vault)?;
+    note.store_root()?;
     let prepared = match note_id_impl(doc).map_err(|error| CliError::Corrupt(error.to_string()))? {
         Some(_) => doc.to_string(),
         None => set_note_id_impl(doc, None, &new_id_impl())
@@ -91,12 +92,13 @@ pub(crate) fn prepare_history_document(note: &NoteRef, doc: &str) -> Result<Stri
 /// context only to validate the prospective storage destination. No UUID is
 /// minted and no marker, note, manifest, journal, or object is created.
 pub(crate) fn plan_history_store(note: &NoteRef, source: &str, dry_run: bool) -> Result<(String, NoteStore)> {
+    if dry_run { note.store_root()?.require_ready()?; }
     if let Some(store) = NoteStore::from_document(note, source)? {
         validate_note_identity(note, source)?;
         return Ok((source.to_string(), store));
     }
     if dry_run {
-        let prospective = NoteStore::for_id(&note.vault, &note.abs, "unprepared-dry-run")?;
+        let prospective = NoteStore::for_id_in(&note.store_root()?, &note.abs, "unprepared-dry-run")?;
         // This transient context may describe only a missing record. It must
         // never interpret some other live note's chosen opaque identity.
         if sidecar::sidecar_dir(&prospective).try_exists()
@@ -198,7 +200,7 @@ pub(crate) fn validate_note_identity(note: &NoteRef, doc: &str) -> Result<()> {
         .ok_or_else(|| CliError::Corrupt("a writable note has no source identity".to_string()))?;
     let mut indexes = identity_indexes()?;
     let index = identity_index_for(&mut indexes, &note.vault);
-    if !index.watching { refresh_identities(index, &vault::vault_notes(&note.vault)?)?; }
+    if !index.watching { refresh_identities(index, &vault::vault_notes_in(&note.store_root()?)?)?; }
     if let Some(other) = index.by_id.get(&id).and_then(|paths| paths.iter().find(|path| *path != &note.abs)) {
         return Err(CliError::BadArgs(format!(
             "duplicate mica note id {id:?} in {} and {} — repair the copied identity before writing history",
@@ -276,6 +278,7 @@ pub fn snapshot_note(note: &NoteRef, force: bool, stamp_ids: bool) -> Result<Vec
     if prepared.as_ref() != doc {
         validate_note_identity(note, &prepared)?;
         preflight_history_write(&store, &prepared)?;
+        store.root.claim_location()?;
         sidecar::preflight_note_record(&store)?;
         fsutil::atomic_write_if_unchanged(&note.abs, doc.as_bytes(), prepared.as_bytes())?;
     }
@@ -497,6 +500,7 @@ fn mutate_exact_prepared(
         sidecar::preflight_object_write(&store, &hash_content_impl(body), body)?;
     }
     validate_note_identity(note, &prepared)?;
+    store.root.claim_location()?;
     sidecar::preflight_note_record(&store)?;
     if prepared != original {
         fsutil::atomic_write_if_unchanged(&note.abs, original.as_bytes(), prepared.as_bytes())?;
@@ -558,6 +562,7 @@ pub(crate) fn snapshot_published(
     match snapshot_exact_classified_in(note, &published.store, &published.doc, &published.blocks, force) {
         Ok(_) => Ok(()),
         Err(failure) if failure.rollback_safe => {
+            guard_note_store(note, &published.store, &published.doc)?;
             fsutil::atomic_write_if_unchanged(
                 &note.abs,
                 published.doc.as_bytes(),
@@ -592,6 +597,7 @@ fn commit_published_events(
     match append_events_recovering(store, events) {
         Ok(()) => Ok(()),
         Err(failure) if failure.rollback_safe => {
+            guard_note_store(note, &published.store, &published.doc)?;
             fsutil::atomic_write_if_unchanged(
                 &note.abs,
                 published.doc.as_bytes(),
@@ -988,6 +994,7 @@ mod tests {
         let note = NoteRef {
             abs: path,
             vault: dir.path().to_path_buf(),
+            store: None,
         };
         (dir, note)
     }
@@ -1184,7 +1191,7 @@ mod tests {
     #[test]
     fn unprepared_history_read_preserves_source_and_storage() {
         let dir = tempfile::tempdir().expect("temporary vault");
-        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf() };
+        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf(), store: None };
         let source = "```mica id=a\nbody\n```\n";
         std::fs::write(&note.abs, source).expect("seed unprepared note");
         assert!(state(&note).expect("empty history").is_empty());
@@ -1195,7 +1202,7 @@ mod tests {
     #[test]
     fn first_snapshot_binds_source_identity_to_central_history() {
         let dir = tempfile::tempdir().expect("temporary vault");
-        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf() };
+        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf(), store: None };
         std::fs::write(&note.abs, "```mica id=a\nbody\n```\n").expect("seed unprepared note");
         snapshot_note(&note, false, true).expect("first history write");
         let source = read_doc(&note.abs).expect("prepared source");
@@ -1210,7 +1217,7 @@ mod tests {
     #[test]
     fn copied_source_identity_fails_before_history_writes() {
         let dir = tempfile::tempdir().expect("temporary vault");
-        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf() };
+        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf(), store: None };
         let source = fixture_source("```mica id=a\nbody\n```\n");
         std::fs::write(&note.abs, &source).expect("seed note");
         std::fs::write(dir.path().join("Copy.md"), &source).expect("seed duplicate");

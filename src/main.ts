@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { initCore, scanBlocksView } from "./wasm/bridge";
 import { installStoreLifecycle, isLiveNote } from "./storage/store";
+import { initializeStorageLocation, requestStorageFolder } from "./storage/location";
 import { installQuickEditGlobalListeners, setEditorBehavior } from "./ui/quickEdit";
 import { registerViewPrefsPersistence, setEditorViewPrefs, setSaveShortcut } from "./ui/mdEditor";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
@@ -38,10 +39,15 @@ export default class MicaPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await initCore();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
+		try { await initializeStorageLocation(this); }
+		catch (error) {
+			new Notice(error instanceof Error ? error.message : "Mica: storage startup failed");
+			throw error;
+		}
 		this.register(installStoreLifecycle(this.app.vault, async () => {
 			await Promise.all([this.engine?.settled(), this.api?.settled()]);
 		}));
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
 		const customConfig = normalizeCustomToolConfig(this.settings.customTools ?? [], this.settings.toolbarLayout);
 		const sectionActionConfig = normalizeHiddenSectionActions(this.settings.hiddenSectionActions);
 		const dockActionLayout = normalizeDockActionLayout(this.settings.dockActionLayout);
@@ -204,6 +210,10 @@ export default class MicaPlugin extends Plugin {
 		]) {
 			b.style.removeProperty(k);
 		}
+	}
+
+	changeStorageFolder(draft: string): Promise<void> {
+		return requestStorageFolder(this, draft);
 	}
 
 	async saveSettings(): Promise<void> {

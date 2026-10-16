@@ -15,6 +15,8 @@ import init, {
 	resolve_object_hash,
 	set_note_id,
 	storage_layout,
+	validate_store_folder,
+	validate_store_location,
 	validate_store_marker,
 	make_patch,
 	mica_version,
@@ -87,6 +89,7 @@ async function initializeCore(): Promise<void> {
 export interface StorageLayout {
 	readonly format: number;
 	readonly root: string;
+	readonly location: string;
 	readonly marker: string;
 	readonly objects: string;
 	readonly notes: string;
@@ -119,21 +122,40 @@ export interface StoreMarker {
 	readonly storeId: string;
 }
 
-export function storageLayout(): StorageLayout {
-	return storage_layout() as StorageLayout;
+/** Portable routing authority, including recorded initialization or move intent. */
+export interface StoreLocation {
+	readonly format: number;
+	readonly folder: string;
+	readonly storeId: string | null;
+	readonly previousFolder: string | null;
+	readonly initializing: boolean;
 }
 
-export function notePaths(id: string): NotePaths {
-	return note_paths(id) as NotePaths;
+export function storageLayout(root?: string): StorageLayout {
+	return storage_layout(root) as StorageLayout;
 }
 
-export function objectPaths(fullHash: string): ObjectPaths {
-	return object_paths(fullHash) as ObjectPaths;
+export function notePaths(id: string, root?: string): NotePaths {
+	return note_paths(id, root) as NotePaths;
 }
 
-/** Caller normalizes separators and vault containment before this policy check. */
-export function isManagedPath(vaultRelative: string): boolean {
-	return is_managed_path(vaultRelative);
+export function objectPaths(fullHash: string, root?: string): ObjectPaths {
+	return object_paths(fullHash, root) as ObjectPaths;
+}
+
+/** Caller normalizes separators and containment; default namespace stays reserved. */
+export function isManagedPath(vaultRelative: string, root?: string): boolean {
+	return is_managed_path(vaultRelative, root);
+}
+
+/** Return the exact validated vault-relative folder; no filesystem normalization. */
+export function validateStoreFolder(folder: string): string {
+	return validate_store_folder(folder);
+}
+
+/** Validate mica.json; missing nullable fields become null and missing initializing becomes false. */
+export function validateStoreLocation(value: unknown): StoreLocation {
+	return validate_store_location(value) as StoreLocation;
 }
 
 /** Source-backed identity lookup; absence does not create an anchor. */

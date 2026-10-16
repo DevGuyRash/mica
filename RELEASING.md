@@ -20,8 +20,11 @@ updates**, then **Update** or **Update all**.
 
 ## Storage format 1 cutover
 
-The 0.3 plugin and CLI use one `mica-data/` store. Treat this as a coordinated
-storage-format change: every participating client must understand the new
+The 0.3 plugin and CLI use one visible vault-relative store, defaulting to
+`mica-data/`. The fixed vault-root `mica.json` is the routing authority shared
+by both hosts, including plain directories without Obsidian or Git.
+`--store-dir` must agree with an existing locator. Treat this as a coordinated
+storage-format change: every participating client must understand the locator,
 marker, note bindings and shared object addresses before it writes. Old
 note-local sidecars are not an automatic import or fallback path. The release
 must not claim existing-vault cutover until an independent backup, writer/Sync
@@ -29,6 +32,20 @@ quiescence, exact object/reference verification, and history/restore checks
 have succeeded. Preserve old state for rollback outside the live vault. The
 one-off owner transfer is external to product code; do not add a permanent
 migration framework, dual writes, or shared-object garbage collection.
+
+Custom-folder selection uses **Settings → Mica → Storage → Apply after restart**.
+Stop CLI/watch writers before restarting. Startup records a pending route and
+moves the whole existing folder before admitting engine or bridge work; the
+destination retains the original store UUID and all history bytes. Only a
+verified destination becomes active. A pending route prevents ordinary writes
+until recovery identifies one matching store; conflicting copies are preserved.
+First initialization records its UUID and `initializing:true` before directory
+creation, so an interrupted setup can resume only that recorded identity and
+clear the intent through an exact locator guard. Existing unrelated contents
+remain a conflict. This location change moves the current central store and
+does not import old note-local sidecars. Record any unperformed routing,
+relocation, or recovery compatibility checks as outstanding; source changes
+alone establish none of those outcomes.
 
 ## 1. Establish a release candidate
 

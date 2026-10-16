@@ -145,7 +145,8 @@ pub fn normalize_sections(
     history: bool,
     dry_run: bool,
 ) -> Result<NormalizeReport> {
-    let scope = vault::resolve_note_scope(path, ctx.vault.as_deref())?;
+    let scope = vault::resolve_note_scope_at(path, ctx.vault.as_deref(), ctx.store_dir.as_deref())?;
+    if dry_run { scope.store.require_ready()?; }
     let mut report = NormalizeReport {
         path: path.to_string(),
         history,
@@ -481,7 +482,7 @@ pub(crate) fn inspect_normalization_journal_with_ledger(
     journal: &sidecar::SectionNormalizationJournal,
     ledger_read: Option<&sidecar::LedgerRead>,
 ) -> Result<NormalizationJournalInspection> {
-    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone() };
+    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
     let report_path = note.vault_rel();
     let mut conflicts = Vec::new();
     if !journal.history && !journal.events.is_empty() {
@@ -1417,6 +1418,13 @@ fn publish_recovery(plan: &RecoveryPlan) -> Result<()> {
     engine::validate_journal_generations(&plan.store, &plan.original, &plan.normalized)?;
     engine::preflight_journal_events(&plan.store, &plan.journal.events)?;
     let current = engine::read_doc(&plan.note.abs)?;
+    if current != plan.original && current != plan.normalized {
+        return Err(CliError::Corrupt(format!(
+            "pending normalization note diverged for {}; the journal was preserved for manual recovery",
+            plan.note.abs.display()
+        )));
+    }
+    plan.store.root.claim_location()?;
     engine::guard_note_store(&plan.note, &plan.store, &current)?;
     if current == plan.original && plan.original != plan.normalized {
         fsutil::atomic_write_if_unchanged(
@@ -1424,11 +1432,6 @@ fn publish_recovery(plan: &RecoveryPlan) -> Result<()> {
             plan.original.as_bytes(),
             plan.normalized.as_bytes(),
         )?;
-    } else if current != plan.normalized {
-        return Err(CliError::Corrupt(format!(
-            "pending normalization note diverged for {}; the journal was preserved for manual recovery",
-            plan.note.abs.display()
-        )));
     }
     let published = engine::read_doc(&plan.note.abs)?;
     if published != plan.normalized {
@@ -1464,6 +1467,7 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
     engine::validate_journal_generations(&plan.store, &plan.original, &plan.normalized)?;
     engine::preflight_journal_events(&plan.store, &plan.journal.events)?;
     engine::validate_note_identity(&plan.note, &plan.original)?;
+    plan.store.root.claim_location()?;
     sidecar::preflight_note_record(&plan.store)?;
     if plan.source_preimage != plan.original {
         fsutil::atomic_write_if_unchanged(&plan.note.abs, plan.source_preimage.as_bytes(), plan.original.as_bytes())?;
@@ -1642,7 +1646,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_store(path: &std::path::Path) -> NoteStore {
-        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault") };
+        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault"), store: None };
         let source = engine::read_doc(path).expect("fixture source");
         let prepared = mica_core::note_id_impl(&source).expect("fixture identity")
             .map(|_| source.clone()).unwrap_or_else(|| mica_core::set_note_id_impl(&source, None, &format!("fixture-{}", hash_content_impl(&path.to_string_lossy()))).expect("fixture anchor"));
@@ -1657,6 +1661,7 @@ mod tests {
         std::fs::write(&note, doc).expect("seed note");
         let ctx = Ctx {
             vault: Some(directory.path().to_path_buf()),
+            store_dir: None,
             json: true,
             style: Style::forced(false),
         };
@@ -2325,6 +2330,7 @@ mod tests {
         let note_ref = vault::NoteRef {
             abs: note,
             vault: _directory.path().to_path_buf(),
+            store: None,
         };
 
         let inspection =

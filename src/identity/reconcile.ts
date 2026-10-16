@@ -46,7 +46,7 @@ async function gatherRecords(root: StoreRoot): Promise<Map<string, NoteRecord>> 
 		const value: unknown = JSON.parse(await root.vault.read(manifestFile));
 		if (typeof value !== "object" || value === null || !("noteId" in value) || typeof value.noteId !== "string")
 			throw new Error(`Mica: manifest lacks a stable note identity: ${child.path}`);
-		const paths = notePaths(value.noteId);
+		const paths = notePaths(value.noteId, root.paths.root);
 		if (paths.dir !== child.path) throw new Error(`Mica: manifest identity does not match its directory: ${child.path}`);
 		const pathHint = "path" in value && typeof value.path === "string" ? value.path : "";
 		records.set(value.noteId, { id: value.noteId, pathHint, dir: paths.dir,
@@ -83,7 +83,7 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 	let records = await gatherRecords(root);
 	for (const note of notes) {
 		if (!note.id || records.has(note.id)) continue;
-		if (root.vault.getAbstractFileByPath(notePaths(note.id).ledger))
+		if (root.vault.getAbstractFileByPath(notePaths(note.id, root.paths.root).ledger))
 			throw new Error(`Mica: live note history lacks its manifest: ${note.file.path}`);
 	}
 	const initialOccurrences = occurrences(notes);

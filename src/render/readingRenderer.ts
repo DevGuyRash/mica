@@ -6,6 +6,7 @@ import { getBlockUi } from "./blockUiState";
 import { noteBasenameFromPath, unnamedBlockOrdinals } from "../identity/blockLabel";
 import { copyOptionsFromSettings } from "../ui/copyPayload";
 import { isManagedPath } from "../wasm/bridge";
+import { storeRoot } from "../storage/store";
 
 interface CachedBlock {
 	block: BlockView;
@@ -31,7 +32,7 @@ let sectionCache: SectionCache | null = null;
  */
 export function registerReadingRenderer(plugin: MicaPlugin): void {
 	plugin.registerMarkdownCodeBlockProcessor("mica", (source, el, ctx) => {
-		if (isManagedPath(ctx.sourcePath)) {
+		if (isManagedPath(ctx.sourcePath, storeRoot(plugin.app.vault).paths.root)) {
 			// History objects are data; they must not mount live editing/history controls.
 			el.createEl("pre", { text: source });
 			return;

@@ -430,7 +430,7 @@ async function findPendingMigrationStore(plugin: MicaPlugin, file: TFile, source
 			throw new Error("Mica: invalid central note manifest during conversion recovery");
 		const value: unknown = JSON.parse(await root.vault.read(manifest));
 		if (typeof value !== "object" || value === null || !("path" in value) || value.path !== file.path) continue;
-		if (!("noteId" in value) || typeof value.noteId !== "string" || notePaths(value.noteId).dir !== folder.path)
+		if (!("noteId" in value) || typeof value.noteId !== "string" || notePaths(value.noteId, root.paths.root).dir !== folder.path)
 			throw new Error("Mica: central note identity does not match its directory");
 		const candidate = await stageNoteStore(root, file, source, value.noteId);
 		await assertNoteStoreCurrent(candidate);

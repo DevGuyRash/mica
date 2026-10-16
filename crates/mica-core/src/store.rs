@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 const STORE_ROOT: &str = "mica-data";
 const STORE_FORMAT: u32 = 1;
+const STORE_LOCATION_PATH: &str = "mica.json";
+const MAX_STORE_FOLDER_BYTES: usize = 4096;
+
+/// Maximum encoded location-document size enforced by both host JSON boundaries.
+pub const MAX_STORE_LOCATION_BYTES: usize = 16 * 1024;
 
 /// Paths shared by both hosts, relative to the vault root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -15,6 +20,8 @@ pub struct StorageLayout {
     pub format: u32,
     /// Visible managed directory.
     pub root: String,
+    /// Fixed vault-root routing document, independent of the managed directory.
+    pub location: String,
     /// Store identity marker.
     pub marker: String,
     /// Shared full-hash object pool.
@@ -71,9 +78,32 @@ pub struct StoreMarker {
     pub store_id: String,
 }
 
+/// Portable routing authority decoded from the vault-root `mica.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoreLocation {
+    /// Location schema version; only format 1 is supported.
+    pub format: u32,
+    /// Selected visible directory relative to the vault root.
+    pub folder: String,
+    /// Store UUID, absent only for an active location that is not initialized.
+    #[serde(default)]
+    pub store_id: Option<String>,
+    /// Original directory while a move is pending; ordinary hosts must refuse it.
+    #[serde(default)]
+    pub previous_folder: Option<String>,
+    /// Recorded ownership of an incomplete first initialization.
+    #[serde(default)]
+    pub initializing: bool,
+}
+
 /// Invalid or ambiguous input at the shared store-policy boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
+    /// A managed folder is not a bounded, visible, canonical relative path.
+    InvalidStoreFolder,
+    /// A location has an unknown format or invalid initialization/move state.
+    InvalidStoreLocation,
     /// A note identity is empty, oversized, whitespace-only, or contains controls.
     InvalidNoteId,
     /// A full object address is not `b3:` followed by 64 lowercase hex digits.
@@ -97,6 +127,8 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidStoreFolder => "store folder must be a visible vault-relative path of 1–4096 UTF-8 bytes without absolute paths, hidden or empty components, traversal, backslashes, controls, or nonportable filename characters",
+            Self::InvalidStoreLocation => "store location requires format 1, a valid optional UUID, distinct nonoverlapping folders for a pending move, and a UUID without a pending move for initialization",
             Self::InvalidNoteId => "note ID must contain 1–4096 UTF-8 bytes, non-whitespace text, and no control characters",
             Self::InvalidObjectHash => "object address must be b3: followed by 64 lowercase hexadecimal digits",
             Self::MissingObjectAlias => "legacy object address requires a matching note-scoped alias",
@@ -112,28 +144,85 @@ impl fmt::Display for StoreError {
 
 impl Error for StoreError {}
 
-/// Return the single vault-wide storage layout without touching storage.
+/// Validate a canonical visible folder without filesystem access or normalization.
+pub fn validate_store_folder_impl(folder: &str) -> Result<String, StoreError> {
+    validate_store_folder(folder)?;
+    Ok(folder.to_string())
+}
+
+fn validate_store_folder(folder: &str) -> Result<(), StoreError> {
+    if folder.is_empty()
+        || folder.len() > MAX_STORE_FOLDER_BYTES
+        || folder.chars().any(|ch| {
+            ch.is_control()
+                || matches!(ch, '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*')
+        })
+        || folder.split('/').any(|component| {
+            component.is_empty()
+                || component.starts_with('.')
+                || component.trim().is_empty()
+                || component.ends_with([' ', '.'])
+        })
+        || folder
+            .split('/')
+            .next()
+            .is_some_and(|component| component.eq_ignore_ascii_case(STORE_LOCATION_PATH))
+        || folder
+            .split_once('/')
+            .is_some_and(|(first, _)| first.eq_ignore_ascii_case(STORE_ROOT))
+    {
+        return Err(StoreError::InvalidStoreFolder);
+    }
+    Ok(())
+}
+
+fn selected_folder(folder: Option<&str>) -> Result<&str, StoreError> {
+    let folder = folder.unwrap_or(STORE_ROOT);
+    validate_store_folder(folder)?;
+    Ok(folder)
+}
+
+/// Return the default vault-wide layout without touching storage.
 pub fn storage_layout_impl() -> StorageLayout {
+    layout_for_folder(STORE_ROOT)
+}
+
+/// Return a validated layout; `None` retains the default `mica-data` directory.
+pub fn storage_layout_at_impl(folder: Option<&str>) -> Result<StorageLayout, StoreError> {
+    Ok(layout_for_folder(selected_folder(folder)?))
+}
+
+fn layout_for_folder(folder: &str) -> StorageLayout {
     StorageLayout {
         format: STORE_FORMAT,
-        root: STORE_ROOT.into(),
-        marker: format!("{STORE_ROOT}/root.json"),
-        objects: format!("{STORE_ROOT}/objects"),
-        notes: format!("{STORE_ROOT}/notes"),
-        bridge_inbox: format!("{STORE_ROOT}/bridge/inbox"),
-        bridge_outbox: format!("{STORE_ROOT}/bridge/outbox"),
-        orphaned: format!("{STORE_ROOT}/orphaned"),
+        root: folder.into(),
+        location: STORE_LOCATION_PATH.into(),
+        marker: format!("{folder}/root.json"),
+        objects: format!("{folder}/objects"),
+        notes: format!("{folder}/notes"),
+        bridge_inbox: format!("{folder}/bridge/inbox"),
+        bridge_outbox: format!("{folder}/bridge/outbox"),
+        orphaned: format!("{folder}/orphaned"),
     }
 }
 
-/// Derive safe vault-relative history paths without interpolating the note ID.
+/// Derive default history paths without interpolating the authored note ID.
 pub fn note_paths_impl(note_id: &str) -> Result<NotePaths, StoreError> {
+    note_paths_at_impl(note_id, None)
+}
+
+/// Derive identity-bound paths below a validated optional managed directory.
+pub fn note_paths_at_impl(
+    note_id: &str,
+    folder: Option<&str>,
+) -> Result<NotePaths, StoreError> {
+    let folder = selected_folder(folder)?;
     validate_note_id(note_id)?;
     let mut hash = blake3::Hasher::new();
     hash.update(b"mica.note-id\0");
     hash.update(note_id.as_bytes());
     let key = format!("n-{}", hash.finalize().to_hex());
-    let dir = format!("{STORE_ROOT}/notes/{key}");
+    let dir = format!("{folder}/notes/{key}");
     Ok(NotePaths {
         key,
         ledger: format!("{dir}/ledger.jsonl"),
@@ -146,22 +235,45 @@ pub fn note_paths_impl(note_id: &str) -> Result<NotePaths, StoreError> {
     })
 }
 
-/// Derive object paths only from a complete canonical BLAKE3 address.
+/// Derive default object paths only from a complete canonical BLAKE3 address.
 pub fn object_paths_impl(full_hash: &str) -> Result<ObjectPaths, StoreError> {
+    object_paths_at_impl(full_hash, None)
+}
+
+/// Derive shared object paths below a validated optional managed directory.
+pub fn object_paths_at_impl(
+    full_hash: &str,
+    folder: Option<&str>,
+) -> Result<ObjectPaths, StoreError> {
+    let folder = selected_folder(folder)?;
     if !is_hash(full_hash, 64) {
         return Err(StoreError::InvalidObjectHash);
     }
     let digest = &full_hash[3..];
     Ok(ObjectPaths {
-        plain: format!("{STORE_ROOT}/objects/b3-{digest}.mica.md"),
-        gzip: format!("{STORE_ROOT}/objects/b3-{digest}.mica.gz"),
+        plain: format!("{folder}/objects/b3-{digest}.mica.md"),
+        gzip: format!("{folder}/objects/b3-{digest}.mica.gz"),
     })
 }
 
-/// Test an already-normalized vault-relative path's exact first component.
+/// Test an already-normalized vault-relative path against the default namespace.
 pub fn is_managed_path_impl(vault_relative: &str) -> bool {
-    vault_relative
-        .strip_prefix(STORE_ROOT)
+    is_path_under(vault_relative, STORE_ROOT)
+}
+
+/// Reserve the locator, default namespace, and a validated optional managed directory.
+pub fn is_managed_path_at_impl(
+    vault_relative: &str,
+    folder: Option<&str>,
+) -> Result<bool, StoreError> {
+    let folder = selected_folder(folder)?;
+    Ok(vault_relative == STORE_LOCATION_PATH
+        || is_managed_path_impl(vault_relative)
+        || is_path_under(vault_relative, folder))
+}
+
+fn is_path_under(path: &str, folder: &str) -> bool {
+    path.strip_prefix(folder)
         .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
 }
 
@@ -171,6 +283,35 @@ pub fn validate_store_marker_impl(marker: StoreMarker) -> Result<StoreMarker, St
         return Err(StoreError::InvalidStoreMarker);
     }
     Ok(marker)
+}
+
+/// Validate the shared location schema without resolving or moving any files.
+/// Pending initialization or relocation is valid data; hosts resume only the recorded intent.
+pub fn validate_store_location_impl(location: StoreLocation) -> Result<StoreLocation, StoreError> {
+    if location.format != STORE_FORMAT
+        || validate_store_folder(&location.folder).is_err()
+        || location
+            .store_id
+            .as_ref()
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+        || (location.initializing
+            && (location.store_id.is_none() || location.previous_folder.is_some()))
+    {
+        return Err(StoreError::InvalidStoreLocation);
+    }
+    if let Some(previous) = location.previous_folder.as_deref() {
+        if location.store_id.is_none() || validate_store_folder(previous).is_err() {
+            return Err(StoreError::InvalidStoreLocation);
+        }
+        // Keep authored casing, but reject moves that alias or overlap on
+        // case-insensitive hosts. Hosts additionally check real containment.
+        let previous = previous.to_lowercase();
+        let folder = location.folder.to_lowercase();
+        if is_path_under(&folder, &previous) || is_path_under(&previous, &folder) {
+            return Err(StoreError::InvalidStoreLocation);
+        }
+    }
+    Ok(location)
 }
 
 /// Resolve a legacy hash only through a matching note-scoped full-hash alias.

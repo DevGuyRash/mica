@@ -37,9 +37,11 @@ pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
 pub use store::{
-    is_managed_path_impl, note_id_impl, note_paths_impl, object_paths_impl, resolve_object_hash_impl,
-    set_note_id_impl, storage_layout_impl, validate_store_marker_impl, NotePaths, ObjectPaths,
-    StorageLayout, StoreError, StoreMarker,
+    is_managed_path_at_impl, is_managed_path_impl, note_id_impl, note_paths_at_impl, note_paths_impl,
+    object_paths_at_impl, object_paths_impl, resolve_object_hash_impl, set_note_id_impl,
+    storage_layout_at_impl, storage_layout_impl, validate_store_folder_impl,
+    validate_store_location_impl, validate_store_marker_impl, NotePaths, ObjectPaths, StorageLayout,
+    StoreError, StoreLocation, StoreMarker, MAX_STORE_LOCATION_BYTES,
 };
 pub use versions::{
     content_signature_impl, fold_ledger_impl, has_content_impl, resolve_ledger_impl,
@@ -93,33 +95,44 @@ pub fn new_id() -> String {
     new_id_impl()
 }
 
-/// Return the vault-wide layout without creating any storage.
+/// Return the selected layout without creating any storage.
 #[wasm_bindgen]
-pub fn storage_layout() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&storage_layout_impl())
+pub fn storage_layout(folder: Option<String>) -> Result<JsValue, JsValue> {
+    let layout = storage_layout_at_impl(folder.as_deref())
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&layout)
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Derive safe, identity-bound note paths relative to the vault root.
 #[wasm_bindgen]
-pub fn note_paths(note_id: &str) -> Result<JsValue, JsValue> {
-    let paths = note_paths_impl(note_id).map_err(|error| JsValue::from_str(&error.to_string()))?;
+pub fn note_paths(note_id: &str, folder: Option<String>) -> Result<JsValue, JsValue> {
+    let paths = note_paths_at_impl(note_id, folder.as_deref())
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     serde_wasm_bindgen::to_value(&paths)
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Derive shared object paths from a complete canonical BLAKE3 address.
 #[wasm_bindgen]
-pub fn object_paths(full_hash: &str) -> Result<JsValue, JsValue> {
-    let paths = object_paths_impl(full_hash).map_err(|error| JsValue::from_str(&error.to_string()))?;
+pub fn object_paths(full_hash: &str, folder: Option<String>) -> Result<JsValue, JsValue> {
+    let paths = object_paths_at_impl(full_hash, folder.as_deref())
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     serde_wasm_bindgen::to_value(&paths)
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
-/// Test an already-normalized vault-relative path for managed-store membership.
+/// Reserve the default and selected managed paths after host normalization.
 #[wasm_bindgen]
-pub fn is_managed_path(vault_relative: &str) -> bool {
-    is_managed_path_impl(vault_relative)
+pub fn is_managed_path(vault_relative: &str, folder: Option<String>) -> Result<bool, JsValue> {
+    is_managed_path_at_impl(vault_relative, folder.as_deref())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Validate a visible vault-relative managed folder without resolving files.
+#[wasm_bindgen]
+pub fn validate_store_folder(folder: &str) -> Result<String, JsValue> {
+    validate_store_folder_impl(folder).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Read a note's source-backed identity without preparing or stamping it.
@@ -147,6 +160,20 @@ pub fn validate_store_marker(marker: JsValue) -> Result<JsValue, JsValue> {
     let marker = validate_store_marker_impl(marker)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     serde_wasm_bindgen::to_value(&marker)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Validate an already JSON-decoded portable location, rejecting unknown fields.
+#[wasm_bindgen]
+pub fn validate_store_location(location: JsValue) -> Result<JsValue, JsValue> {
+    use serde::Serialize;
+    let location: StoreLocation = serde_wasm_bindgen::from_value(location)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let location = validate_store_location_impl(location)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    location
+        .serialize(&serializer)
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 

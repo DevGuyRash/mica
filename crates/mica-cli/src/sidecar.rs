@@ -18,8 +18,19 @@ use std::sync::{Arc, Mutex};
 pub struct StoreRoot {
     /// Canonical filesystem root selected independently of Git.
     pub vault: PathBuf,
+    /// Fixed paths resolved from the authoritative vault locator.
+    pub layout: mica_core::StorageLayout,
     marker: Arc<Mutex<Option<mica_core::StoreMarker>>>,
+    location: Arc<Mutex<Option<LocationGeneration>>>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocationGeneration {
+    value: mica_core::StoreLocation,
+    bytes: Vec<u8>,
+}
+
+static STORE_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Default)]
 struct NoteReadCache {
@@ -45,131 +56,284 @@ const MAX_ALIAS_ENTRIES: usize = 16_384;
 const MAX_MARKER_BYTES: usize = 16 * 1024;
 
 impl StoreRoot {
-    /// Validate an existing store, or open a noncreating handle for a fresh root.
+    /// Resolve the authoritative vault locator without creating persistent state.
     pub fn open(vault: &Path) -> Result<Self> {
+        Self::open_at(vault, None)
+    }
+
+    /// An explicit first-use folder is only a candidate until claim_location wins.
+    /// An existing locator must agree; native commands never resume folder moves.
+    pub fn open_at(vault: &Path, folder: Option<&str>) -> Result<Self> {
         let vault = fs::canonicalize(vault).map_err(io_ctx(vault.display().to_string()))?;
         if !vault.is_dir() {
-            return Err(CliError::BadArgs(
-                "Mica root must be an existing directory".to_string(),
-            ));
+            return Err(CliError::BadArgs("Mica root must be an existing directory".to_string()));
         }
-        let layout = mica_core::storage_layout_impl();
-        let dir = vault.join(&layout.root);
-        let marker = if validate_regular_directory_or_missing(&dir, "store root")? {
-            let path = vault.join(&layout.marker);
-            let bytes =
-                read_bounded_file(&path, MAX_MARKER_BYTES, "store marker")?.ok_or_else(|| {
-                    CliError::Corrupt(format!(
-                        "Mica store exists without its root marker: {}",
-                        dir.display()
-                    ))
-                })?;
-            let decoded: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-                CliError::Corrupt(format!("invalid Mica store marker: {error}"))
-            })?;
-            let value: mica_core::StoreMarker =
-                serde_json::from_value(decoded).map_err(|error| {
-                    CliError::Corrupt(format!("invalid Mica store marker: {error}"))
-                })?;
-            Some(mica_core::validate_store_marker_impl(value).map_err(store_error)?)
-        } else {
-            if !crate::vault::legacy_sidecars(&vault)?.is_empty() {
-                return Err(CliError::Corrupt("legacy Mica sidecars require an explicit offline cutover before using the central store".to_string()));
+        let requested = folder.map(mica_core::validate_store_folder_impl).transpose().map_err(store_error)?;
+        let location = read_location(&vault)?;
+        let selected = match location.as_ref() {
+            Some(generation) => {
+                if requested.as_ref().is_some_and(|value| value != &generation.value.folder) {
+                    return Err(CliError::BadArgs("--store-dir disagrees with mica.json; use the configured store folder".to_string()));
+                }
+                generation.value.folder.clone()
             }
-            None
+            None => requested.unwrap_or_else(|| mica_core::storage_layout_impl().root),
         };
+        let layout = mica_core::storage_layout_at_impl(Some(&selected)).map_err(store_error)?;
+        reject_competing_default(&vault, &layout)?;
+        let marker = read_routed_marker(&vault, &layout, location.as_ref().map(|generation| &generation.value))?;
+        if marker.is_none() && !crate::vault::legacy_sidecars_in(&vault, Some(&layout.root))?.is_empty() {
+            return Err(CliError::Corrupt("legacy Mica sidecars require an explicit offline cutover before using the central store".to_string()));
+        }
         Ok(Self {
             vault,
+            layout,
             marker: Arc::new(Mutex::new(marker)),
+            location: Arc::new(Mutex::new(location)),
         })
     }
 
     fn observed_marker(&self) -> Result<Option<mica_core::StoreMarker>> {
-        self.marker
-            .lock()
-            .map(|marker| marker.clone())
+        self.marker.lock().map(|marker| marker.clone())
             .map_err(|_| CliError::Corrupt("Mica store identity lock failed".to_string()))
     }
 
+    fn observed_location(&self) -> Result<Option<LocationGeneration>> {
+        self.location.lock().map(|location| location.clone())
+            .map_err(|_| CliError::Corrupt("Mica store location lock failed".to_string()))
+    }
+
     fn observe_marker(&self, marker: mica_core::StoreMarker) -> Result<()> {
-        let mut observed = self
-            .marker
-            .lock()
+        let mut observed = self.marker.lock()
             .map_err(|_| CliError::Corrupt("Mica store identity lock failed".to_string()))?;
-        if observed
-            .as_ref()
-            .is_some_and(|expected| expected.store_id != marker.store_id)
-        {
-            return Err(CliError::Corrupt(
-                "Mica store identity changed during the operation".to_string(),
-            ));
+        if observed.as_ref().is_some_and(|expected| expected.store_id != marker.store_id) {
+            return Err(CliError::Corrupt("Mica store identity changed during the operation".to_string()));
         }
         *observed = Some(marker);
         Ok(())
     }
 
-    fn ensure(&self) -> Result<()> {
-        static ROOT_INITIALIZATION: Mutex<()> = Mutex::new(());
-        let _initialization = ROOT_INITIALIZATION
-            .lock()
-            .map_err(|_| CliError::Corrupt("Mica root initialization lock failed".to_string()))?;
-        let layout = mica_core::storage_layout_impl();
-        let dir = self.vault.join(&layout.root);
-        validate_directory_or_missing(&dir, "store root")?;
-        if self.observed_marker()?.is_some() {
-            let current = Self::open(&self.vault)?.observed_marker()?.ok_or_else(|| {
-                CliError::Corrupt("Mica store disappeared during the operation".to_string())
-            })?;
-            self.observe_marker(current)?;
-        } else {
-            // A missing-store handle can only initialize an empty root. A racing
-            // initializer may have already published the same format marker.
-            if !dir.exists() && !crate::vault::legacy_sidecars(&self.vault)?.is_empty() {
-                return Err(CliError::Corrupt("legacy Mica sidecars require an explicit offline cutover before initializing the central store".to_string()));
-            }
-            ensure_safe_dir(&dir)?;
-            let marker_path = self.vault.join(&layout.marker);
-            if !validate_regular_file_or_missing(&marker_path, "store marker")? {
-                if fs::read_dir(&dir)
-                    .map_err(io_ctx(dir.display().to_string()))?
-                    .next()
-                    .is_some()
-                {
-                    return Err(CliError::Corrupt(
-                        "Mica store has files but no root marker; refusing to adopt it".to_string(),
-                    ));
-                }
-                let marker = mica_core::StoreMarker {
-                    format: layout.format,
-                    store_id: mica_core::new_id_impl(),
-                };
-                let mut bytes = serde_json::to_vec_pretty(&marker)
-                    .map_err(|error| CliError::Corrupt(error.to_string()))?;
-                bytes.push(b'\n');
-                publish_immutable(&marker_path, &bytes)?;
-            }
-            let winner = Self::open(&self.vault)?.observed_marker()?.ok_or_else(|| {
-                CliError::Corrupt("Mica store marker disappeared during initialization".to_string())
-            })?;
-            self.observe_marker(winner)?;
+    /// Revalidate the fixed route and store generation without creating state.
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        let current = read_location(&self.vault)?;
+        if current != self.observed_location()? {
+            return Err(CliError::Corrupt("Mica storage location changed during the operation; retry against mica.json".to_string()));
         }
-        for relative in [&layout.objects, &layout.notes, &layout.orphaned] {
+        reject_competing_default(&self.vault, &self.layout)?;
+        let marker = read_routed_marker(&self.vault, &self.layout, current.as_ref().map(|generation| &generation.value))?;
+        match marker {
+            Some(marker) => self.observe_marker(marker),
+            None if self.observed_marker()?.is_some() => Err(CliError::Corrupt("Mica store disappeared during the operation".to_string())),
+            None => Ok(()),
+        }
+    }
+
+    /// Ordinary reads refuse an unfinished initialization; write preflight stays noncreating.
+    pub fn require_ready(&self) -> Result<()> {
+        self.revalidate()?;
+        if self.observed_location()?.as_ref().is_some_and(|generation| generation.value.initializing) {
+            return Err(CliError::Corrupt("Mica store initialization is pending; rerun a writing command to complete the recorded initialization".to_string()));
+        }
+        Ok(())
+    }
+
+    /// Claim routing after full preflight and finish its recorded initialization.
+    /// No note, object, ledger, or journal is published by this operation.
+    pub fn claim_location(&self) -> Result<()> {
+        let _initialization = STORE_INITIALIZATION.lock()
+            .map_err(|_| CliError::Corrupt("Mica root initialization lock failed".to_string()))?;
+        self.claim_location_locked()
+    }
+
+    fn claim_location_locked(&self) -> Result<()> {
+        self.revalidate()?;
+        match self.observed_location()? {
+            None => {
+                let existing = self.observed_marker()?;
+                let value = mica_core::StoreLocation {
+                    format: self.layout.format,
+                    folder: self.layout.root.clone(),
+                    store_id: Some(existing.as_ref().map(|marker| marker.store_id.clone()).unwrap_or_else(mica_core::new_id_impl)),
+                    previous_folder: None,
+                    initializing: existing.is_none(),
+                };
+                let bytes = location_bytes(&value)?;
+                publish_immutable(&self.vault.join(&self.layout.location), &bytes)?;
+                let winner = read_location(&self.vault)?.ok_or_else(|| CliError::Corrupt("Mica locator disappeared during its claim".to_string()))?;
+                if winner.value != value {
+                    return Err(CliError::Corrupt("another client claimed a different Mica storage location; no store was initialized".to_string()));
+                }
+                self.set_location(winner)?;
+            }
+            Some(generation) if generation.value.store_id.is_none() => {
+                let mut value = generation.value;
+                value.store_id = Some(mica_core::new_id_impl());
+                value.initializing = true;
+                self.publish_location(&generation.bytes, value)?;
+            }
+            Some(_) => {}
+        }
+        self.finish_initialization_locked()?;
+        self.revalidate()
+    }
+
+    fn set_location(&self, generation: LocationGeneration) -> Result<()> {
+        *self.location.lock().map_err(|_| CliError::Corrupt("Mica store location lock failed".to_string()))? = Some(generation);
+        Ok(())
+    }
+
+    fn publish_location(&self, expected: &[u8], value: mica_core::StoreLocation) -> Result<()> {
+        self.revalidate()?;
+        let bytes = location_bytes(&value)?;
+        fsutil::atomic_write_if_unchanged(&self.vault.join(&self.layout.location), expected, &bytes)?;
+        let published = read_location(&self.vault)?.ok_or_else(|| CliError::Corrupt("Mica locator disappeared after publication".to_string()))?;
+        if published.value != value || published.bytes != bytes {
+            return Err(CliError::Corrupt("Mica locator changed during publication".to_string()));
+        }
+        self.set_location(published)
+    }
+
+    fn finish_initialization_locked(&self) -> Result<()> {
+        let generation = self.observed_location()?.ok_or_else(|| CliError::Corrupt("Mica locator is missing during initialization".to_string()))?;
+        if !generation.value.initializing {
+            return Ok(());
+        }
+        self.revalidate()?;
+        let id = generation.value.store_id.clone().ok_or_else(|| CliError::Corrupt("recorded Mica initialization has no identity".to_string()))?;
+        let marker = mica_core::StoreMarker { format: self.layout.format, store_id: id };
+        let mut component_path = self.vault.clone();
+        for component in Path::new(&self.layout.root).components() {
+            component_path.push(component.as_os_str());
+            ensure_safe_dir(&component_path)?;
+        }
+        if read_initializing_marker(&self.vault, &self.layout, &marker.store_id)?.is_none() {
+            let mut bytes = serde_json::to_vec_pretty(&marker).map_err(|error| CliError::Corrupt(error.to_string()))?;
+            bytes.push(b'\n');
+            publish_immutable(&self.vault.join(&self.layout.marker), &bytes)?;
+        }
+        let winner = read_initializing_marker(&self.vault, &self.layout, &marker.store_id)?.ok_or_else(|| CliError::Corrupt("Mica store marker disappeared during recorded initialization".to_string()))?;
+        self.observe_marker(winner)?;
+        let mut value = generation.value;
+        value.initializing = false;
+        self.publish_location(&generation.bytes, value)
+    }
+
+    fn ensure(&self) -> Result<()> {
+        let _initialization = STORE_INITIALIZATION.lock()
+            .map_err(|_| CliError::Corrupt("Mica root initialization lock failed".to_string()))?;
+        self.claim_location_locked()?;
+        self.revalidate()?;
+        for relative in [&self.layout.objects, &self.layout.notes, &self.layout.orphaned] {
             ensure_safe_dir(&self.vault.join(relative))?;
         }
-        let inbox = self.vault.join(&layout.bridge_inbox);
-        let bridge = inbox
-            .parent()
-            .ok_or_else(|| CliError::Corrupt("invalid bridge layout".to_string()))?;
+        let inbox = self.vault.join(&self.layout.bridge_inbox);
+        let bridge = inbox.parent().ok_or_else(|| CliError::Corrupt("invalid bridge layout".to_string()))?;
         ensure_safe_dir(bridge)?;
         ensure_safe_dir(&inbox)?;
-        ensure_safe_dir(&self.vault.join(&layout.bridge_outbox))
+        ensure_safe_dir(&self.vault.join(&self.layout.bridge_outbox))
     }
+}
+
+fn read_routed_marker(vault: &Path, layout: &mica_core::StorageLayout, location: Option<&mica_core::StoreLocation>) -> Result<Option<mica_core::StoreMarker>> {
+    if let Some(value) = location.filter(|value| value.initializing) {
+        let id = value.store_id.as_deref().ok_or_else(|| CliError::Corrupt("recorded Mica initialization has no identity".to_string()))?;
+        return read_initializing_marker(vault, layout, id);
+    }
+    let marker = read_store_marker(vault, layout)?;
+    if let Some(value) = location {
+        match value.store_id.as_deref() {
+            Some(expected) if marker.as_ref().map(|marker| marker.store_id.as_str()) != Some(expected) => {
+                return Err(CliError::Corrupt("mica.json store identity does not match its configured store marker".to_string()));
+            }
+            None if marker.is_some() => {
+                return Err(CliError::Corrupt("an uninitialized Mica locator points to an existing store; resolve mica.json before using it".to_string()));
+            }
+            _ => {}
+        }
+    }
+    Ok(marker)
+}
+
+/// A recorded initialization owns only an empty leaf or its exact UUID marker.
+fn read_initializing_marker(vault: &Path, layout: &mica_core::StorageLayout, id: &str) -> Result<Option<mica_core::StoreMarker>> {
+    validate_managed_directory(vault, &layout.root)?;
+    let dir = vault.join(&layout.root);
+    if !dir.exists() { return Ok(None); }
+    let mut has_marker = false;
+    for entry in fs::read_dir(&dir).map_err(io_ctx(dir.display().to_string()))? {
+        let entry = entry.map_err(io_ctx(dir.display().to_string()))?;
+        if entry.file_name().as_os_str() != std::ffi::OsStr::new("root.json") {
+            return Err(CliError::Corrupt("recorded Mica initialization contains unexpected state; current files were preserved".to_string()));
+        }
+        has_marker = true;
+    }
+    if !has_marker { return Ok(None); }
+    let marker = read_store_marker(vault, layout)?.ok_or_else(|| CliError::Corrupt("recorded Mica initialization marker disappeared".to_string()))?;
+    if marker.store_id != id {
+        return Err(CliError::Corrupt("recorded Mica initialization marker has a different identity; current files were preserved".to_string()));
+    }
+    Ok(Some(marker))
+}
+
+fn read_location(vault: &Path) -> Result<Option<LocationGeneration>> {
+    let path = vault.join(mica_core::storage_layout_impl().location);
+    let Some(bytes) = read_bounded_file(&path, mica_core::MAX_STORE_LOCATION_BYTES, "store locator")? else { return Ok(None); };
+    let decoded: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| CliError::Corrupt(format!("invalid Mica store locator: {error}")))?;
+    let value: mica_core::StoreLocation = serde_json::from_value(decoded).map_err(|error| CliError::Corrupt(format!("invalid Mica store locator: {error}")))?;
+    let value = mica_core::validate_store_location_impl(value).map_err(store_error)?;
+    if value.previous_folder.is_some() {
+        return Err(CliError::Corrupt("Mica store relocation is pending; reopen the vault in Obsidian to finish it before using the CLI".to_string()));
+    }
+    Ok(Some(LocationGeneration { value, bytes }))
+}
+
+fn location_bytes(value: &mica_core::StoreLocation) -> Result<Vec<u8>> {
+    mica_core::validate_store_location_impl(value.clone()).map_err(store_error)?;
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() > mica_core::MAX_STORE_LOCATION_BYTES {
+        return Err(CliError::Corrupt("Mica store locator exceeds its safety limit".to_string()));
+    }
+    Ok(bytes)
+}
+
+fn reject_competing_default(vault: &Path, layout: &mica_core::StorageLayout) -> Result<()> {
+    let default = mica_core::storage_layout_impl();
+    if layout.root != default.root {
+        let path = vault.join(default.root);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(CliError::Corrupt("the reserved default Mica store folder also exists; resolve the conflicting store before using the configured location".to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_ctx(path.display().to_string())(error)),
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_directory(vault: &Path, relative: &str) -> Result<()> {
+    let mut path = vault.to_path_buf();
+    for component in Path::new(relative).components() {
+        path.push(component.as_os_str());
+        validate_directory_or_missing(&path, "managed directory")?;
+    }
+    Ok(())
+}
+
+fn read_store_marker(vault: &Path, layout: &mica_core::StorageLayout) -> Result<Option<mica_core::StoreMarker>> {
+    validate_managed_directory(vault, &layout.root)?;
+    let dir = vault.join(&layout.root);
+    if !dir.exists() { return Ok(None); }
+    let path = vault.join(&layout.marker);
+    let bytes = read_bounded_file(&path, MAX_MARKER_BYTES, "store marker")?.ok_or_else(|| CliError::Corrupt(format!("Mica store exists without its root marker: {}", dir.display())))?;
+    let decoded: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| CliError::Corrupt(format!("invalid Mica store marker: {error}")))?;
+    let value: mica_core::StoreMarker = serde_json::from_value(decoded).map_err(|error| CliError::Corrupt(format!("invalid Mica store marker: {error}")))?;
+    mica_core::validate_store_marker_impl(value).map(Some).map_err(store_error)
 }
 
 impl NoteStore {
     /// Bind the already-read source anchor without stamping or creating state.
     pub fn from_document(note: &crate::vault::NoteRef, doc: &str) -> Result<Option<Self>> {
-        let root = StoreRoot::open(&note.vault)?;
+        let root = note.store_root()?;
         Self::from_document_in(&root, note, doc)
     }
 
@@ -188,12 +352,17 @@ impl NoteStore {
     /// Bind a validated identity for staged writes or retained orphan inspection.
     /// Writable callers must separately guard the live source and ID uniqueness.
     pub fn for_id(vault: &Path, note: &Path, id: &str) -> Result<Self> {
-        Self::bind(StoreRoot::open(vault)?, note, id)
+        Self::for_id_in(&StoreRoot::open(vault)?, note, id)
+    }
+
+    /// Reuse the selected routing generation for staged or orphaned records.
+    pub fn for_id_in(root: &StoreRoot, note: &Path, id: &str) -> Result<Self> {
+        Self::bind(root.clone(), note, id)
     }
 
     fn bind(root: StoreRoot, note: &Path, id: &str) -> Result<Self> {
-        let paths = mica_core::note_paths_impl(id).map_err(store_error)?;
-        let note = contained_note_path(&root.vault, note)?;
+        let paths = mica_core::note_paths_at_impl(id, Some(&root.layout.root)).map_err(store_error)?;
+        let note = contained_note_path(&root, note)?;
         validate_directory_or_missing(&root.vault.join(&paths.dir), "note store")?;
         Ok(Self {
             root,
@@ -217,7 +386,7 @@ fn store_error(error: mica_core::StoreError) -> CliError {
     CliError::Corrupt(error.to_string())
 }
 
-fn validate_note_hint(path: &str) -> Result<()> {
+fn validate_note_hint(root: &StoreRoot, path: &str) -> Result<()> {
     let bytes = path.as_bytes();
     let drive =
         bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
@@ -226,7 +395,7 @@ fn validate_note_hint(path: &str) -> Result<()> {
         || Path::new(path)
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        || mica_core::is_managed_path_impl(path)
+        || mica_core::is_managed_path_at_impl(path, Some(&root.layout.root)).map_err(store_error)?
         || path.contains('\\')
         || drive
     {
@@ -237,7 +406,8 @@ fn validate_note_hint(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn contained_note_path(vault: &Path, note: &Path) -> Result<PathBuf> {
+fn contained_note_path(root: &StoreRoot, note: &Path) -> Result<PathBuf> {
+    let vault = &root.vault;
     let path = if note.is_absolute() {
         note.to_path_buf()
     } else {
@@ -258,7 +428,7 @@ fn contained_note_path(vault: &Path, note: &Path) -> Result<PathBuf> {
     let relative_text = relative
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
-    if mica_core::is_managed_path_impl(&relative_text) {
+    if mica_core::is_managed_path_at_impl(&relative_text, Some(&root.layout.root)).map_err(store_error)? {
         return Err(CliError::BadArgs(
             "Mica managed state is not a live note".to_string(),
         ));
@@ -372,19 +542,6 @@ struct StoredManifest<Identity = String> {
 /// Validate the record before an operation can publish an anchor or user bytes.
 pub(crate) fn preflight_note_record(note: &NoteStore) -> Result<()> {
     validate_sidecar_layout_for_write(note)?;
-    let root_path = note.root.vault.join(mica_core::storage_layout_impl().root);
-    if root_path.exists() {
-        let current = StoreRoot::open(&note.root.vault)?
-            .observed_marker()?
-            .ok_or_else(|| {
-                CliError::Corrupt("Mica store marker disappeared during preflight".to_string())
-            })?;
-        note.root.observe_marker(current)?;
-    } else if note.root.observed_marker()?.is_some() {
-        return Err(CliError::Corrupt(
-            "Mica store disappeared during the operation".to_string(),
-        ));
-    }
     let path = note.root.vault.join(&note.paths.manifest);
     if let Some(bytes) = read_bounded_file(&path, MAX_LEDGER_BYTES, "note manifest")? {
         validate_manifest_bytes(note, &bytes)?;
@@ -407,8 +564,8 @@ pub(crate) fn validate_manifest_bytes(note: &NoteStore, bytes: &[u8]) -> Result<
             "note manifest identity mismatch".to_string(),
         ));
     }
-    validate_note_hint(&manifest.path)?;
-    contained_note_path(&note.root.vault, Path::new(&manifest.path))?;
+    validate_note_hint(&note.root, &manifest.path)?;
+    contained_note_path(&note.root, Path::new(&manifest.path))?;
     Ok(())
 }
 
@@ -444,16 +601,20 @@ pub(crate) fn manifest_matches_except_hint(
             return Ok(false);
         }
     }
-    validate_note_hint(&current.path)?;
-    validate_note_hint(&expected.path)?;
+    validate_note_hint(&note.root, &current.path)?;
+    validate_note_hint(&note.root, &expected.path)?;
     Ok(current.blocks == expected.blocks && current.updated == expected.updated)
 }
 
 /// Enumerate central records independently of whether their live note exists.
 pub fn enumerate_note_stores(vault: &Path) -> Result<Vec<NoteStore>> {
-    let root = StoreRoot::open(vault)?;
-    let layout = mica_core::storage_layout_impl();
-    let notes = root.vault.join(&layout.notes);
+    enumerate_note_stores_in(&StoreRoot::open(vault)?)
+}
+
+/// Enumerate records using one retained locator and store generation.
+pub fn enumerate_note_stores_in(root: &StoreRoot) -> Result<Vec<NoteStore>> {
+    root.revalidate()?;
+    let notes = root.vault.join(&root.layout.notes);
     if !validate_regular_directory_or_missing(&notes, "notes directory")? {
         return Ok(Vec::new());
     }
@@ -484,7 +645,7 @@ pub fn enumerate_note_stores(vault: &Path) -> Result<Vec<NoteStore>> {
                 path.display()
             ))
         })?;
-        validate_note_hint(&manifest.path)?;
+        validate_note_hint(root, &manifest.path)?;
         let store = NoteStore::bind(root.clone(), Path::new(&manifest.path), &manifest.note_id)?;
         if sidecar_dir(&store) != entry.path() {
             return Err(CliError::Corrupt(format!(
@@ -527,6 +688,8 @@ pub fn update_note_hint(note: &NoteStore) -> Result<()> {
         &manifest.blocks,
         manifest.updated,
     );
+    validate_manifest_bytes(note, &next)?;
+    note.root.claim_location()?;
     preflight_note_record(note)?;
     fsutil::atomic_write_if_unchanged(&path, &bytes, &next)
 }
@@ -540,7 +703,7 @@ pub fn sidecar_dir(note: &NoteStore) -> PathBuf {
 pub fn objects_dir(note: &NoteStore) -> PathBuf {
     note.root
         .vault
-        .join(mica_core::storage_layout_impl().objects)
+        .join(&note.root.layout.objects)
 }
 
 /// The sidecar's append-only ledger path.
@@ -1062,7 +1225,7 @@ fn validate_section_normalization_journal(journal: &SectionNormalizationJournal)
 
 /// Compressed-object variant path (large objects). Hash is over PLAINTEXT.
 pub fn object_path_gz(note: &NoteStore, hash: &str) -> Result<PathBuf> {
-    let paths = mica_core::object_paths_impl(hash).map_err(store_error)?;
+    let paths = mica_core::object_paths_at_impl(hash, Some(&note.root.layout.root)).map_err(store_error)?;
     Ok(note.root.vault.join(paths.gzip))
 }
 
@@ -1088,7 +1251,7 @@ pub const MAX_FUTURE_EVENT_SKEW_MS: u64 = 86_400_000;
 
 /// Object path for `hash` (`b3:abcd` → `objects/b3-abcd.mica.md`).
 pub fn object_path(note: &NoteStore, hash: &str) -> Result<PathBuf> {
-    let paths = mica_core::object_paths_impl(hash).map_err(store_error)?;
+    let paths = mica_core::object_paths_at_impl(hash, Some(&note.root.layout.root)).map_err(store_error)?;
     Ok(note.root.vault.join(paths.plain))
 }
 
@@ -1498,12 +1661,10 @@ fn preflight_encoded_event_append(note: &NoteStore, lines: &str, max_bytes: usiz
 }
 
 fn validate_sidecar_layout_for_write(note: &NoteStore) -> Result<()> {
+    note.root.revalidate()?;
+    validate_managed_directory(&note.root.vault, &note.root.layout.root)?;
     validate_directory_or_missing(
-        &note.root.vault.join(mica_core::storage_layout_impl().root),
-        "store root",
-    )?;
-    validate_directory_or_missing(
-        &note.root.vault.join(mica_core::storage_layout_impl().notes),
+        &note.root.vault.join(&note.root.layout.notes),
         "notes directory",
     )?;
     validate_directory_or_missing(&sidecar_dir(note), "note store")?;
@@ -2232,10 +2393,10 @@ pub(crate) fn verify_written_object(note: &NoteStore, hash: &str, content: &str)
 }
 
 fn read_pooled_object(root: &StoreRoot, hash: &str, max_bytes: usize) -> Result<Option<String>> {
-    let paths = mica_core::object_paths_impl(hash).map_err(store_error)?;
-    let layout = mica_core::storage_layout_impl();
-    validate_directory_or_missing(&root.vault.join(&layout.root), "store root")?;
-    validate_directory_or_missing(&root.vault.join(&layout.objects), "objects directory")?;
+    root.revalidate()?;
+    let paths = mica_core::object_paths_at_impl(hash, Some(&root.layout.root)).map_err(store_error)?;
+    validate_managed_directory(&root.vault, &root.layout.root)?;
+    validate_directory_or_missing(&root.vault.join(&root.layout.objects), "objects directory")?;
     let plain = root.vault.join(paths.plain);
     let gz = root.vault.join(paths.gzip);
     let has_plain = object_file_exists(&plain, hash)?;
@@ -2390,8 +2551,8 @@ pub fn write_manifest(
             "manifest identity does not match its note store".to_string(),
         ));
     }
-    validate_note_hint(path)?;
-    contained_note_path(&note.root.vault, Path::new(path))?;
+    validate_note_hint(&note.root, path)?;
+    contained_note_path(&note.root, Path::new(path))?;
     let out = manifest_bytes(note_id, path, blocks, updated);
     if out.len() > MAX_LEDGER_BYTES {
         return Err(CliError::Corrupt(
@@ -2476,7 +2637,9 @@ mod tests {
         NoteStore {
             root: StoreRoot {
                 vault,
+                layout: mica_core::storage_layout_impl(),
                 marker: Arc::new(Mutex::new(None)),
+                location: Arc::new(Mutex::new(None)),
             },
             note: path,
             note_id: "nid".to_string(),

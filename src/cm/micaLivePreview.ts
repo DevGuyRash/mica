@@ -32,7 +32,7 @@ import type { BlockApplyHost, CrossBlockMove } from "../ui/dnd";
 import { noteBasenameFromPath, unnamedBlockOrdinals } from "../identity/blockLabel";
 import { VersionsModal, type WorkingCopyProvider } from "../ui/versionsModal";
 import { readObject } from "../storage/sidecar";
-import { isLiveNote } from "../storage/store";
+import { isLiveNote, storeRoot } from "../storage/store";
 import { blockEditHistory } from "./blockEditHistory";
 import { revertBlockToHead, saveBlockVersion } from "../ui/versionActions";
 import { copyOptionsFromSettings } from "../ui/copyPayload";
@@ -376,7 +376,7 @@ export function scanCached(state: EditorState): ScanCache {
  * accepts block-level decorations when they are provided directly.
  */
 function build(plugin: MicaPlugin, state: EditorState, sel: RevealSel): DecorationSet {
-	if (!state.field(editorLivePreviewField, false) || isManagedPath(state.field(editorInfoField, false)?.file?.path ?? "")) return Decoration.none;
+	if (!state.field(editorLivePreviewField, false) || isManagedPath(state.field(editorInfoField, false)?.file?.path ?? "", storeRoot(plugin.app.vault).paths.root)) return Decoration.none;
 	const ranges = [];
 	const { blocks, attrs, tos, contents, unnamedOrdinals } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
@@ -659,7 +659,7 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 					);
 				if (
 					!block ||
-					isManagedPath(info?.file?.path ?? "") ||
+					isManagedPath(info?.file?.path ?? "", storeRoot(plugin.app.vault).paths.root) ||
 					mode === "off" ||
 					rendered ||
 					block.end < this.view.viewport.from ||

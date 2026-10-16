@@ -1,7 +1,7 @@
 import { TFile, TFolder, type Vault } from "obsidian";
 import {
-	isManagedPath, newId, noteId, notePaths, resolveObjectHash, setNoteId, storageLayout, validateStoreMarker,
-	type NotePaths, type StorageLayout,
+	isManagedPath, newId, noteId, notePaths, resolveObjectHash, setNoteId, storageLayout, validateStoreLocation, validateStoreMarker,
+	type NotePaths, type StorageLayout, type StoreLocation,
 } from "../wasm/bridge";
 
 export interface StoreRoot {
@@ -23,6 +23,7 @@ export interface NoteStore {
 interface IdentityEntry { id: string | null; error?: unknown }
 interface StoreState {
 	readonly root: StoreRoot;
+	location: StoreLocation | null;
 	readonly identities: Map<TFile, IdentityEntry>;
 	readonly byId: Map<string, Set<TFile>>;
 	readonly errors: Set<TFile>;
@@ -39,23 +40,119 @@ interface StoreState {
 
 const roots = new WeakMap<Vault, StoreState>();
 
-export function storeRoot(vault: Vault): StoreRoot {
-	let state = roots.get(vault);
-	if (!state) {
-		state = { root: { vault, paths: storageLayout() }, identities: new Map(), byId: new Map(), errors: new Set(), pending: new Map(), dirty: new Set(),
-			revisions: new Map(), indexed: null, initializing: null, disposed: false, epoch: 0, legacyPresent: null, owner: null };
-		roots.set(vault, state);
+export const MAX_STORE_LOCATION_BYTES = 16 * 1024;
+export type { StoreLocation } from "../wasm/bridge";
+
+export interface StoreLocationSnapshot {
+	readonly location: StoreLocation | null;
+	readonly text: string | null;
+	readonly file: TFile | null;
+}
+
+function createState(vault: Vault, location: StoreLocation | null): StoreState {
+	const root = Object.freeze({ vault, paths: Object.freeze(storageLayout(location?.folder)) });
+	return { root, location, identities: new Map(), byId: new Map(), errors: new Set(), pending: new Map(), dirty: new Set(),
+		revisions: new Map(), indexed: null, initializing: null, disposed: false, epoch: 0, legacyPresent: null, owner: null };
+}
+
+/** Startup owns route changes; replacing the configured root invalidates every old handle. */
+export function configureStoreRoot(vault: Vault, location: StoreLocation | null): StoreRoot {
+	const validated = location === null ? null : Object.freeze(validateStoreLocation(location));
+	const old = roots.get(vault);
+	if (old) {
+		old.disposed = true;
+		old.epoch += 1;
+		old.identities.clear(); old.byId.clear(); old.errors.clear(); old.dirty.clear(); old.revisions.clear();
 	}
+	const state = createState(vault, validated);
+	roots.set(vault, state);
 	return state.root;
 }
 
-function stateOf(root: StoreRoot): StoreState {
-	storeRoot(root.vault);
-	return roots.get(root.vault)!;
+export function storeRoot(vault: Vault): StoreRoot {
+	const state = roots.get(vault);
+	return state?.root ?? configureStoreRoot(vault, null);
+}
+
+function stateOf(root: StoreRoot, allowInitializing = false): StoreState {
+	const state = roots.get(root.vault);
+	if (!state || state.root !== root || state.disposed) throw new Error("Mica: storage root changed; retry after startup completes");
+	if (state.location?.previousFolder != null) throw new Error("Mica: storage relocation is pending; ordinary history operations are disabled");
+	if (state.location?.initializing && !allowInitializing) throw new Error("Mica: storage initialization is pending; startup recovery is required");
+	return state;
+}
+
+/** Synchronous final guard for effects admitted after an asynchronous validation. */
+export function assertStoreRootCurrent(root: StoreRoot): void {
+	stateOf(root);
+}
+
+function sameLocation(left: StoreLocation | null, right: StoreLocation | null): boolean {
+	return left === null || right === null ? left === right :
+		left.format === right.format && left.folder === right.folder && left.storeId === right.storeId && left.previousFolder === right.previousFolder && left.initializing === right.initializing;
+}
+
+/** Missing locator reads retain the default-root compatibility lookup without creating anything. */
+export async function readStoreLocation(vault: Vault): Promise<StoreLocationSnapshot> {
+	const path = storageLayout().location;
+	const file = vault.getAbstractFileByPath(path);
+	if (!file) return { location: null, text: null, file: null };
+	if (!(file instanceof TFile) || file.stat.size > MAX_STORE_LOCATION_BYTES) throw new Error("Mica: invalid storage location document");
+	const mtime = file.stat.mtime, size = file.stat.size;
+	const text = await vault.read(file);
+	if (vault.getAbstractFileByPath(path) !== file || file.stat.mtime !== mtime || file.stat.size !== size)
+		throw new Error("Mica: storage location changed while being read; retry");
+	if (new TextEncoder().encode(text).byteLength > MAX_STORE_LOCATION_BYTES) throw new Error("Mica: storage location document is too large");
+	return { location: Object.freeze(validateStoreLocation(JSON.parse(text) as unknown)), text, file };
+}
+
+async function publishStoreLocation(vault: Vault, expected: StoreLocationSnapshot, location: StoreLocation, guard?: () => void): Promise<StoreLocationSnapshot> {
+	const validated = validateStoreLocation(location);
+	const body = JSON.stringify(validated, null, "\t") + "\n";
+	if (new TextEncoder().encode(body).byteLength > MAX_STORE_LOCATION_BYTES) throw new Error("Mica: storage location document is too large");
+	const path = storageLayout().location;
+	guard?.();
+	if (vault.getAbstractFileByPath(path) !== expected.file) throw new Error("Mica: storage location was replaced before publication; retry");
+	if (expected.file) {
+		if (expected.file.path !== path || expected.text === null) throw new Error("Mica: invalid storage location preimage");
+		await vault.process(expected.file, (current) => {
+			guard?.();
+			if (vault.getAbstractFileByPath(path) !== expected.file || current !== expected.text)
+				throw new Error("Mica: storage location changed before publication; retry");
+			return body;
+		});
+	} else {
+		if (expected.text !== null || expected.location !== null) throw new Error("Mica: invalid missing storage location preimage");
+		guard?.();
+		await vault.create(path, body);
+	}
+	const published = await readStoreLocation(vault);
+	guard?.();
+	if (published.text !== body || !sameLocation(published.location, validated)) throw new Error("Mica: storage location publication could not be verified");
+	return published;
+}
+
+/** Controller helper: exact source guard, atomic Vault publication, then authoritative verification. */
+export function writeStoreLocation(vault: Vault, expected: StoreLocationSnapshot, location: StoreLocation): Promise<StoreLocationSnapshot> {
+	return publishStoreLocation(vault, expected, location);
+}
+
+async function assertRouteCurrent(root: StoreRoot, requireClaim = false, allowInitializing = false): Promise<StoreLocationSnapshot> {
+	stateOf(root, allowInitializing);
+	const snapshot = await readStoreLocation(root.vault);
+	const state = stateOf(root, allowInitializing);
+	if (!sameLocation(state.location, snapshot.location) || (snapshot.location?.folder ?? storageLayout().root) !== root.paths.root)
+		throw new Error("Mica: storage location differs from the configured root; restart before using history");
+	if (snapshot.location?.previousFolder != null) throw new Error("Mica: storage relocation is pending");
+	if (requireClaim && snapshot.location === null) throw new Error("Mica: storage location must be claimed before creating managed folders");
+	return snapshot;
 }
 
 export function isLiveNote(file: TFile): boolean {
-	return file.extension.toLowerCase() === "md" && !file.path.includes(".mica/") && !isManagedPath(file.path);
+	const root = storeRoot(file.vault);
+	const previous = roots.get(file.vault)?.location?.previousFolder;
+	return file.extension.toLowerCase() === "md" && !file.path.includes(".mica/") && !isManagedPath(file.path, root.paths.root) &&
+		(previous == null || !isManagedPath(file.path, previous));
 }
 
 function requireLiveNote(file: TFile): void {
@@ -180,43 +277,140 @@ export function installStoreLifecycle(vault: Vault, settled?: () => Promise<void
 	};
 }
 
-export async function ensureStoreFolder(root: StoreRoot, path: string): Promise<void> {
-	if (!isManagedPath(path) || path.includes("\\") || /(?:^|\/)\.{1,2}(?:\/|$)/.test(path)) throw new Error("Mica: storage folder escapes the managed root");
+export function ensureStoreFolder(root: StoreRoot, path: string): Promise<void> {
+	return ensureSelectedFolder(root, path);
+}
+
+async function ensureSelectedFolder(root: StoreRoot, path: string, allowInitializing = false): Promise<void> {
+	stateOf(root, allowInitializing);
+	if (!isManagedPath(path, root.paths.root) || !(path === root.paths.root || path.startsWith(`${root.paths.root}/`)) || path.includes("\\") || /(?:^|\/)\.{1,2}(?:\/|$)/.test(path))
+		throw new Error("Mica: storage folder escapes the selected root");
 	let parent = "";
 	for (const part of path.split("/")) {
 		parent = parent ? `${parent}/${part}` : part;
 		const current = root.vault.getAbstractFileByPath(parent);
 		if (current instanceof TFolder) continue;
 		if (current) throw new Error(`Mica: storage path is not a folder: ${parent}`);
+		await assertRouteCurrent(root, true, allowInitializing);
+		stateOf(root, allowInitializing);
 		try { await root.vault.createFolder(parent); }
 		catch (error) { if (!(root.vault.getAbstractFileByPath(parent) instanceof TFolder)) throw error; }
+		stateOf(root, allowInitializing);
 	}
 }
 
-/** Read lookups never create a store, and old sidecars are never silently bypassed. */
+async function readStoreMarker(root: StoreRoot, file: TFile, expectedText?: string, allowInitializing = false): Promise<string> {
+	if (file.stat.size > 4096) throw new Error("Mica: invalid central store marker");
+	const mtime = file.stat.mtime, size = file.stat.size;
+	const text = await root.vault.read(file);
+	stateOf(root, allowInitializing);
+	if (root.vault.getAbstractFileByPath(root.paths.marker) !== file || file.stat.mtime !== mtime || file.stat.size !== size || new TextEncoder().encode(text).byteLength > 4096)
+		throw new Error("Mica: central store marker changed while being read");
+	if (expectedText !== undefined && text !== expectedText) throw new Error("Mica: owned store marker preimage changed during initialization");
+	return validateStoreMarker(JSON.parse(text) as unknown).storeId;
+}
+
+async function completeStoreInitialization(root: StoreRoot): Promise<void> {
+	let snapshot = await assertRouteCurrent(root, true, true);
+	const intent = snapshot.location;
+	if (intent === null || !intent.initializing || intent.storeId === null)
+		throw new Error("Mica: no recorded store initialization intent is available");
+	let marker = root.vault.getAbstractFileByPath(root.paths.marker);
+	const folder = root.vault.getAbstractFileByPath(root.paths.root);
+	if (folder && !(folder instanceof TFolder)) throw new Error("Mica: selected storage directory is not a folder");
+	if (!marker) {
+		if (folder instanceof TFolder && folder.children.length !== 0)
+			throw new Error("Mica: pending initialization names a populated directory without its marker");
+		await ensureSelectedFolder(root, root.paths.root, true);
+		await assertRouteCurrent(root, true, true);
+		const empty = root.vault.getAbstractFileByPath(root.paths.root);
+		if (!(empty instanceof TFolder) || empty.children.length !== 0 || root.vault.getAbstractFileByPath(root.paths.marker))
+			throw new Error("Mica: selected storage directory changed before marker creation");
+		const body = JSON.stringify({ format: root.paths.format, storeId: intent.storeId }, null, "\t") + "\n";
+		stateOf(root, true);
+		try { marker = await root.vault.create(root.paths.marker, body); }
+		catch (error) {
+			// An ambiguous own create may only recover the exact recorded marker body.
+			const candidate = root.vault.getAbstractFileByPath(root.paths.marker);
+			if (!(candidate instanceof TFile)) throw error;
+			await readStoreMarker(root, candidate, body, true);
+			marker = candidate;
+		}
+		if (!(marker instanceof TFile)) throw new Error("Mica: invalid initialized store marker");
+		await readStoreMarker(root, marker, body, true);
+	}
+	if (!(marker instanceof TFile) || await readStoreMarker(root, marker, undefined, true) !== intent.storeId)
+		throw new Error("Mica: pending initialization marker differs from its recorded identity");
+	const pinnedMarker = marker;
+	const markerMtime = pinnedMarker.stat.mtime, markerSize = pinnedMarker.stat.size;
+	snapshot = await assertRouteCurrent(root, true, true);
+	if (!sameLocation(snapshot.location, intent)) throw new Error("Mica: store initialization intent changed before completion");
+	const published = await publishStoreLocation(root.vault, snapshot, { ...intent, initializing: false }, () => {
+		stateOf(root, true);
+		if (root.vault.getAbstractFileByPath(root.paths.marker) !== pinnedMarker || pinnedMarker.stat.mtime !== markerMtime || pinnedMarker.stat.size !== markerSize)
+			throw new Error("Mica: initialization marker changed before locator completion");
+	});
+	stateOf(root, true).location = published.location;
+}
+
+/** Startup-only recovery: resume the sole persisted initialization intent, never infer one. */
+export async function resumeStoreInitialization(root: StoreRoot): Promise<void> {
+	const state = stateOf(root, true);
+	if (!state.location?.initializing) throw new Error("Mica: no pending store initialization was recorded");
+	if (state.initializing) { await state.initializing; return; }
+	const initialize = completeStoreInitialization(root);
+	state.initializing = initialize;
+	try { await initialize; } finally { if (state.initializing === initialize) state.initializing = null; }
+	await validateStoreRoot(root);
+}
+
+async function initializeStoreRoot(root: StoreRoot, expected: StoreLocationSnapshot, existingId: string | null): Promise<void> {
+	if (existingId !== null) {
+		if (expected.location !== null) throw new Error("Mica: only an unlocated default store may be adopted");
+		const location: StoreLocation = { format: root.paths.format, folder: root.paths.root, storeId: existingId, previousFolder: null, initializing: false };
+		const published = await publishStoreLocation(root.vault, expected, location, () => assertStoreRootCurrent(root));
+		stateOf(root).location = published.location;
+		const file = root.vault.getAbstractFileByPath(root.paths.marker);
+		if (!(file instanceof TFile) || await readStoreMarker(root, file) !== existingId) throw new Error("Mica: default store identity changed during locator adoption");
+		await assertRouteCurrent(root, true);
+		return;
+	}
+	const folder = root.vault.getAbstractFileByPath(root.paths.root);
+	if ((folder && !(folder instanceof TFolder)) || (folder instanceof TFolder && folder.children.length !== 0) || root.vault.getAbstractFileByPath(root.paths.marker))
+		throw new Error("Mica: selected storage directory is not uninitialized");
+	const intent: StoreLocation = { format: root.paths.format, folder: root.paths.root, storeId: newId(), previousFolder: null, initializing: true };
+	const published = await publishStoreLocation(root.vault, expected, intent, () => assertStoreRootCurrent(root));
+	stateOf(root, true).location = published.location;
+	await completeStoreInitialization(root);
+}
+
+/** Every lookup revalidates the sole route authority; only writes may claim an uninitialized store. */
 export async function validateStoreRoot(root: StoreRoot, write = false): Promise<string | null> {
-	const state = stateOf(root);
-	if (state.initializing) await state.initializing;
+	let state = stateOf(root);
+	if (state.initializing) { await state.initializing; state = stateOf(root); }
+	const snapshot = await assertRouteCurrent(root);
 	const folder = root.vault.getAbstractFileByPath(root.paths.root);
 	const marker = root.vault.getAbstractFileByPath(root.paths.marker);
 	if (folder && !(folder instanceof TFolder)) throw new Error("Mica: central store root is not a folder");
+	let storeId: string | null = null;
 	if (marker) {
-		if (!(marker instanceof TFile) || marker.stat.size > 4096) throw new Error("Mica: invalid central store marker");
-		const text = await root.vault.read(marker);
-		if (new TextEncoder().encode(text).byteLength > 4096) throw new Error("Mica: invalid central store marker");
-		return validateStoreMarker(JSON.parse(text) as unknown).storeId;
+		if (!(marker instanceof TFile)) throw new Error("Mica: invalid central store marker");
+		storeId = await readStoreMarker(root, marker);
+		await assertRouteCurrent(root);
+		if (snapshot.location !== null && snapshot.location.storeId === null)
+			throw new Error("Mica: unpinned location names an initialized directory; startup recovery is required");
+		if (snapshot.location?.storeId != null && snapshot.location.storeId !== storeId) throw new Error("Mica: central store identity differs from mica.json");
+		if (!write || snapshot.location !== null) return storeId;
+	} else {
+		if (snapshot.location?.storeId != null || (folder instanceof TFolder && folder.children.length !== 0))
+			throw new Error("Mica: central store marker is missing; an explicit offline cutover is required");
+		state.legacyPresent ??= root.vault.getAllLoadedFiles().some((file) => file instanceof TFolder && file.path.endsWith(".mica") && !isManagedPath(file.path, root.paths.root));
+		if (state.legacyPresent) throw new Error("Mica: legacy sidecars require an explicit offline cutover before central storage can be used");
+		if (!write) return null;
 	}
-	if (folder) throw new Error("Mica: central store marker is missing; an explicit offline cutover is required");
-	state.legacyPresent ??= root.vault.getAllLoadedFiles().some((file) => file instanceof TFolder && file.path.endsWith(".mica"));
-	if (state.legacyPresent)
-		throw new Error("Mica: legacy sidecars require an explicit offline cutover before central storage can be used");
-	if (!write) return null;
-	const initialize = (async () => {
-		await ensureStoreFolder(root, root.paths.root);
-		const body = JSON.stringify({ format: root.paths.format, storeId: newId() }, null, "\t") + "\n";
-		try { await root.vault.create(root.paths.marker, body); }
-		catch (error) { if (!(root.vault.getAbstractFileByPath(root.paths.marker) instanceof TFile)) throw error; }
-	})();
+	// Concurrent first writers share one claim/marker transaction within this host.
+	if (state.initializing) { await state.initializing; return validateStoreRoot(root); }
+	const initialize = initializeStoreRoot(root, snapshot, storeId);
 	state.initializing = initialize;
 	try { await initialize; } finally { if (state.initializing === initialize) state.initializing = null; }
 	return validateStoreRoot(root);
@@ -226,10 +420,13 @@ export const MAX_ALIAS_BYTES = 1024 * 1024;
 export const MAX_ALIASES = 16384;
 
 export async function readAliases(root: StoreRoot, path: string): Promise<Record<string, string>> {
+	stateOf(root);
 	const file = root.vault.getAbstractFileByPath(path);
 	if (!file) return {};
 	if (!(file instanceof TFile) || file.stat.size > MAX_ALIAS_BYTES) throw new Error(`Mica: invalid alias document: ${path}`);
-	return parseAliases(await root.vault.read(file));
+	const text = await root.vault.read(file);
+	stateOf(root);
+	return parseAliases(text);
 }
 
 export function parseAliases(text: string): Record<string, string> {
@@ -254,7 +451,7 @@ export async function bindNoteStore(root: StoreRoot, file: TFile, source: string
 	}
 	const storeId = await validateStoreRoot(root, options.write && id !== null);
 	if (id === null) return null;
-	const paths = notePaths(id);
+	const paths = notePaths(id, root.paths.root);
 	const aliases = await readAliases(root, paths.aliases);
 	if (root.vault.getAbstractFileByPath(file.path) !== file || noteId(await root.vault.read(file)) !== id)
 		throw new Error("Mica: note identity changed before storage binding");
@@ -269,7 +466,14 @@ export async function ensureNoteStore(root: StoreRoot, file: TFile, source: stri
 	if (noteId(current) === null) {
 		const fresh = newId();
 		await assertUnique(root, file, fresh);
+		if (root.vault.getAbstractFileByPath(file.path) !== file || await root.vault.read(file) !== source)
+			throw new Error("Mica: note changed before storage could be claimed");
+		assertIndexedUnique(stateOf(root), file, fresh);
+		// Claim/pin the route only after the full identity/live preflight, before stamping source.
+		await validateStoreRoot(root, true);
+		assertStoreRootCurrent(root);
 		current = await root.vault.process(file, (live) => {
+			assertIndexedUnique(stateOf(root), file, fresh);
 			if (live !== source) throw new Error("Mica: note changed before identity could be prepared");
 			return setNoteId(live, null, fresh);
 		});
@@ -281,7 +485,7 @@ export async function ensureNoteStore(root: StoreRoot, file: TFile, source: stri
 
 export async function stageNoteStore(root: StoreRoot, file: TFile, expectedSource: string, id: string): Promise<NoteStore> {
 	requireLiveNote(file);
-	const paths = notePaths(id);
+	const paths = notePaths(id, root.paths.root);
 	await assertUnique(root, file, id);
 	const current = await root.vault.read(file);
 	if (current !== expectedSource && noteId(current) !== id) throw new Error("Mica: note changed before staging");

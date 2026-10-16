@@ -1169,7 +1169,8 @@ pub fn consolidate_tabs(
     history: bool,
     dry_run: bool,
 ) -> Result<ConsolidateReport> {
-    let scope = vault::resolve_note_scope(path, ctx.vault.as_deref())?;
+    let scope = vault::resolve_note_scope_at(path, ctx.vault.as_deref(), ctx.store_dir.as_deref())?;
+    if dry_run { scope.store.require_ready()?; }
     let mut report = ConsolidateReport {
         path: path.to_string(),
         history,
@@ -1355,6 +1356,7 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
     engine::preflight_journal_events(&plan.store, &plan.journal.events)?;
     sidecar::validate_manifest_bytes(&plan.store, &plan.manifest_consolidated)?;
     engine::validate_note_identity(&plan.note, &plan.original)?;
+    plan.store.root.claim_location()?;
     sidecar::preflight_note_record(&plan.store)?;
     if plan.source_preimage != plan.original {
         fsutil::atomic_write_if_unchanged(&plan.note.abs, plan.source_preimage.as_bytes(), plan.original.as_bytes())?;
@@ -1391,7 +1393,7 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
 }
 
 fn resume_pending(store: &NoteStore, journal: &sidecar::TabConsolidationJournal) -> Result<()> {
-    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone() };
+    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
     let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
         CliError::Corrupt(format!(
             "pending tab-consolidation preimage {} is missing",
@@ -1415,14 +1417,16 @@ fn resume_pending(store: &NoteStore, journal: &sidecar::TabConsolidationJournal)
         journal.manifest_consolidated.as_bytes(),
     )?;
     let current = engine::read_doc(&note.abs)?;
-    engine::guard_note_store(&note, store, &current)?;
-    if current == original && original != consolidated {
-        fsutil::atomic_write_if_unchanged(&note.abs, original.as_bytes(), consolidated.as_bytes())?;
-    } else if current != consolidated {
+    if current != original && current != consolidated {
         return Err(CliError::Corrupt(format!(
             "pending tab-consolidation note diverged from both journaled generations: {}",
             note.vault_rel()
         )));
+    }
+    store.root.claim_location()?;
+    engine::guard_note_store(&note, store, &current)?;
+    if current == original && original != consolidated {
+        fsutil::atomic_write_if_unchanged(&note.abs, original.as_bytes(), consolidated.as_bytes())?;
     }
     append_missing_events(store, &journal.events)?;
     let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
@@ -1474,6 +1478,7 @@ fn publish_manifest(
 ) -> Result<()> {
     let (current, already_published) = manifest_publication_state(store, path, original, consolidated)?;
     if already_published { return Ok(()); }
+    store.root.claim_location()?;
     sidecar::preflight_note_record(store)?;
     match current.as_deref() {
         Some(bytes) => fsutil::atomic_write_if_unchanged(path, bytes, consolidated),
@@ -1502,7 +1507,7 @@ fn verify_pending_result(
     store: &NoteStore,
     journal: &sidecar::TabConsolidationJournal,
 ) -> Result<()> {
-    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone() };
+    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
     let consolidated =
         sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
             CliError::Corrupt(format!(
@@ -1612,7 +1617,7 @@ mod tests {
     use crate::output::Style;
 
     fn test_store(path: &std::path::Path) -> NoteStore {
-        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault") };
+        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault"), store: None };
         let source = engine::read_doc(path).expect("fixture source");
         let prepared = mica_core::note_id_impl(&source).expect("fixture identity")
             .map(|_| source.clone()).unwrap_or_else(|| mica_core::set_note_id_impl(&source, None, &format!("fixture-{}", hash_content_impl(&path.to_string_lossy()))).expect("fixture anchor"));
@@ -1627,6 +1632,7 @@ mod tests {
         std::fs::write(&note, doc).expect("seed note");
         let ctx = Ctx {
             vault: Some(directory.path().to_path_buf()),
+            store_dir: None,
             json: true,
             style: Style::forced(false),
         };

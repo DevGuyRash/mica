@@ -1,7 +1,7 @@
 import { TFile, type Vault } from "obsidian";
 import { Gunzip, gzip, strFromU8, strToU8 } from "fflate";
 import { hashContent, objectPaths, resolveObjectHash, type LedgerEvent } from "../wasm/bridge";
-import { assertNoteStoreCurrent, ensureStoreFolder, MAX_ALIASES, MAX_ALIAS_BYTES, parseAliases, readAliases, validateStoreRoot, type NoteStore, type StoreRoot } from "./store";
+import { assertNoteStoreCurrent, assertStoreRootCurrent, ensureStoreFolder, MAX_ALIASES, MAX_ALIAS_BYTES, parseAliases, readAliases, validateStoreRoot, type NoteStore, type StoreRoot } from "./store";
 import {
 	classifyEventBatch,
 	MAX_LEDGER_BYTES,
@@ -16,8 +16,8 @@ import {
 export function sidecarDir(note: NoteStore): string { return note.paths.dir; }
 export function objectsDir(root: StoreRoot): string { return root.paths.objects; }
 export function ledgerPath(note: NoteStore): string { return note.paths.ledger; }
-export function objectPath(_root: StoreRoot, hash: string): string { return objectPaths(hash).plain; }
-export function objectPathGz(_root: StoreRoot, hash: string): string { return objectPaths(hash).gzip; }
+export function objectPath(root: StoreRoot, hash: string): string { assertStoreRootCurrent(root); return objectPaths(hash, root.paths.root).plain; }
+export function objectPathGz(root: StoreRoot, hash: string): string { assertStoreRootCurrent(root); return objectPaths(hash, root.paths.root).gzip; }
 function rootOf(store: StoreRoot | NoteStore): StoreRoot { return "root" in store ? store.root : store; }
 function fullHash(store: StoreRoot | NoteStore, hash: string): string {
 	const alias = "aliases" in store ? store.aliases[hash] : undefined;
@@ -162,13 +162,14 @@ export async function writeObject(store: StoreRoot | NoteStore, hash: string, co
 		const write = (async () => {
 			await assertObjectWriteCurrent(operationStore, storeId);
 			await ensureStoreFolder(root, root.paths.objects);
-			const paths = objectPaths(actual);
+			const paths = objectPaths(actual, root.paths.root);
 			if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) {
 				const compressed = byteLength > COMPRESS_MIN_BYTES ? await gzipText(content, byteLength) : null;
 				// Compression may wait in the bounded queue; no source/root guard survives that await.
 				await assertObjectWriteCurrent(operationStore, storeId);
 				if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) {
 					try {
+						assertStoreRootCurrent(root);
 						if (compressed === null) await root.vault.create(paths.plain, content);
 						else await root.vault.createBinary(paths.gzip, compressed);
 					} catch (error) { if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) throw error; }
@@ -202,15 +203,15 @@ async function publishAlias(note: NoteStore, short: string, full: string): Promi
 	};
 	await assertNoteStoreCurrent(note, true);
 	const file = note.root.vault.getAbstractFileByPath(note.paths.aliases);
-	if (file instanceof TFile) await note.root.vault.process(file, merge);
+	if (file instanceof TFile) await note.root.vault.process(file, (current) => { assertStoreRootCurrent(note.root); return merge(current); });
 	else {
 		if (file) throw new Error("Mica: alias path is not a file");
-		try { await note.root.vault.create(note.paths.aliases, merge("")); }
+		try { assertStoreRootCurrent(note.root); await note.root.vault.create(note.paths.aliases, merge("")); }
 		catch (error) {
 			const raced = note.root.vault.getAbstractFileByPath(note.paths.aliases);
 			if (!(raced instanceof TFile)) throw error;
 			await assertNoteStoreCurrent(note, true);
-			await note.root.vault.process(raced, merge);
+			await note.root.vault.process(raced, (current) => { assertStoreRootCurrent(note.root); return merge(current); });
 		}
 	}
 	Object.assign(note.aliases, await readAliases(note.root, note.paths.aliases));
@@ -374,6 +375,7 @@ export async function writeManifest(note: NoteStore, manifest: SidecarManifest):
 		if (sameManifest(existing, manifest)) return false;
 		await assertNoteStoreCurrent(note, true);
 		await vault.process(af, (current) => {
+			assertStoreRootCurrent(note.root);
 			if (current !== existing) throw new Error("Mica: note manifest changed before publication; retry");
 			return body;
 		});
@@ -381,6 +383,7 @@ export async function writeManifest(note: NoteStore, manifest: SidecarManifest):
 	}
 	try {
 		await assertNoteStoreCurrent(note, true);
+		assertStoreRootCurrent(note.root);
 		await vault.create(path, body);
 		return true;
 	} catch (error) {
@@ -392,6 +395,7 @@ export async function writeManifest(note: NoteStore, manifest: SidecarManifest):
 		if (sameManifest(existing, manifest)) return false;
 		await assertNoteStoreCurrent(note, true);
 		await vault.process(raced, (current) => {
+			assertStoreRootCurrent(note.root);
 			if (current !== existing) throw new Error("Mica: note manifest changed before publication; retry");
 			return body;
 		});
@@ -533,6 +537,7 @@ export async function appendEvents(note: NoteStore, events: readonly LedgerEvent
 		wroteOrAttempted = true;
 		try {
 			await assertNoteStoreCurrent(note, true);
+			assertStoreRootCurrent(note.root);
 			if (snapshot.file) await vault.append(snapshot.file, separator + body);
 			else await vault.create(path, body);
 		} catch (error) {
