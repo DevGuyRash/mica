@@ -10,7 +10,7 @@
 		"pnpm": ">=11.3.0 <12"
 	},
 	"scripts": {
-		"wasm": "wasm-pack build crates/mica-core --target web --release --out-dir ../../src/wasm/pkg -- --locked && rm -f src/wasm/pkg/mica_core_bg.wasm.d.ts",
+		"wasm": "node esbuild.config.mjs wasm && rm -f src/wasm/pkg/mica_core_bg.wasm.d.ts",
 		"smoke": "node tests/smoke.mjs",
 		"e2e": "node scripts/e2e.mjs",
 		"e2e:minimum": "MICA_E2E_PROFILE=minimum node scripts/e2e.mjs",

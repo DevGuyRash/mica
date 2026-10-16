@@ -110,8 +110,27 @@ grids, editing, the versions timeline, restore, and the CLI against that vault.
 
 ## 6. Submit and observe
 
-WHEN submitting the first release THEN you SHALL open a pull request against
-`obsidianmd/obsidian-releases` and address its automated and human review.
+WHEN submitting the first release THEN you SHALL use the Obsidian Community
+directory at <https://community.obsidian.md>, following the current official
+[submission instructions](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin)
+and [account setup instructions](https://docs.obsidian.md/community-directory/set-up-and-claim).
+
+WHEN preparing the submission THEN you SHALL verify that the default branch's
+committed `manifest.json` matches the release version and that the matching tag
+has the candidate's `main.js`, `manifest.json`, and `styles.css` attachments.
+
+WHEN the release owner signs in THEN they SHALL review and authorize any new
+GitHub account connection themselves. Under **Plugins → New plugin**, they
+SHALL provide the verified canonical repository URL and choose the maintaining
+owner.
+
+WHEN the submission asks for agreement to the Developer policies and continued
+support, removal, or transfer commitment THEN the release owner SHALL review
+and accept those commitments personally before selecting **Submit**. Automation
+SHALL NOT accept them on the owner's behalf.
+
+WHEN review feedback arrives THEN you SHALL address the directory's automated
+and human review. Submission does not establish acceptance or installability.
 
 WHEN the community release becomes installable THEN you SHALL repeat the clean
 vault smoke test using the community-installed copy.
