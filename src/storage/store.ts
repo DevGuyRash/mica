@@ -342,11 +342,19 @@ async function completeStoreInitialization(root: StoreRoot): Promise<void> {
 	if (!(marker instanceof TFile) || await readStoreMarker(root, marker, undefined, true) !== intent.storeId)
 		throw new Error("Mica: pending initialization marker differs from its recorded identity");
 	const pinnedMarker = marker;
+	const initializedFolder = root.vault.getAbstractFileByPath(root.paths.root);
+	const requireInitializationLeaf = (): void => {
+		if (!(initializedFolder instanceof TFolder) || root.vault.getAbstractFileByPath(root.paths.root) !== initializedFolder ||
+			initializedFolder.children.length !== 1 || initializedFolder.children[0] !== pinnedMarker)
+			throw new Error("Mica: pending initialization contains unexpected storage entries");
+	};
+	requireInitializationLeaf();
 	const markerMtime = pinnedMarker.stat.mtime, markerSize = pinnedMarker.stat.size;
 	snapshot = await assertRouteCurrent(root, true, true);
 	if (!sameLocation(snapshot.location, intent)) throw new Error("Mica: store initialization intent changed before completion");
 	const published = await publishStoreLocation(root.vault, snapshot, { ...intent, initializing: false }, () => {
 		stateOf(root, true);
+		requireInitializationLeaf();
 		if (root.vault.getAbstractFileByPath(root.paths.marker) !== pinnedMarker || pinnedMarker.stat.mtime !== markerMtime || pinnedMarker.stat.size !== markerSize)
 			throw new Error("Mica: initialization marker changed before locator completion");
 	});
