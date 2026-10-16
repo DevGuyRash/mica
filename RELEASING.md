@@ -1,8 +1,8 @@
 # Releasing Mica
 
-This is the human decision gate for the Obsidian plugin and CLI. Automation
-checks reproducible facts; the release owner records the external evidence that
-CI cannot produce.
+This is the human decision gate for the Obsidian plugin and CLI. Local checks
+establish reproducible facts; the release owner records external review and
+qualification evidence.
 
 ## Update delivery
 
@@ -18,10 +18,83 @@ are delivered through new GitHub Releases. Installed community plugins do not
 update automatically: users select **Settings → Community plugins → Check for
 updates**, then **Update** or **Update all**.
 
+## Review branch and promotion gate
+
+1. Commit and push all new work to the permanent lowercase `review` branch
+   first. Isolated work branches may integrate there. Preserve existing work
+   and history; branch setup is not permission to reset or discard them.
+2. Run `pnpm run lint:obsidian` as the separate official local source preflight
+   within the authorized scope and record its actual result. Errors must be
+   zero. Keep warnings visible; fix each or document its reviewed necessity
+   without suppressing review rules. Use the component reasons below. Local
+   lint does not establish CSS coverage or an official preview pass.
+3. On the Obsidian Community entry, select **Review branch**, enter the full
+   current `review` HEAD commit SHA, then select **Run preview scan**. The
+   official control accepts any branch, tag, or SHA; `review` is this
+   repository's permanent branch convention. Use the SHA so the evidence is
+   fixed to one candidate.
+4. Obtain an actual passing preview with zero errors before opening the
+   `review` → `main` PR. Fix every warning or document its intentional necessity
+   with a reviewed reason; unreviewed warnings block promotion. Record the SHA,
+   report evidence, warning dispositions, and remaining recommendations or
+   unverified optional capabilities/attestations in the PR template. Official
+   warnings are advisory; this repository requires their reviewed disposition
+   before merge. Recommendations remain separately reported outcomes.
+5. Any change to `review` HEAD invalidates its earlier pass. Stop and rerun the
+   preview on the new full SHA before opening or merging the PR, tagging, or
+   publishing. GitHub PR checks are separate evidence; they do not automatically
+   represent the Obsidian preview, and no named GitHub status is assumed.
+6. After the clean preview, merge the PR into `main` and record the resulting
+   main commit. The release source and root manifest must match the scanned
+   candidate. Resolve any merge content changes through `review` and a fresh
+   preview. Create the version tag and public release only after merge and the
+   release gates below.
+
+The owner handles Community access and account authorization as described
+below. An unavailable scan or missing report leaves this gate pending; do not
+infer a pass from local checks, a source push, or an earlier candidate.
+
+## Local preflight boundaries
+
+`pnpm run lint:obsidian` is a separate local source preflight. Its errors must
+be zero; warnings remain visible and need a fix or reviewed necessity. It does
+not lint CSS or establish reproducible builds, optional attestations, or an
+official preview pass.
+
+Review the narrow priority rules in [styles.css](styles.css) by component:
+
+- `.mica-long-travel [hidden]` and `.mica-source-dock [hidden]` keep `hidden`
+  authoritative while [blockShell](src/ui/blockShell.ts) and
+  [Live Preview](src/cm/micaLivePreview.ts) move actions into responsive
+  overflow. Their priority defeats authored `inline-flex` display rules.
+- `body.mica-dnd-active` and `body.mica-handle-dragging` apply the drag cursor
+  only during gestures owned by [dnd](src/ui/dnd.ts) and
+  [blockShell](src/ui/blockShell.ts). Priority covers authored inline cursors;
+  outside those gesture classes the content keeps its own cursor.
+
+These reasons are scoped warning dispositions, not permission to add broad
+priority rules. Review each actual warning against its component and record
+its outcome in the PR; a warning count is not an accepted baseline.
+
+Review sentence-case advisories against the actual text rather than applying
+capitalization suggestions to identifiers or names:
+
+- [codeBlockEditor](src/ui/codeBlockEditor.ts) shows the literal fence language
+  IDs `markdown`, `md`, and `javascript`; keep those lowercase examples.
+  [lightboxSearch](src/ui/lightboxSearch.ts) likewise displays case-sensitive
+  regex flag tokens. Neither example list is prose to title-case.
+- [toolbarView](src/ui/toolbarView.ts) names the **Enter** key in its language
+  placeholder. Preserve the key spelling. Notices in [main](src/main.ts)
+  preserve the product names `obsidian-tabs` and Templater, and use the normal
+  acronym casing ID/IDs. These names and tokens are intentional; unrelated
+  sentence-case findings still need correction or their own reviewed reason.
+
 ## 1. Establish a release candidate
 
-WHEN you prepare a release candidate THEN you SHALL use one commit for every
-automated and manual check below.
+WHEN you prepare a release candidate THEN you SHALL put all source and metadata
+changes on `review` before its exact-SHA preview. Use that candidate for the
+checks below and record the merged `main` commit used for release artifacts.
+A changed candidate requires fresh evidence; an unrun gate remains pending.
 
 WHEN you choose the release version THEN you SHALL set the same version in
 `package.json`, `manifest.json`, the Rust workspace package metadata, the
@@ -113,8 +186,10 @@ You SHALL NOT publish placeholder, private, or unverified repository URLs.
 
 ## 5. Build and publish artifacts
 
-WHEN creating the GitHub release THEN you SHALL use a tag exactly equal to
-`manifest.json`'s version, without a `v` prefix.
+WHEN creating the GitHub release THEN you SHALL first merge the reviewed
+candidate into `main`, verify that its source and root manifest match the
+scanned candidate, and use a tag exactly equal to `manifest.json`'s `x.y.z`
+version, without a `v` prefix.
 
 WHEN attaching plugin assets THEN you SHALL attach exactly the candidate's
 non-empty `main.js`, `manifest.json`, and `styles.css`. The WASM remains inlined
@@ -178,6 +253,8 @@ under an existing tag.
 
 ## Official references
 
+- [Preview scans and entry management](https://docs.obsidian.md/community-directory/manage-entry)
+- [Community review FAQ](https://docs.obsidian.md/community-directory/faq)
 - [Submission and later releases](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin)
 - [Manifest](https://docs.obsidian.md/Reference/Manifest)
 - [Official sample: release metadata and versions.json](https://github.com/obsidianmd/obsidian-sample-plugin#releasing-new-releases)

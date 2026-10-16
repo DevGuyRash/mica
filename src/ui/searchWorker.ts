@@ -53,7 +53,7 @@ const visitMatches = (doc, regex, firstOnly, visit) => {
 self.onmessage = (event) => {
   const request = event.data;
   try {
-    const firstOnly = request.global === false;
+    const firstOnly = request.allMatches === false;
     const regex = request.regex
       ? regexFor(request.needle, request.flags)
       : literalRegex(request.needle, request.matchCase);

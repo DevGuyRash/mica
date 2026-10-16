@@ -40,6 +40,7 @@ export class IconPickerModal extends Modal {
 	private gridEl: HTMLElement | null = null;
 	private statusEl: HTMLElement | null = null;
 	private renderFrame: number | null = null;
+	private renderFrameWindow: Window | null = null;
 	private enabledPackIds = new Set<string>();
 	private lifecycleGeneration = 0;
 	private commitGeneration = 0;
@@ -117,8 +118,7 @@ export class IconPickerModal extends Modal {
 	onClose(): void {
 		this.lifecycleGeneration++;
 		this.commitGeneration++;
-		if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
-		this.renderFrame = null;
+		this.cancelRenderFrame();
 		this.contentEl.empty();
 		this.searchEl = null;
 		this.gridEl = null;
@@ -151,11 +151,19 @@ export class IconPickerModal extends Modal {
 
 	/** Coalesce fast typing into one bounded SVG render per animation frame. */
 	private scheduleRender(): void {
-		if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
-		this.renderFrame = requestAnimationFrame(() => {
+		this.cancelRenderFrame();
+		this.renderFrameWindow = this.contentEl.win;
+		this.renderFrame = this.renderFrameWindow.requestAnimationFrame(() => {
 			this.renderFrame = null;
+			this.renderFrameWindow = null;
 			this.renderIcons();
 		});
+	}
+
+	private cancelRenderFrame(): void {
+		if (this.renderFrame !== null) this.renderFrameWindow?.cancelAnimationFrame(this.renderFrame);
+		this.renderFrame = null;
+		this.renderFrameWindow = null;
 	}
 
 	private renderIcons(): void {
