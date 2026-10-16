@@ -13,7 +13,7 @@ async function readJson(relativePath) {
 	return JSON.parse(await readText(relativePath));
 }
 
-const [pkg, manifest, versions, cargo, license, rustToolchain, workspace, ci, compatibility, wdio] = await Promise.all([
+const [pkg, manifest, versions, cargo, license, rustToolchain, workspace, ci, compatibility, wdio, buildConfig] = await Promise.all([
 	readJson("package.json"),
 	readJson("manifest.json"),
 	readJson("versions.json"),
@@ -24,6 +24,7 @@ const [pkg, manifest, versions, cargo, license, rustToolchain, workspace, ci, co
 	readText(".github/workflows/ci.yml"),
 	readText(".github/workflows/compatibility.yml"),
 	readText("wdio.conf.mts"),
+	readText("esbuild.config.mjs"),
 ]);
 
 const workspaceVersion = cargo.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
@@ -53,7 +54,8 @@ assert.match(ci, /tool:\s*cargo-deny@0\.20\.2/, "CI must pin the Rust advisory s
 assert.match(ci, /^\s*tags:\s*\["\*"\]$/m, "CI must validate release tags");
 assert.match(ci, /cargo clippy --workspace --all-targets --locked -- -D warnings/, "Clippy must use Cargo.lock");
 assert.match(ci, /cargo build --release -p mica-cli --locked/, "CLI release build must use Cargo.lock");
-assert.match(pkg.scripts.wasm, /-- --locked/, "wasm-pack must pass --locked to Cargo");
+assert.match(pkg.scripts.wasm, /^node esbuild\.config\.mjs wasm(?:\s|$)/, "WASM build must use the shared build config");
+assert.match(buildConfig, /"--",\s*"--locked"/, "wasm-pack must pass --locked to Cargo");
 assert.match(pkg.scripts["test:rust"], /--locked/, "Rust tests must use Cargo.lock");
 assert.equal(pkg.scripts["test:sidecar-fallback"], "node tests/sidecar-fallback.mjs");
 
