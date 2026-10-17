@@ -27,6 +27,23 @@ fn fixture(note_body: &str) -> Fixture {
     }
 }
 
+/// Bind only an already-prepared fixture note through its shared identity policy.
+fn note_store(vault: &Path, note: &Path) -> mica_cli::sidecar::NoteStore {
+    let source = fs::read_to_string(note).expect("fixture note");
+    let id = mica_core::note_id_impl(&source)
+        .expect("valid fixture identity")
+        .expect("prepared fixture identity");
+    mica_cli::sidecar::NoteStore::for_id(vault, note, &id).expect("selected fixture store")
+}
+
+/// Explicit history setup for doctor fixtures; ordinary fixtures remain unprepared.
+fn seed_note_store(vault: &Path, note: &Path, id: &str) -> mica_cli::sidecar::NoteStore {
+    let source = fs::read_to_string(note).expect("fixture note");
+    let prepared = mica_core::set_note_id_impl(&source, None, id).expect("fixture anchor");
+    fs::write(note, prepared).expect("prepared fixture note");
+    note_store(vault, note)
+}
+
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_mica"))
 }
@@ -456,8 +473,9 @@ fn unknown_block_exits_3() {
 fn doctor_reports_missing_objects() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
-    // Damage the sidecar: remove the object file the ledger references.
-    let objects = f.vault.join("Test note.mica/objects");
+    // Damage the shared pool: remove the object file the ledger references.
+    let store = note_store(&f.vault, &f.note);
+    let objects = mica_cli::sidecar::objects_dir(&store);
     for entry in fs::read_dir(&objects).unwrap() {
         fs::remove_file(entry.unwrap().path()).unwrap();
     }
@@ -472,7 +490,8 @@ fn doctor_reports_missing_objects() {
 fn doctor_reports_corrupt_objects() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
-    let objects = f.vault.join("Test note.mica/objects");
+    let store = note_store(&f.vault, &f.note);
+    let objects = mica_cli::sidecar::objects_dir(&store);
     let object = fs::read_dir(&objects)
         .unwrap()
         .next()
@@ -491,11 +510,12 @@ fn doctor_reports_corrupt_objects() {
 #[test]
 fn doctor_reports_missing_raw_objects_and_pending_normalization() {
     let f = fixture("plain note\n");
+    let store = seed_note_store(&f.vault, &f.note, "fixture-note");
     let raw = "alpha\n\nbeta\n";
     let replacement = ":::section\nalpha\n\nbeta\n:::\n";
     let raw_hash = mica_core::hash_content_impl(raw);
     let replacement_hash = mica_core::hash_content_impl(replacement);
-    mica_cli::sidecar::write_object(&f.note, &replacement_hash, replacement)
+    mica_cli::sidecar::write_object(&store, &replacement_hash, replacement)
         .expect("replacement object");
     let add = mica_core::Event::AddVersion {
         eid: "add-raw".to_string(),
@@ -513,12 +533,12 @@ fn doctor_reports_missing_raw_objects_and_pending_normalization() {
         target: "add-raw".to_string(),
         hash: replacement_hash,
     };
-    mica_cli::sidecar::append_events(&f.note, &[add, replace.clone()]).expect("seed ledger");
+    mica_cli::sidecar::append_events(&store, &[add, replace.clone()]).expect("seed ledger");
     let note_body = fs::read_to_string(&f.note).expect("note body");
     let note_hash = mica_core::hash_content_impl(&note_body);
-    mica_cli::sidecar::write_object(&f.note, &note_hash, &note_body).expect("whole note object");
+    mica_cli::sidecar::write_object(&store, &note_hash, &note_body).expect("whole note object");
     mica_cli::sidecar::write_section_normalization_journal(
-        &f.note,
+        &store,
         &mica_cli::sidecar::SectionNormalizationJournal {
             format: 1,
             status: "pending".to_string(),
@@ -547,18 +567,23 @@ fn doctor_reports_missing_raw_objects_and_pending_normalization() {
 fn doctor_reports_missing_and_corrupt_pending_tab_consolidation_objects() {
     let original = "```mica id=demo\nalpha\n```\n";
     let consolidated = "```mica id=demo\n:::tabs\n:::tab Alpha\nalpha\n:::\n:::\n```\n";
-    let f = fixture(original);
-    let original_hash = mica_core::hash_content_impl(original);
-    let consolidated_hash = mica_core::hash_content_impl(consolidated);
-    mica_cli::sidecar::write_object(&f.note, &consolidated_hash, consolidated)
+    let original = mica_core::set_note_id_impl(original, None, "fixture-note")
+        .expect("original anchor");
+    let consolidated = mica_core::set_note_id_impl(consolidated, None, "fixture-note")
+        .expect("consolidated anchor");
+    let f = fixture(&original);
+    let store = note_store(&f.vault, &f.note);
+    let original_hash = mica_core::hash_content_impl(&original);
+    let consolidated_hash = mica_core::hash_content_impl(&consolidated);
+    mica_cli::sidecar::write_object(&store, &consolidated_hash, &consolidated)
         .expect("consolidated object");
     fs::write(
-        mica_cli::sidecar::object_path(&f.note, &consolidated_hash),
+        mica_cli::sidecar::object_path(&store, &consolidated_hash).expect("consolidated path"),
         "CORRUPT",
     )
     .expect("corrupt consolidated object");
     mica_cli::sidecar::write_tab_consolidation_journal(
-        &f.note,
+        &store,
         &mica_cli::sidecar::TabConsolidationJournal {
             format: 1,
             status: "pending".to_string(),
@@ -600,15 +625,16 @@ fn doctor_reports_missing_and_corrupt_pending_tab_consolidation_objects() {
 #[test]
 fn doctor_reports_replacement_signature_mismatch() {
     let f = fixture("plain note\n");
+    let store = seed_note_store(&f.vault, &f.note, "fixture-note");
     let raw = "alpha\n";
     let replacement = ":::section\nDIFFERENT\n:::\n";
     let raw_hash = mica_core::hash_content_impl(raw);
     let replacement_hash = mica_core::hash_content_impl(replacement);
-    mica_cli::sidecar::write_object(&f.note, &raw_hash, raw).expect("raw object");
-    mica_cli::sidecar::write_object(&f.note, &replacement_hash, replacement)
+    mica_cli::sidecar::write_object(&store, &raw_hash, raw).expect("raw object");
+    mica_cli::sidecar::write_object(&store, &replacement_hash, replacement)
         .expect("replacement object");
     mica_cli::sidecar::append_events(
-        &f.note,
+        &store,
         &[
             mica_core::Event::AddVersion {
                 eid: "add-source".to_string(),
@@ -645,15 +671,20 @@ fn doctor_reports_replacement_signature_mismatch() {
 #[test]
 fn doctor_reports_corrupt_typed_ledger_and_continues_the_sweep() {
     let f = fixture("plain note\n");
-    fs::create_dir_all(f.vault.join("Test note.mica")).expect("sidecar");
+    let store = seed_note_store(&f.vault, &f.note, "fixture-note");
+    mica_cli::sidecar::write_manifest(&store, Some(&store.note_id), "Test note.md", &[], 0)
+        .expect("first central record");
     fs::write(
-        f.vault.join("Test note.mica/ledger.jsonl"),
+        mica_cli::sidecar::ledger_path(&store),
         r#"{"type":"future-event","eid":"future"}
 "#,
     )
     .expect("corrupt typed ledger");
-    fs::write(f.vault.join("Other.md"), "other\n").expect("second note");
-    fs::create_dir_all(f.vault.join("Other.mica")).expect("second sidecar");
+    let other = f.vault.join("Other.md");
+    fs::write(&other, "other\n").expect("second note");
+    let other_store = seed_note_store(&f.vault, &other, "fixture-other-note");
+    mica_cli::sidecar::write_manifest(&other_store, Some(&other_store.note_id), "Other.md", &[], 0)
+        .expect("second central record");
 
     let report = run_ok(&["--json", "doctor"], &f.vault);
     let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
@@ -671,14 +702,21 @@ fn doctor_reports_corrupt_typed_ledger_and_continues_the_sweep() {
 fn doctor_reports_pending_normalization_note_divergence() {
     let original = "```mica id=demo\nalpha\n```\n";
     let normalized = "```mica id=demo\n:::section\nalpha\n:::\n```\n";
-    let f = fixture("later unrelated edit\n");
-    let original_hash = mica_core::hash_content_impl(original);
-    let normalized_hash = mica_core::hash_content_impl(normalized);
-    mica_cli::sidecar::write_object(&f.note, &original_hash, original).expect("original object");
-    mica_cli::sidecar::write_object(&f.note, &normalized_hash, normalized)
+    let original = mica_core::set_note_id_impl(original, None, "fixture-note")
+        .expect("original anchor");
+    let normalized = mica_core::set_note_id_impl(normalized, None, "fixture-note")
+        .expect("normalized anchor");
+    let later = mica_core::set_note_id_impl("later unrelated edit\n", None, "fixture-note")
+        .expect("later anchor");
+    let f = fixture(&later);
+    let store = note_store(&f.vault, &f.note);
+    let original_hash = mica_core::hash_content_impl(&original);
+    let normalized_hash = mica_core::hash_content_impl(&normalized);
+    mica_cli::sidecar::write_object(&store, &original_hash, &original).expect("original object");
+    mica_cli::sidecar::write_object(&store, &normalized_hash, &normalized)
         .expect("normalized object");
     mica_cli::sidecar::write_section_normalization_journal(
-        &f.note,
+        &store,
         &mica_cli::sidecar::SectionNormalizationJournal {
             format: 1,
             status: "pending".to_string(),
@@ -707,25 +745,33 @@ fn doctor_reports_pending_normalization_note_divergence() {
 fn doctor_allows_later_live_edits_after_completed_normalization() {
     let original = "```mica id=demo\nalpha\n```\n";
     let normalized = "```mica id=demo\n:::section\nalpha\n:::\n```\n";
-    let f = fixture("later unrelated edit\n");
-    let original_hash = mica_core::hash_content_impl(original);
-    let normalized_hash = mica_core::hash_content_impl(normalized);
-    mica_cli::sidecar::write_object(&f.note, &original_hash, original).expect("original object");
-    mica_cli::sidecar::write_object(&f.note, &normalized_hash, normalized)
+    let original = mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
+    let normalized = mica_core::set_note_id_impl(normalized, None, "fixture-note").expect("normalized anchor");
+    let f = fixture(&normalized);
+    let store = mica_cli::sidecar::NoteStore::for_id(&f.vault, &f.note, "fixture-note")
+        .expect("fixture store");
+    let original_hash = mica_core::hash_content_impl(&original);
+    let normalized_hash = mica_core::hash_content_impl(&normalized);
+    mica_cli::sidecar::write_object(&store, &original_hash, &original).expect("original object");
+    mica_cli::sidecar::write_object(&store, &normalized_hash, &normalized)
         .expect("normalized object");
-    mica_cli::sidecar::write_section_normalization_journal(
-        &f.note,
-        &mica_cli::sidecar::SectionNormalizationJournal {
-            format: 1,
-            status: "complete".to_string(),
-            note: "Test note.md".to_string(),
-            original: original_hash,
-            normalized: normalized_hash,
-            history: false,
-            events: Vec::new(),
-        },
-    )
-    .expect("complete journal");
+    let mut journal = mica_cli::sidecar::SectionNormalizationJournal {
+        format: 1,
+        status: "pending".to_string(),
+        note: "Test note.md".to_string(),
+        original: original_hash,
+        normalized: normalized_hash,
+        history: false,
+        events: Vec::new(),
+    };
+    mica_cli::sidecar::write_section_normalization_journal(&store, &journal)
+        .expect("pending journal");
+    journal.status = "complete".to_string();
+    mica_cli::sidecar::write_section_normalization_journal(&store, &journal)
+        .expect("complete journal");
+    let later = mica_core::set_note_id_impl("later unrelated edit\n", None, "fixture-note")
+        .expect("later anchor");
+    fs::write(&f.note, later).expect("later live edit");
 
     let report = run_ok(&["--json", "doctor"], &f.vault);
     let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
@@ -747,24 +793,35 @@ fn doctor_allows_later_live_edits_after_completed_normalization() {
 fn doctor_reports_forged_completed_normalization_postimage() {
     let original = "```mica id=demo\nalpha\n```\n";
     let forged = "```mica id=demo\n:::section\nforged\n:::\n```\n";
-    let f = fixture(forged);
-    let original_hash = mica_core::hash_content_impl(original);
-    let forged_hash = mica_core::hash_content_impl(forged);
-    mica_cli::sidecar::write_object(&f.note, &original_hash, original).expect("original object");
-    mica_cli::sidecar::write_object(&f.note, &forged_hash, forged).expect("forged object");
-    mica_cli::sidecar::write_section_normalization_journal(
-        &f.note,
-        &mica_cli::sidecar::SectionNormalizationJournal {
-            format: 1,
-            status: "complete".to_string(),
-            note: "Test note.md".to_string(),
-            original: original_hash,
-            normalized: forged_hash,
-            history: false,
-            events: Vec::new(),
-        },
+    let original = mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
+    let forged = mica_core::set_note_id_impl(forged, None, "fixture-note").expect("forged anchor");
+    let f = fixture(&forged);
+    let store = mica_cli::sidecar::NoteStore::for_id(&f.vault, &f.note, "fixture-note")
+        .expect("fixture store");
+    let original_hash = mica_core::hash_content_impl(&original);
+    let forged_hash = mica_core::hash_content_impl(&forged);
+    mica_cli::sidecar::write_object(&store, &original_hash, &original).expect("original object");
+    mica_cli::sidecar::write_object(&store, &forged_hash, &forged).expect("forged object");
+    let mut journal = mica_cli::sidecar::SectionNormalizationJournal {
+        format: 1,
+        status: "pending".to_string(),
+        note: "Test note.md".to_string(),
+        original: original_hash,
+        normalized: forged_hash,
+        history: false,
+        events: Vec::new(),
+    };
+    mica_cli::sidecar::write_section_normalization_journal(&store, &journal)
+        .expect("pending journal");
+    // Deliberately corrupt persisted input: the guarded completion API rejects
+    // this forged postimage, while doctor must still diagnose external damage.
+    journal.status = "complete".to_string();
+    let encoded = serde_json::to_string_pretty(&journal).expect("fixture journal");
+    fs::write(
+        mica_cli::sidecar::section_normalization_journal_path(&store),
+        format!("{encoded}\n"),
     )
-    .expect("complete journal");
+    .expect("forged completed fixture");
 
     let report = run_ok(&["--json", "doctor"], &f.vault);
     let parsed: serde_json::Value = serde_json::from_str(&report).expect("doctor JSON");
@@ -782,7 +839,8 @@ fn doctor_reports_forged_completed_normalization_postimage() {
 fn corrupt_object_cannot_be_restored() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
-    let objects = f.vault.join("Test note.mica/objects");
+    let store = note_store(&f.vault, &f.note);
+    let objects = mica_cli::sidecar::objects_dir(&store);
     let object = fs::read_dir(&objects)
         .unwrap()
         .next()
@@ -803,35 +861,71 @@ fn corrupt_object_cannot_be_restored() {
 }
 
 #[test]
-fn repair_rehomes_renamed_note_sidecar() {
+fn repair_updates_renamed_note_hint_without_moving_history() {
     let f = fixture(SIMPLE);
     run_ok(&["snapshot", "Test note.md"], &f.vault);
-    // Simulate a rename that left the sidecar behind.
-    fs::rename(&f.note, f.vault.join("Renamed.md")).unwrap();
+    let store = note_store(&f.vault, &f.note);
+    let record = mica_cli::sidecar::sidecar_dir(&store);
+    let manifest = record.join("manifest.json");
+    let before_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).expect("original manifest")).expect("manifest JSON");
+    let ledger = mica_cli::sidecar::ledger_path(&store);
+    let before_ledger = fs::read(&ledger).expect("original ledger");
+    let renamed = f.vault.join("Renamed.md");
+    fs::rename(&f.note, &renamed).expect("rename note");
+
     let report = run_ok(&["repair"], &f.vault);
-    assert!(
-        f.vault.join("Renamed.mica").is_dir(),
-        "sidecar followed the note: {report}"
+    let current = note_store(&f.vault, &renamed);
+    assert_eq!(
+        mica_cli::sidecar::sidecar_dir(&current),
+        record,
+        "history remains identity-addressed: {report}"
+    );
+    assert_eq!(fs::read(&ledger).expect("retained ledger"), before_ledger);
+    let mut expected_manifest = before_manifest;
+    expected_manifest["path"] = serde_json::Value::String("Renamed.md".to_string());
+    let after_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).expect("updated manifest")).expect("manifest JSON");
+    assert_eq!(
+        after_manifest, expected_manifest,
+        "only the path hint changes: {report}"
     );
 }
 
 #[test]
-fn repair_does_not_rehome_an_ambiguous_duplicate_id() {
+fn repair_preserves_history_for_an_ambiguous_duplicate_id() {
     let f = fixture(SIMPLE);
-    fs::rename(&f.note, f.vault.join("A.md")).expect("rename note");
+    let first = f.vault.join("A.md");
+    fs::rename(&f.note, &first).expect("rename note");
     run_ok(&["snapshot", "A.md"], &f.vault);
-    fs::copy(f.vault.join("A.md"), f.vault.join("B.md")).expect("copy note");
+    let store = note_store(&f.vault, &first);
+    let record = mica_cli::sidecar::sidecar_dir(&store);
+    let manifest = record.join("manifest.json");
+    let before_manifest = fs::read(&manifest).expect("original manifest");
+    let ledger = mica_cli::sidecar::ledger_path(&store);
+    let before_ledger = fs::read(&ledger).expect("original ledger");
+    fs::copy(&first, f.vault.join("B.md")).expect("copy note");
 
-    run_ok(&["repair"], &f.vault);
-
+    let out = bin()
+        .args(["repair"])
+        .current_dir(&f.vault)
+        .output()
+        .expect("spawn repair");
+    assert_eq!(
+        out.status.code(), Some(2),
+        "duplicate identity is an argument conflict"
+    );
+    let error = String::from_utf8_lossy(&out.stderr);
     assert!(
-        f.vault.join("A.mica").is_dir(),
-        "history stays at its source"
+        error.contains("duplicate mica note id"),
+        "names the identity conflict: {error}"
     );
     assert!(
-        !f.vault.join("B.mica").exists(),
-        "ambiguous duplicate cannot steal the sidecar"
+        record.is_dir(),
+        "history stays at its identity-addressed source"
     );
+    assert_eq!(fs::read(&manifest).expect("retained manifest"), before_manifest);
+    assert_eq!(fs::read(&ledger).expect("retained ledger"), before_ledger);
 }
 
 #[test]

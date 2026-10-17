@@ -18,6 +18,16 @@ declare module "*/pkg/mica_core.js" {
 	export function mica_version(): string;
 	export function migrate_tabs(doc: string, callout_types: string): unknown;
 	export function new_id(): string;
+	export function storage_layout(folder?: string | null): unknown;
+	export function note_paths(note_id: string, folder?: string | null): unknown;
+	export function object_paths(full_hash: string, folder?: string | null): unknown;
+	export function is_managed_path(vault_relative: string, folder?: string | null): boolean;
+	export function validate_store_folder(folder: string): string;
+	export function note_id(source: string): string | undefined;
+	export function set_note_id(source: string, expected: string | null | undefined, id: string): string;
+	export function validate_store_marker(marker: unknown): unknown;
+	export function validate_store_location(location: unknown): unknown;
+	export function resolve_object_hash(hash: string, aliases: unknown): string;
 	export function parse_block(content: string): unknown;
 	export function reconcile(content: unknown, sidecar: unknown): unknown;
 	export function rewrite_block_id_at(doc: string, block_start: number, expected_id: string, new_id: string): unknown;

@@ -18,6 +18,53 @@ are delivered through new GitHub Releases. Installed community plugins do not
 update automatically: users select **Settings → Community plugins → Check for
 updates**, then **Update** or **Update all**.
 
+## Storage format 1 cutover
+
+The 0.3 plugin and CLI use one visible vault-relative store, defaulting to
+`mica-data/`. The fixed vault-root `mica.json` is the routing authority shared
+by both hosts, including plain directories without Obsidian or Git.
+`--store-dir` must agree with an existing locator. Treat this as a coordinated
+storage-format change: every participating client must understand the locator,
+marker, note bindings and shared object addresses before it writes. Old
+note-local sidecars are not an automatic import or fallback path. The release
+must not claim existing-vault cutover until an independent backup, writer/Sync
+quiescence, exact object/reference verification, and history/restore checks
+have succeeded. Preserve old state for rollback outside the live vault. The
+one-off owner transfer is external to product code; do not add a permanent
+migration framework, dual writes, or shared-object garbage collection.
+
+Custom-folder selection uses **Settings → Mica → Storage → Apply after restart**.
+Stop CLI/watch writers before restarting. Startup records a pending route and
+moves the whole existing folder before admitting engine or bridge work; the
+destination retains the original store UUID and all history bytes. Only a
+verified destination becomes active. A pending route prevents ordinary writes
+until recovery identifies one matching store; conflicting copies are preserved.
+First initialization records its UUID and `initializing:true` before directory
+creation, so an interrupted setup can resume only that recorded identity and
+clear the intent through an exact locator guard. Existing unrelated contents
+remain a conflict. This location change moves the current central store and
+does not import old note-local sidecars. Record any unperformed routing,
+relocation, or recovery compatibility checks as outstanding; source changes
+alone establish none of those outcomes.
+
+Qualify the new source independently of a review-fix release. Record the exact
+source and separate results for the production WASM/plugin and native CLI
+builds, required typecheck, local Obsidian preflight, and decoded asset/notice
+review. Existing storage fixtures must use that source's generated WASM and
+real store bindings; an older qualified bundle or mocked path policy is not
+storage evidence. Do not run checks outside the owner's authorized scope.
+
+Before cutover, verify plain non-Git roots and explicit vault selection,
+default and custom nested folders, and conflicting `--store-dir` rejection.
+Exercise initialization recovery, whole-folder relocation with unchanged UUID
+and history bytes, and refusal of unmarked existing folders or competing
+default storage. Verify plugin/CLI snapshot, read and restore interoperability,
+gzip objects, stable history after note rename, duplicate identities, and
+retained orphan records. Pending/stale routes must block publication and
+rollback; bridge outcome retention and native journal recovery need their own
+acceptance evidence. Keep every unrun check pending rather than treating source
+review as that evidence.
+
 ## Review branch and promotion gate
 
 1. Commit and push all new work to the permanent lowercase `review` branch
@@ -109,7 +156,7 @@ release version in `versions.json`.
 
 WHEN you change the sidecar or ledger format THEN you SHALL document backward
 compatibility and test the plugin and CLI from the same candidate against
-existing sidecars before tagging.
+existing stored histories before tagging.
 
 WHEN the candidate can write `checkpoint`, `move-head`, `version-label`,
 `version-visibility`, or `replace-version` events THEN you SHALL upgrade every
@@ -131,12 +178,12 @@ WHEN the candidate is ready for verification THEN you SHALL run:
 pnpm install --frozen-lockfile
 pnpm run audit:prod
 cargo deny check advisories
+pnpm run build
 pnpm run check
 pnpm run test:version-stress
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release -p mica-cli --locked
-pnpm run build
 pnpm run check:release:assets
 pnpm run smoke
 xvfb-run -a pnpm run e2e

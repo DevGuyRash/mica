@@ -1,4 +1,17 @@
 import { browser, expect } from "@wdio/globals";
+import type MicaPlugin from "../../../src/main";
+
+/** Inspect the binding returned by the product; tests must not reimplement note-key policy. */
+async function historyPaths(path: string) {
+	return browser.executeObsidian(async ({ app, obsidian }, note) => {
+		const file = app.vault.getAbstractFileByPath(note);
+		if (!(file instanceof obsidian.TFile)) throw new Error(`missing note: ${note}`);
+		const plugin = (app as unknown as { plugins: { plugins: Record<string, MicaPlugin> } }).plugins.plugins["mica"];
+		const store = await plugin.engine.historyStore(file);
+		if (!store) throw new Error(`note has no prepared history: ${note}`);
+		return { noteId: store.noteId, paths: store.paths, root: store.root.paths };
+	}, path);
+}
 
 /** Read a note's current content from inside Obsidian. */
 async function readNote(path: string): Promise<string> {
@@ -79,14 +92,20 @@ describe("runtime contracts (window.mica)", function () {
 				timeout: 10_000,
 				timeoutMsg: "the raw id-less block was not stamped",
 			});
-			const result = await browser.executeObsidian(async ({ app }) => ({
-				source: await window.mica.blockList("RawIdless.md"),
-				hasSidecar: Boolean(app.vault.getAbstractFileByPath("RawIdless.mica")),
-			}));
+			const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+				const file = app.vault.getAbstractFileByPath("RawIdless.md");
+				if (!(file instanceof obsidian.TFile)) throw new Error("missing raw id-less fixture");
+				const plugin = (app as unknown as { plugins: { plugins: Record<string, MicaPlugin> } }).plugins.plugins["mica"];
+				const store = await plugin.engine.historyStore(file);
+				return {
+					source: await window.mica.blockList("RawIdless.md"),
+					hasHistory: store !== null && Boolean(app.vault.getAbstractFileByPath(store.paths.ledger)),
+				};
+			});
 			expect(result.source[0]?.id).toMatch(
 				/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
 			);
-			expect(result.hasSidecar).toBe(false);
+			expect(result.hasHistory).toBe(false);
 		} finally {
 			await browser.executeObsidian(({ app }, before) => {
 				type Plugin = {
@@ -348,44 +367,48 @@ describe("runtime contracts (window.mica)", function () {
 		expect(result.resetHead).toBe(result.v1);
 	});
 
-	it("moves history with a renamed note and refreshes metadata without minting a version", async function () {
+	it("keeps history at its stable identity after rename and refreshes metadata without minting a version", async function () {
 		const originalPath = "RenameOrigin.md";
 		const renamedPath = "RenameDestination.md";
 		const id = "rename-history";
 		await createNote(originalPath, `\`\`\`mica id=${id} name="Before"\ntab: Main\nstable body\n\`\`\`\n`);
-		await browser.executeObsidian(async ({ app, obsidian }) => {
+		await browser.executeObsidian(async () => {
 			await window.mica.versionsSnapshot("RenameOrigin.md");
 			const [version] = await window.mica.versionsList("RenameOrigin.md", "rename-history");
 			if (!version) throw new Error("missing rename fixture version");
 			await window.mica.versionsLabel("RenameOrigin.md", "rename-history", version.hash, "kept label");
+		});
+		const original = await historyPaths(originalPath);
+		await browser.executeObsidian(async ({ app, obsidian }) => {
 			const file = app.vault.getAbstractFileByPath("RenameOrigin.md");
 			if (!(file instanceof obsidian.TFile)) throw new Error("missing rename fixture note");
 			await app.fileManager.renameFile(file, "RenameDestination.md");
 		});
 
 		await browser.waitUntil(
-			() =>
-				browser.executeObsidian(
-					({ app }) =>
-						!app.vault.getAbstractFileByPath("RenameOrigin.mica") &&
-						Boolean(app.vault.getAbstractFileByPath("RenameDestination.mica/manifest.json")),
-				),
-			{ timeout: 10_000, timeoutMsg: "the sidecar did not follow its renamed note" },
+			async () => {
+				const manifest = JSON.parse(await readNote(original.paths.manifest)) as { path: string };
+				return manifest.path === renamedPath;
+			},
+			{ timeout: 10_000, timeoutMsg: "the central history path hint did not follow its renamed note" },
 		);
 
-		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+		const result = await browser.executeObsidian(async ({ app, obsidian }, manifestPath) => {
 			const before = await window.mica.versionsList("RenameDestination.md", "rename-history");
 			await window.mica.blockSetAttr("RenameDestination.md", "rename-history", "name", "After");
 			await window.mica.versionsSnapshot("RenameDestination.md");
 			const after = await window.mica.versionsList("RenameDestination.md", "rename-history");
-			const manifestFile = app.vault.getAbstractFileByPath("RenameDestination.mica/manifest.json");
-			if (!(manifestFile instanceof obsidian.TFile)) throw new Error("missing renamed manifest");
+			const manifestFile = app.vault.getAbstractFileByPath(manifestPath);
+			if (!(manifestFile instanceof obsidian.TFile)) throw new Error("missing stable history manifest");
 			const manifest = JSON.parse(await app.vault.read(manifestFile)) as {
 				path: string;
 				blocks: Record<string, string>;
 			};
 			return { before, after, manifest };
-		});
+		}, original.paths.manifest);
+		const renamed = await historyPaths(renamedPath);
+		expect(renamed.noteId).toBe(original.noteId);
+		expect(renamed.paths).toEqual(original.paths);
 		expect(result.before.map((version) => version.hash)).toEqual(result.after.map((version) => version.hash));
 		expect(result.after).toHaveLength(1);
 		expect(result.after[0]?.label).toBe("kept label");
@@ -393,29 +416,40 @@ describe("runtime contracts (window.mica)", function () {
 		expect(result.manifest.blocks[id]).toBe("After");
 	});
 
-	it("reports a rename collision and preserves both sidecar folders", async function () {
+	it("reports a duplicate identity during rename and preserves both notes and the central history", async function () {
 		await createNote("RenameCollisionOrigin.md", "```mica id=rename-collision\ntab: Main\nsource history\n```\n");
-		await browser.executeObsidian(async ({ app, obsidian }) => {
-			await window.mica.versionsSnapshot("RenameCollisionOrigin.md");
-			await app.vault.createFolder("RenameCollisionDestination.mica");
-			const file = app.vault.getAbstractFileByPath("RenameCollisionOrigin.md");
-			if (!(file instanceof obsidian.TFile)) throw new Error("missing collision fixture note");
-			await app.fileManager.renameFile(file, "RenameCollisionDestination.md");
-		});
-		await browser.waitUntil(
-			() =>
-				browser.executeObsidian(() =>
+		await browser.executeObsidian(() => window.mica.versionsSnapshot("RenameCollisionOrigin.md"));
+		const original = await historyPaths("RenameCollisionOrigin.md");
+		const manifestBefore = await readNote(original.paths.manifest);
+		const ledgerBefore = await readNote(original.paths.ledger);
+		const noteBefore = await readNote("RenameCollisionOrigin.md");
+		try {
+			await browser.executeObsidian(async ({ app, obsidian }, source) => {
+				await app.vault.create("RenameCollisionDuplicate.md", source);
+				const file = app.vault.getAbstractFileByPath("RenameCollisionOrigin.md");
+				if (!(file instanceof obsidian.TFile)) throw new Error("missing collision fixture note");
+				await app.fileManager.renameFile(file, "RenameCollisionDestination.md");
+			}, noteBefore);
+			await browser.waitUntil(
+				() => browser.executeObsidian(() =>
 					Array.from(document.querySelectorAll(".notice")).some((notice) =>
-						notice.textContent?.includes("history needs attention"),
+						notice.textContent?.includes("history needs attention") &&
+						notice.textContent.includes("duplicate note identity"),
 					),
 				),
-			{ timeout: 10_000, timeoutMsg: "the sidecar collision was not surfaced" },
-		);
-		const paths = await browser.executeObsidian(({ app }) => ({
-			source: Boolean(app.vault.getAbstractFileByPath("RenameCollisionOrigin.mica")),
-			destination: Boolean(app.vault.getAbstractFileByPath("RenameCollisionDestination.mica")),
-		}));
-		expect(paths).toEqual({ source: true, destination: true });
+				{ timeout: 10_000, timeoutMsg: "the rename identity conflict was not surfaced" },
+			);
+			expect(await readNote("RenameCollisionDestination.md")).toBe(noteBefore);
+			expect(await readNote("RenameCollisionDuplicate.md")).toBe(noteBefore);
+			expect(await readNote(original.paths.manifest)).toBe(manifestBefore);
+			expect(await readNote(original.paths.ledger)).toBe(ledgerBefore);
+		} finally {
+			// This negative fixture must not leave a duplicate identity for later repair cases.
+			await browser.executeObsidian(async ({ app, obsidian }) => {
+				const duplicate = app.vault.getAbstractFileByPath("RenameCollisionDuplicate.md");
+				if (duplicate instanceof obsidian.TFile) await app.vault.delete(duplicate);
+			});
+		}
 	});
 
 	it("migrates the real legacy tabs shape losslessly", async function () {
@@ -444,13 +478,15 @@ describe("runtime contracts (window.mica)", function () {
 
 		// Migration imports the archive callouts as versions asynchronously (after
 		// the doc rewrite the previous wait caught) — wait for that OUTCOME, not a
-		// point-in-time snapshot, so the sidecar/version assertions aren't racy.
+		// point-in-time snapshot, so the central ledger/version assertions aren't racy.
+		const migrated = await historyPaths("Legacy Tabs.md");
 		await browser.waitUntil(
 			() =>
-				browser.executeObsidian(({ app }) =>
-					Boolean(app.vault.getAbstractFileByPath("Legacy Tabs.mica/ledger.jsonl")),
+				browser.executeObsidian(({ app }, ledger) =>
+					Boolean(app.vault.getAbstractFileByPath(ledger)),
+					migrated.paths.ledger,
 				),
-			{ timeout: 10_000, timeoutMsg: "migration never created the sidecar ledger" },
+			{ timeout: 10_000, timeoutMsg: "migration never created the central note ledger" },
 		);
 
 		// The killer feature: the manual archive callouts became REAL versions.
@@ -472,8 +508,8 @@ describe("runtime contracts (window.mica)", function () {
 		expect(labels).toContain("V0.3"); // [!bug]- Frame Gate (V0.3)
 		expect(labels).toContain("V2.5"); // [!info]- Field Notes — a non-default callout type
 		expect(versions.length).toBeGreaterThanOrEqual(4); // imported + migrated head
-		const journal = await browser.executeObsidian(async ({ app, obsidian }) => {
-			const af = app.vault.getAbstractFileByPath("Legacy Tabs.mica/migration.json");
+		const journal = await browser.executeObsidian(async ({ app, obsidian }, migrationPath) => {
+			const af = app.vault.getAbstractFileByPath(migrationPath);
 			if (!(af instanceof obsidian.TFile)) throw new Error("migration journal was not retained");
 			return JSON.parse(await app.vault.read(af)) as {
 				format: number;
@@ -482,7 +518,7 @@ describe("runtime contracts (window.mica)", function () {
 				original: string;
 				migrated: string;
 			};
-		});
+		}, migrated.paths.migration);
 		expect(journal).toMatchObject({ format: 1, status: "complete", note: "Legacy Tabs.md" });
 		expect(journal.original).toMatch(/^b3:[0-9a-f]{64}$/);
 		expect(journal.migrated).toMatch(/^b3:[0-9a-f]{64}$/);
@@ -490,8 +526,7 @@ describe("runtime contracts (window.mica)", function () {
 
 	it("recovers a torn ledger tail and an append that partially commits before throwing", async function () {
 		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
-			type Plugin = { settings: { autoSnapshotEnabled: boolean } };
-			const plugin = (app as unknown as { plugins: { plugins: Record<string, Plugin> } }).plugins.plugins["mica"];
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, MicaPlugin> } }).plugins.plugins["mica"];
 			const previousAuto = plugin.settings.autoSnapshotEnabled;
 			plugin.settings.autoSnapshotEnabled = false;
 			const name = "LedgerRecovery.md";
@@ -501,7 +536,9 @@ describe("runtime contracts (window.mica)", function () {
 			if (!(file instanceof obsidian.TFile)) throw new Error("missing recovery note");
 			try {
 				await window.mica.versionsSnapshot(name);
-				const ledger = app.vault.getAbstractFileByPath("LedgerRecovery.mica/ledger.jsonl");
+				const store = await plugin.engine.historyStore(file);
+				if (!store) throw new Error("missing recovery history binding");
+				const ledger = app.vault.getAbstractFileByPath(store.paths.ledger);
 				if (!(ledger instanceof obsidian.TFile)) throw new Error("missing recovery ledger");
 				await app.vault.append(ledger, '{"type":'); // torn JSON, deliberately no newline
 				await app.vault.process(file, (doc) => doc.replace("v1", "v2"));
@@ -511,7 +548,7 @@ describe("runtime contracts (window.mica)", function () {
 				const originalAppend = mutableVault.append;
 				let injected = false;
 				mutableVault.append = async (target, data, options) => {
-					if (!injected && target.path.endsWith("LedgerRecovery.mica/ledger.jsonl")) {
+					if (!injected && target.path === store.paths.ledger) {
 						injected = true;
 						const firstLine = data.slice(0, data.indexOf("\n") + 1);
 						await originalAppend.call(app.vault, target, firstLine, options);
@@ -554,19 +591,31 @@ describe("runtime contracts (window.mica)", function () {
 	});
 
 	it("rejects a corrupt successful object create and dual object representations", async function () {
-		const result = await browser.executeObsidian(async ({ app }) => {
-			type Plugin = { settings: { autoSnapshotEnabled: boolean } };
-			const plugin = (app as unknown as { plugins: { plugins: Record<string, Plugin> } }).plugins.plugins["mica"];
+		const result = await browser.executeObsidian(async ({ app, obsidian }) => {
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, MicaPlugin> } }).plugins.plugins["mica"];
 			const previousAuto = plugin.settings.autoSnapshotEnabled;
 			plugin.settings.autoSnapshotEnabled = false;
 			const mutableVault = app.vault as unknown as { create: typeof app.vault.create };
 			const originalCreate = mutableVault.create;
+			let corruptObjectPath: string | null = null;
+			let dualRepresentationPath: string | null = null;
 			try {
 				const corruptName = "CorruptObjectCreate.md";
-				await originalCreate.call(app.vault, corruptName, "```mica id=corrupt-object\ntab: A\noriginal\n```\n");
+				const corruptContent = "tab: A\ncorrupt successful-create fixture\n";
+				await originalCreate.call(app.vault, corruptName, `\`\`\`mica id=corrupt-object\n${corruptContent}\`\`\`\n`);
+				await window.mica.prepare(corruptName);
+				const corruptFile = app.vault.getAbstractFileByPath(corruptName);
+				if (!(corruptFile instanceof obsidian.TFile)) throw new Error("missing corrupt-object fixture");
+				const store = await plugin.engine.historyStore(corruptFile);
+				if (!store) throw new Error("missing corrupt-object history binding");
 				let corruptedCreateRejected = false;
 				mutableVault.create = async (path, data, options) => {
-					if (path.includes("CorruptObjectCreate.mica/objects/") && path.endsWith(".mica.md")) {
+					if (
+						path.startsWith(`${store.root.paths.objects}/`) &&
+						path.endsWith(".mica.md") &&
+						data === corruptContent
+					) {
+						corruptObjectPath = path;
 						return originalCreate.call(app.vault, path, `${data}CORRUPTED`, options);
 					}
 					return originalCreate.call(app.vault, path, data, options);
@@ -585,8 +634,9 @@ describe("runtime contracts (window.mica)", function () {
 				const versions = await window.mica.versionsList(dualName, "dual-object");
 				const hash = versions[0]?.hash;
 				if (!hash) throw new Error("missing dual-object version");
-				const gzPath = `DualObject.mica/objects/${hash.replace(":", "-")}.mica.gz`;
+				const gzPath = `${store.root.paths.objects}/${hash.replace(":", "-")}.mica.gz`;
 				await app.vault.createBinary(gzPath, new Uint8Array().buffer);
+				dualRepresentationPath = gzPath;
 				let dualRejected = false;
 				try {
 					await window.mica.versionsDiff(dualName, hash, hash);
@@ -597,37 +647,52 @@ describe("runtime contracts (window.mica)", function () {
 			} finally {
 				mutableVault.create = originalCreate;
 				plugin.settings.autoSnapshotEnabled = previousAuto;
+				// Corruption is scoped to this case; later repair cases share the object pool.
+				for (const path of [corruptObjectPath, dualRepresentationPath]) {
+					if (path === null) continue;
+					const injected = app.vault.getAbstractFileByPath(path);
+					if (injected instanceof obsidian.TFile) await app.vault.delete(injected);
+				}
 			}
 		});
 		expect(result.corruptedCreateRejected).toBe(true);
 		expect(result.dualRejected).toBe(true);
 	});
 
-	it("does not rehome a sidecar whose represented blocks resolve to different notes", async function () {
-		const result = await browser.executeObsidian(async ({ app }) => {
-			await app.vault.create("RehomeA.md", "```mica id=rehome-a\ntab: A\na\n```\n");
-			await app.vault.create("RehomeB.md", "```mica id=rehome-b\ntab: B\nb\n```\n");
-			await app.vault.createFolder("Shared.mica");
-			await app.vault.createFolder("Shared.mica/objects");
-			const ts = Date.now();
-			const hashA = `b3:${"a".repeat(64)}`;
-			const hashB = `b3:${"b".repeat(64)}`;
-			await app.vault.create(
-				"Shared.mica/ledger.jsonl",
-				[
-					JSON.stringify({ type: "set-head", eid: "shared-a", ts, block: "rehome-a", hash: hashA }),
-					JSON.stringify({ type: "set-head", eid: "shared-b", ts, block: "rehome-b", hash: hashB }),
-				].join("\n") + "\n",
-			);
+	it("retains an orphan central record when its represented blocks resolve to different notes", async function () {
+		await createNote("Shared.md", "```mica id=rehome-a\ntab: A\na\n```\n\n```mica id=rehome-b\ntab: B\nb\n```\n");
+		await browser.executeObsidian(() => window.mica.versionsSnapshot("Shared.md"));
+		const shared = await historyPaths("Shared.md");
+		const manifestBefore = await readNote(shared.paths.manifest);
+		const ledgerBefore = await readNote(shared.paths.ledger);
+		const result = await browser.executeObsidian(async ({ app, obsidian }, paths) => {
+			const original = app.vault.getAbstractFileByPath("Shared.md");
+			if (!(original instanceof obsidian.TFile)) throw new Error("missing shared-history fixture");
+			await app.vault.delete(original);
+			const originalA = await app.vault.create("RehomeA.md", "```mica id=rehome-a\ntab: A\na\n```\n");
+			const originalB = await app.vault.create("RehomeB.md", "```mica id=rehome-b\ntab: B\nb\n```\n");
+			const beforeA = await app.vault.read(originalA);
+			const beforeB = await app.vault.read(originalB);
 			const report = await window.mica.repair();
+			const manifest = app.vault.getAbstractFileByPath(paths.manifest);
+			const ledger = app.vault.getAbstractFileByPath(paths.ledger);
+			const a = app.vault.getAbstractFileByPath("RehomeA.md");
+			const b = app.vault.getAbstractFileByPath("RehomeB.md");
+			if (!(manifest instanceof obsidian.TFile) || !(ledger instanceof obsidian.TFile) ||
+				!(a instanceof obsidian.TFile) || !(b instanceof obsidian.TFile)) throw new Error("repair removed preserved fixture state");
 			return {
-				stillThere: Boolean(app.vault.getAbstractFileByPath("Shared.mica")),
-				conflict: report.conflicted.find((item) => item.sidecar === "Shared.mica"),
+				stillThere: Boolean(app.vault.getAbstractFileByPath(paths.dir)),
+				rehomed: report.rehomed,
+				manifest: await app.vault.read(manifest),
+				ledger: await app.vault.read(ledger),
+				notesUnchanged: await app.vault.read(a) === beforeA && await app.vault.read(b) === beforeB,
 			};
-		});
+		}, shared.paths);
 		expect(result.stillThere).toBe(true);
-		expect(result.conflict?.reason).toBe("multiple-live-targets");
-		expect(result.conflict?.notes).toEqual(["RehomeA.md", "RehomeB.md"]);
+		expect(result.rehomed).toEqual([]);
+		expect(result.manifest).toBe(manifestBefore);
+		expect(result.ledger).toBe(ledgerBefore);
+		expect(result.notesUnchanged).toBe(true);
 	});
 
 	it("migrate.scan verb reports (and is empty once converted)", async function () {
@@ -775,16 +840,21 @@ describe("runtime contracts (window.mica)", function () {
 			const existing = app.vault.getAbstractFileByPath(path);
 			if (existing instanceof obsidian.TFile) await app.vault.modify(existing, content);
 			else await app.vault.create(path, content);
+			const file = app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing duplicate-id fixture");
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, MicaPlugin> } }).plugins.plugins["mica"];
 			try {
 				await window.mica.versionsSnapshot(path);
+				const store = await plugin.engine.historyStore(file);
 				return {
 					message: null,
-					hasLedger: Boolean(app.vault.getAbstractFileByPath("DuplicateSnapshot.mica/ledger.jsonl")),
+					hasLedger: store !== null && Boolean(app.vault.getAbstractFileByPath(store.paths.ledger)),
 				};
 			} catch (error) {
+				const store = await plugin.engine.historyStore(file);
 				return {
 					message: error instanceof Error ? error.message : String(error),
-					hasLedger: Boolean(app.vault.getAbstractFileByPath("DuplicateSnapshot.mica/ledger.jsonl")),
+					hasLedger: store !== null && Boolean(app.vault.getAbstractFileByPath(store.paths.ledger)),
 				};
 			}
 		});
@@ -794,24 +864,28 @@ describe("runtime contracts (window.mica)", function () {
 
 	it("file-bridge: inbox instruction produces an outbox result", async function () {
 		const req = `req-${Date.now()}`;
-		await browser.executeObsidian(async ({ app }, name) => {
-			await app.vault.createFolder("mica-bridge/inbox").catch(() => undefined);
+		await browser.executeObsidian(() => window.mica.prepare("Sandbox.md"));
+		const sandbox = await historyPaths("Sandbox.md");
+		const inbox = `${sandbox.root.bridgeInbox}/${req}.json`;
+		const outbox = `${sandbox.root.bridgeOutbox}/${req}.json`;
+		await browser.executeObsidian(async ({ app }, inboxPath) => {
 			await app.vault.create(
-				`mica-bridge/inbox/${name}.json`,
+				inboxPath,
 				JSON.stringify({ verb: "block.list", args: ["Sandbox.md"] }),
 			);
-		}, req);
+		}, inbox);
 
 		await browser.waitUntil(
 			() =>
 				browser.executeObsidian(
-					({ app }, name) => Boolean(app.vault.getAbstractFileByPath(`mica-bridge/outbox/${name}.json`)),
-					req,
+					({ app }, outboxPath) => Boolean(app.vault.getAbstractFileByPath(outboxPath)),
+					outbox,
 				),
-			{ timeout: 15_000, timeoutMsg: `outbox result mica-bridge/outbox/${req}.json never appeared` },
+			{ timeout: 15_000, timeoutMsg: `outbox result ${outbox} never appeared` },
 		);
 
-		const result = JSON.parse(await readNote(`mica-bridge/outbox/${req}.json`)) as {
+		const response = await readNote(outbox);
+		const result = JSON.parse(response) as {
 			ok: boolean;
 			result: unknown[];
 			error: string | null;
@@ -819,18 +893,24 @@ describe("runtime contracts (window.mica)", function () {
 		expect(result.ok).toBe(true);
 		expect(Array.isArray(result.result)).toBe(true);
 
-		// The instruction must be CONSUMED — a surviving inbox file would replay
-		// (destructively) on every future app launch.
-		const inboxGone = await browser.executeObsidian(
-			({ app }, name) => !app.vault.getAbstractFileByPath(`mica-bridge/inbox/${name}.json`),
-			req,
-		);
-		expect(inboxGone).toBe(true);
+		// Consumption retains the exact outcome in a non-executable receipt instead of replayable verb/args.
+		const consumed = JSON.parse(await readNote(inbox)) as {
+			micaConsumed: number;
+			instructionHash: string;
+			response: string;
+			verb?: unknown;
+			args?: unknown;
+		};
+		expect(consumed.micaConsumed).toBe(1);
+		expect(consumed.instructionHash).toMatch(/^b3:[0-9a-f]{64}$/);
+		expect(consumed.verb).toBeUndefined();
+		expect(consumed.args).toBeUndefined();
+		expect(consumed.response).toBe(response);
 	});
 
 	it("large version objects compress to .gz and revert losslessly", async function () {
 		const big = "B".repeat(6000);
-		const result = await browser.executeObsidian(async ({ app }, payload) => {
+		const result = await browser.executeObsidian(async ({ app, obsidian }, payload) => {
 			type M = {
 				blockUpdate(n: string, id: string, c: string): Promise<unknown>;
 				versionsSnapshot(n: string): Promise<unknown>;
@@ -847,12 +927,17 @@ describe("runtime contracts (window.mica)", function () {
 			await mica.blockUpdate(name, "gz-1", `tab: A\n${payload}\n`);
 			await mica.versionsSnapshot(name);
 			const versions = await mica.versionsList(name, "gz-1");
-			const files = (await app.vault.adapter.list("GzRound.mica/objects")).files;
-			const hasGz = files.some((f: string) => f.endsWith(".mica.gz"));
+			const file = app.vault.getAbstractFileByPath(name);
+			if (!(file instanceof obsidian.TFile)) throw new Error("missing gzip fixture note");
+			const plugin = (app as unknown as { plugins: { plugins: Record<string, MicaPlugin> } }).plugins.plugins["mica"];
+			const store = await plugin.engine.historyStore(file);
+			if (!store) throw new Error("missing gzip history binding");
+			const files = (await app.vault.adapter.list(store.root.paths.objects)).files;
+			const bigVersion = versions.find((v) => v.hash !== versions[0].hash);
+			if (!bigVersion) return { hasGz: false, ok: false };
+			const hasGz = files.includes(`${store.root.paths.objects}/${bigVersion.hash.replace(":", "-")}.mica.gz`);
 			// Revert to the FIRST (small) version, then forward to the big one.
 			await mica.versionsRevert(name, "gz-1", versions[0].hash);
-			const bigVersion = versions.find((v) => v.hash !== versions[0].hash);
-			if (!bigVersion) return { hasGz, ok: false };
 			await mica.versionsRevert(name, "gz-1", bigVersion.hash);
 			const read = await mica.blockRead(name, "gz-1");
 			return { hasGz, ok: read.includes(payload) };

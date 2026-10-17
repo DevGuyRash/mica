@@ -4472,7 +4472,8 @@ function renderVersionChip(bar: HTMLElement, ctx: RenderCtx, chip: ChipInfo, rev
 			let missingObject = false;
 			const currentHead = state?.rawHead ?? state?.head;
 			if (currentHead) {
-				const head = await readObject(p.app.vault, chip.file, currentHead);
+				const store = await p.engine.historyStore(chip.file);
+				const head = store ? await readObject(store, currentHead) : null;
 				missingObject = head === null;
 				exactDirty = !missingObject && head !== current;
 				dirty = missingObject || exactDirty;

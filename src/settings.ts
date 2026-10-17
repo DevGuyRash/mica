@@ -7,6 +7,7 @@ import {
 	setIcon,
 	type SettingDefinitionItem,
 	type SliderComponent,
+	type TextComponent,
 } from "obsidian";
 import { ICON_PACKS, requiredAttribution } from "./icons/iconPacks";
 import { forgetIconPack } from "./icons/iconPackRuntime";
@@ -41,6 +42,10 @@ export const MICA_THEMES: { id: string; name: string }[] = [
 ];
 
 export interface MicaSettings {
+	/** Active vault-relative storage folder mirrored from the shared mica.json locator. */
+	storageFolder: string;
+	/** Explicitly requested folder to preflight now and move to on next startup. */
+	pendingStorageFolder: string | null;
 	/** Master switch for auto-snapshotting (toggled live from each block's footer). */
 	autoSnapshotEnabled: boolean;
 	/** Idle time before an auto-snapshot fires after an edit. */
@@ -135,6 +140,8 @@ export interface MicaSettings {
 }
 
 export const DEFAULT_SETTINGS: MicaSettings = {
+	storageFolder: "mica-data",
+	pendingStorageFolder: null,
 	autoSnapshotEnabled: true,
 	snapshotDebounceMs: 5000,
 	diffRefine: "word",
@@ -197,9 +204,12 @@ export type SettingLifecycle =
 	| "read-at-use"
 	| "next-open"
 	| "next-startup"
-	| "debouncer-runtime";
+	| "debouncer-runtime"
+	| "storage-relocation";
 
 export const SETTING_LIFECYCLES = {
+	storageFolder: "read-at-use",
+	pendingStorageFolder: "storage-relocation",
 	autoSnapshotEnabled: "debouncer-runtime",
 	snapshotDebounceMs: "debouncer-runtime",
 	diffRefine: "next-open",
@@ -253,9 +263,14 @@ export const SETTING_LIFECYCLES = {
 	enabledIconPacks: "read-at-use",
 } as const satisfies Record<keyof MicaSettings, SettingLifecycle>;
 
-/** Apply the declared lifecycle first, then persist the already-mutated value. */
-export async function commitSetting(plugin: MicaPlugin, key: keyof MicaSettings): Promise<void> {
+/** Ordinary preferences apply their lifecycle before saving. Storage requests
+ * receive an explicit draft; the controller preflights and persists the pending folder. */
+export async function commitSetting(plugin: MicaPlugin, key: keyof MicaSettings, value?: string): Promise<void> {
 	switch (SETTING_LIFECYCLES[key]) {
+		case "storage-relocation":
+			if (value === undefined) throw new Error("Mica: storage relocation requires an explicit destination");
+			await plugin.changeStorageFolder(value);
+			return;
 		case "immediate-runtime":
 			plugin.applyStyleVars();
 			break;
@@ -327,7 +342,7 @@ export class MicaSettingTab extends PluginSettingTab {
 			.join("")}`;
 	}
 
-	/** Grouped by intent: Versioning, Comparing, Appearance, Migration. Knobs that
+	/** Grouped by intent: Storage, Versioning, Comparing, Appearance, Migration. Knobs that
 	 * only matter when a toggle is on are hidden until then. Callbacks retain each setting’s lifecycle effects. */
 	private settingGroups(): MicaSettingGroup[] {
 		const s = this.micaPlugin.settings;
@@ -341,6 +356,48 @@ export class MicaSettingTab extends PluginSettingTab {
 		const add = (name: string, desc: string, render: (setting: Setting) => void = () => undefined): void => {
 			items.push({ name, desc, render });
 		};
+
+		group("Storage");
+		add(
+			"Storage folder",
+			"Visible folder inside this vault, relative to the vault root. Existing history moves at next startup; stop Mica CLI/watch before restarting.",
+			(setting) => {
+				let draft = this.micaPlugin.settings.pendingStorageFolder ?? this.micaPlugin.settings.storageFolder;
+				let moving = false;
+				let input: TextComponent | undefined;
+				setting
+					.addText((text) => {
+						input = text;
+						text
+							.setPlaceholder(DEFAULT_SETTINGS.storageFolder)
+							.setValue(draft)
+							.onChange((value) => {
+								draft = value;
+							});
+					})
+					.addButton((button) => {
+						button.setButtonText("Apply after restart").setCta().onClick(() => {
+							if (moving) return;
+							moving = true;
+							input?.setDisabled(true);
+							button.setDisabled(true);
+							void (async () => {
+								try {
+									await this.micaPlugin.changeStorageFolder(draft);
+									draft = this.micaPlugin.settings.pendingStorageFolder ?? this.micaPlugin.settings.storageFolder;
+									input?.setValue(draft);
+								} catch (error) {
+									console.error("Mica: storage folder request failed", error);
+								} finally {
+									moving = false;
+									input?.setDisabled(false);
+									button.setDisabled(false);
+								}
+							})();
+						});
+					});
+			},
+		);
 
 		// ---------- Versioning ----------
 		group("Versioning");
