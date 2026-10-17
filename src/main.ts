@@ -132,7 +132,7 @@ export default class MicaPlugin extends Plugin {
 				if (context.file && !isLiveNote(context.file)) { new Notice("Mica: choose a live note outside history storage"); return; }
 				const sel = editor.getSelection();
 				if (!sel.trim()) {
-					new Notice("Select the markdown to wrap first.");
+					new Notice("Select the Markdown to wrap first.");
 					return;
 				}
 				editor.replaceSelection(createBlockSource({ body: `tab: New tab\n${sel}` }));
@@ -309,12 +309,11 @@ export default class MicaPlugin extends Plugin {
 			const { actions, rehomed, conflicted, forked, buried } = await repair(this);
 			if (actions.length || rehomed.length || conflicted.length || forked.length || buried.length) {
 				new Notice(
-					`Mica: reconciled — ${rehomed.length} rehomed, ${forked.length} forked, ${buried.length} buried, ${conflicted.length} conflict(s), ${actions.length} issue(s). See console.`,
+					`Mica: reconciled — ${rehomed.length} rehomed, ${forked.length} forked, ${buried.length} buried, ${conflicted.length} conflict(s), ${actions.length} issue(s).`,
 				);
-				console.info("Mica startup reconcile:", { rehomed, conflicted, forked, buried, actions });
 			}
-		} catch (e) {
-			console.error("Mica: startup reconcile failed", e);
+		} catch (error) {
+			this.noticeFailure("reconcile history on startup", error);
 		}
 	}
 
@@ -354,12 +353,12 @@ export default class MicaPlugin extends Plugin {
 			if (candidate.id) counts.set(candidate.id, (counts.get(candidate.id) ?? 0) + 1);
 		}
 		if ([...counts.values()].some((count) => count > 1)) {
-			new Notice("Mica block ids are duplicated in this note. Run “Repair history” before comparing versions.");
+			new Notice("Mica: block IDs are duplicated in this note. Repair history before comparing versions.");
 			return;
 		}
 		const block = blocks.find((candidate) => candidate.id);
 		if (!block?.id) {
-			new Notice("No Mica block with an id in this note. Run “Prepare note” first.");
+			new Notice("Mica: this note has no block with an ID. Prepare the note first.");
 			return;
 		}
 		new VersionsModal(this, file, block.id).open();
@@ -369,17 +368,8 @@ export default class MicaPlugin extends Plugin {
 		try {
 			const report = await repair(this);
 			new Notice(
-				`Mica repair: ${report.rehomed.length} rehomed, ${report.forked.length} forked, ${report.buried.length} buried, ${report.conflicted.length} conflict(s), ${report.actions.length} issue(s). See console.`,
+				`Mica repair: ${report.rehomed.length} rehomed, ${report.forked.length} forked, ${report.buried.length} buried, ${report.conflicted.length} conflict(s), ${report.actions.length} issue(s).`,
 			);
-			if (
-				report.actions.length ||
-				report.rehomed.length ||
-				report.conflicted.length ||
-				report.forked.length ||
-				report.buried.length
-			) {
-				console.info("Mica repair:", report);
-			}
 		} catch (error) {
 			this.noticeFailure("repair history", error);
 		}
@@ -400,9 +390,8 @@ export default class MicaPlugin extends Plugin {
 			) {
 				throw new Error("Instruction must have a string verb and optional string arguments.");
 			}
-			const result = await this.api.runInstruction({ verb, args });
-			new Notice("Mica: instruction ran (result in console).");
-			console.info("Mica instruction result:", result);
+			await this.api.runInstruction({ verb, args });
+			new Notice("Mica: instruction ran.");
 		} catch (e) {
 			new Notice(`Mica instruction failed: ${e instanceof Error ? e.message : String(e)}`);
 		}
@@ -414,7 +403,7 @@ export default class MicaPlugin extends Plugin {
 		try {
 			const report = await migrateFile(this, file, dryRun);
 			if (!report) {
-				new Notice("No convertible obsidian-tabs blocks found (Templater notes are skipped).");
+				new Notice("Mica: no convertible blocks from obsidian-tabs were found. Templater notes are skipped.");
 				return;
 			}
 			this.noticeMigration([report], dryRun);
@@ -427,7 +416,7 @@ export default class MicaPlugin extends Plugin {
 		try {
 			const reports = await migrateVault(this, dryRun);
 			if (!reports.length) {
-				new Notice("No convertible obsidian-tabs blocks found anywhere in the vault.");
+				new Notice("Mica: no convertible blocks from obsidian-tabs were found in the vault.");
 				return;
 			}
 			this.noticeMigration(reports, dryRun);
@@ -446,9 +435,9 @@ export default class MicaPlugin extends Plugin {
 		const blocks = reports.reduce((n, r) => n + r.blocks, 0);
 		const versions = reports.reduce((n, r) => n + r.versionsImported, 0);
 		const verb = dryRun ? "would convert" : "converted";
+		const backup = reports.length === 1 ? reports[0].backup : undefined;
 		new Notice(
-			`Mica: ${reports.length} note(s), ${blocks} block(s) ${verb}, ${versions} archived version(s) imported. Details in console.`,
+			`Mica: ${reports.length} note(s), ${blocks} block(s) ${verb}, ${versions} archived version(s) imported.${backup ? ` Backup: ${backup}.` : ""}`,
 		);
-		console.info(`Mica migration ${dryRun ? "(dry run)" : ""}:`, reports);
 	}
 }

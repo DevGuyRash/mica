@@ -24,6 +24,7 @@ struct NotePlan {
     ledger_preimage: Option<Vec<Event>>,
     objects: BTreeMap<String, String>,
     journal: sidecar::SectionNormalizationJournal,
+    journal_preimage: Option<Vec<u8>>,
     report_index: usize,
 }
 
@@ -174,10 +175,15 @@ pub fn normalize_sections(
         // cloning spans; the two result vectors together remain O(blocks).
         let (spans, unclosed_spans): (Vec<_>, Vec<_>) =
             scan_impl(&doc).into_iter().partition(|span| span.closed);
-        let (pending_journal, journal_error) =
-            match sidecar::read_section_normalization_journal(&store) {
-                Ok(journal) => (journal.filter(|journal| journal.status == "pending"), None),
-                Err(error) => (None, Some(error)),
+        let (pending_journal, journal_preimage, journal_error) =
+            match sidecar::read_section_normalization_journal_record(&store) {
+                Ok(Some((journal, bytes))) => (
+                    Some(journal).filter(|journal| journal.status == "pending"),
+                    Some(bytes),
+                    None,
+                ),
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error)),
             };
         if spans.is_empty()
             && unclosed_spans.is_empty()
@@ -428,6 +434,7 @@ pub fn normalize_sections(
                 ledger_preimage,
                 objects,
                 journal,
+                journal_preimage,
                 report_index,
             });
         }
@@ -1467,6 +1474,11 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
     engine::validate_journal_generations(&plan.store, &plan.original, &plan.normalized)?;
     engine::preflight_journal_events(&plan.store, &plan.journal.events)?;
     engine::validate_note_identity(&plan.note, &plan.original)?;
+    sidecar::preflight_journal_claim(
+        &plan.store,
+        &sidecar::section_normalization_journal_path(&plan.store),
+        plan.journal_preimage.as_deref(),
+    )?;
     plan.store.root.claim_location()?;
     sidecar::preflight_note_record(&plan.store)?;
     if plan.source_preimage != plan.original {
@@ -1478,7 +1490,11 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
         sidecar::verify_written_object(&plan.store, hash, content)?;
     }
     let mut journal = plan.journal.clone();
-    sidecar::write_section_normalization_journal(&plan.store, &journal)?;
+    sidecar::claim_section_normalization_journal(
+        &plan.store,
+        &journal,
+        plan.journal_preimage.as_deref(),
+    )?;
     if plan.original != plan.normalized {
         engine::guard_note_store(&plan.note, &plan.store, &plan.original)?;
         fsutil::atomic_write_if_unchanged(
@@ -1508,7 +1524,33 @@ fn verify_published_replacements(
         return Ok(());
     }
     let events = sidecar::read_ledger(note)?;
-    let resolution = resolve_ledger_impl(&events).map_err(|error| {
+    verify_published_replacements_in(note, journal, &events)
+}
+
+/// Read-only postconditions used immediately before pending-to-complete publication.
+pub(crate) fn verify_journal_completion(
+    note: &NoteStore,
+    journal: &sidecar::SectionNormalizationJournal,
+    normalized: &str,
+    ledger: &sidecar::LedgerRead,
+) -> Result<()> {
+    let original = sidecar::read_object(note, &journal.original)?.ok_or_else(|| {
+        CliError::Corrupt("normalization completion preimage is missing".to_string())
+    })?;
+    engine::validate_journal_generations(note, &original, normalized)?;
+    validate_exact_postimage(&original, normalized).map_err(CliError::Corrupt)?;
+    if !journal.history && !journal.events.is_empty() {
+        return Err(CliError::Corrupt("normalization completion has undeclared history events".to_string()));
+    }
+    verify_published_replacements_in(note, journal, &ledger.events)
+}
+
+fn verify_published_replacements_in(
+    note: &NoteStore,
+    journal: &sidecar::SectionNormalizationJournal,
+    events: &[Event],
+) -> Result<()> {
+    let resolution = resolve_ledger_impl(events).map_err(|error| {
         CliError::Corrupt(format!(
             "normalized ledger verification failed for {}: {error}; the pending journal was preserved",
             note.note.display()
@@ -1982,6 +2024,7 @@ mod tests {
                 history: true,
                 events: Vec::new(),
             },
+            journal_preimage: None,
             report_index: 0,
         };
         crate::sidecar::append_events(

@@ -535,7 +535,7 @@ export class VersionsModal extends Modal {
 		}
 		if (!this.rows.length && !this.working.trim()) {
 			contentEl.createEl("p", {
-				text: "No stored versions yet. Edit the block, or run “Save versions now”.",
+				text: "No stored versions yet. Edit the block or save a version.",
 			});
 			return;
 		}
@@ -897,7 +897,7 @@ export class VersionsModal extends Modal {
 		);
 		menu.addItem((i) =>
 			i
-				.setTitle("Reset HEAD here")
+				.setTitle("Reset head here")
 				.setIcon("git-branch")
 				.onClick(async () => {
 					try {
@@ -1260,7 +1260,7 @@ export class VersionsModal extends Modal {
 			);
 			const patch = note.createEl("button", {
 				cls: "mica-comparison-chip",
-				text: "Show all as Patch",
+				text: "Show all as patch",
 				attr: { type: "button" },
 			});
 			patch.addEventListener("click", () => {
@@ -2235,7 +2235,7 @@ export class VersionsModal extends Modal {
 				attr: { type: "button" },
 			});
 			choose.addEventListener("click", () => void this.openBasePicker());
-			const head = recovery.createEl("button", { text: "Compare with Head", attr: { type: "button" } });
+			const head = recovery.createEl("button", { text: "Compare with head", attr: { type: "button" } });
 			head.addEventListener("click", () => this.setBase("head"));
 			surface.createDiv({
 				cls: "mica-legacy-base-help",

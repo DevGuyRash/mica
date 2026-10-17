@@ -1016,9 +1016,12 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
     let mut reports = Vec::new();
     for n in notes {
         let source = engine::read_doc(&n.abs)?;
-        let recovery = match NoteStore::from_document(&n, &source)? {
-            Some(store) => sidecar::read_migration_journal(&store)?.map(|journal| (store, journal)),
-            None => find_pending_migration_store(&n, &source)?,
+        let (recovery, journal_preimage) = match NoteStore::from_document(&n, &source)? {
+            Some(store) => match sidecar::read_migration_journal_record(&store)? {
+                Some((journal, bytes)) => (Some((store, journal)), Some(bytes)),
+                None => (None, None),
+            },
+            None => (find_pending_migration_store(&n, &source)?, None),
         };
         if let Some((store, mut journal)) = recovery {
             if journal.status == "pending" {
@@ -1119,6 +1122,11 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                 sidecar::preflight_object_write(&store, hash, content)?;
             }
             sidecar::preflight_migration_journal(&store, &journal)?;
+            sidecar::preflight_journal_claim(
+                &store,
+                &sidecar::migration_journal_path(&store),
+                journal_preimage.as_deref(),
+            )?;
             engine::preflight_journal_events(&store, &journal.events)?;
             engine::validate_note_identity(&n, &doc)?;
             store.root.claim_location()?;
@@ -1131,7 +1139,11 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                 sidecar::write_object(&store, hash, content)?;
                 sidecar::verify_written_object(&store, hash, content)?;
             }
-            sidecar::write_migration_journal(&store, &journal)?;
+            sidecar::claim_migration_journal(
+                &store,
+                &journal,
+                journal_preimage.as_deref(),
+            )?;
             engine::guard_note_store(&n, &store, &doc)?;
             fsutil::atomic_write_if_unchanged(&n.abs, doc.as_bytes(), migrated.as_bytes())?;
             finish_migration(&n, &store, &migrated, &mut journal)?;
@@ -1242,6 +1254,8 @@ fn finish_migration(
     }
     let blocks = scan_impl(migrated);
     engine::snapshot_exact(note, store, migrated, &blocks, false)?;
+    engine::guard_note_store(note, store, migrated)?;
+    engine::refresh_manifest(note, store, &blocks)?;
     journal.status = "complete".to_string();
     sidecar::write_migration_journal(store, journal)
 }

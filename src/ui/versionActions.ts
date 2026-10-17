@@ -43,10 +43,10 @@ export async function revertBlockToHead(
 		const result = await plugin.engine.revertToHead(file, blockId);
 		switch (result.status) {
 			case "unchanged":
-				new Notice("Mica: this block already matches HEAD.");
+				new Notice("Mica: this block already matches the head version.");
 				return;
 			case "no-head":
-				new Notice("Mica: this block does not have a HEAD version yet.");
+				new Notice("Mica: this block does not have a head version yet.");
 				return;
 			case "unavailable":
 				new Notice(`Mica: cannot revert to HEAD — ${result.reason}`);

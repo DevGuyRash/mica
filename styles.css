@@ -104,7 +104,7 @@ body {
 
 .mica-inspection-render [data-mica-inspect-key].is-inspect-hover {
 	outline-color: var(--mica-inspector-hover);
-	cursor: crosshair;
+	cursor: var(--mica-drag-cursor, crosshair);
 }
 
 .mica-inspection-render [data-mica-inspect-key].is-inspect-selected {
@@ -114,7 +114,7 @@ body {
 
 .mica-inspection-render a,
 .mica-inspection-render .internal-link {
-	cursor: not-allowed;
+	cursor: var(--mica-drag-cursor, not-allowed);
 }
 
 .mica-icon-preview.is-invalid {
@@ -263,7 +263,7 @@ body[data-mica-density="compact"],
 	height: 100%;
 	padding: 4px 14px 6px;
 	border-radius: var(--mica-radius) var(--mica-radius) 0 0;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	font-size: var(--font-ui-small);
 	white-space: nowrap;
 	transition:
@@ -276,12 +276,12 @@ body[data-mica-density="compact"],
 	background: var(--background-modifier-hover);
 }
 
-.mica-tab-btn.is-active {
+.mica-tab-chip > button.mica-tab-btn.is-active {
 	position: relative;
 	z-index: 1;
-	color: var(--mica-tab-fg-active) !important;
+	color: var(--mica-tab-fg-active);
 	font-weight: 600;
-	background: color-mix(in srgb, var(--mica-accent) 14%, var(--mica-tab-bg-active)) !important;
+	background: color-mix(in srgb, var(--mica-accent) 14%, var(--mica-tab-bg-active));
 	margin-bottom: -1px;
 	padding-bottom: 7px;
 }
@@ -305,7 +305,7 @@ body[data-mica-density="compact"],
 body[data-mica-tabstyle="underline"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is-active,
 .mica[data-mica-tabstyle="underline"] .mica-tab-btn.is-active {
 	font-weight: 600;
-	background: color-mix(in srgb, var(--mica-accent) 8%, transparent) !important;
+	background: color-mix(in srgb, var(--mica-accent) 8%, transparent);
 	margin-bottom: 0;
 	padding-bottom: 6px;
 }
@@ -331,8 +331,8 @@ body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is
 .mica[data-mica-tabstyle="pill"] .mica-tab-btn.is-active {
 	/* Tinted fill keeps the active pill clear on translucent community themes. */
 	font-weight: 600;
-	background: color-mix(in srgb, var(--mica-accent) 16%, transparent);
-	color: var(--mica-accent);
+	background: color-mix(in srgb, var(--mica-accent) 14%, var(--mica-tab-bg-active));
+	color: var(--mica-tab-fg-active);
 	box-shadow: none;
 	margin-bottom: 0;
 	padding-bottom: 3px;
@@ -363,14 +363,15 @@ body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is
 	border-radius: 4px;
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	transition: opacity 0.12s;
 }
 
-.mica-chip-menu .svg-icon {
-	width: 12px !important;
-	height: 12px !important;
+.mica-chip-menu svg.svg-icon {
+	--icon-size: 12px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 
 .mica-tab-chip > .mica-responsive-actions {
@@ -385,17 +386,18 @@ body[data-mica-tabstyle="pill"] .mica:not([data-mica-tabstyle]) .mica-tab-btn.is
 /* During a structural drag, entity chrome must not become the hit-test target.
  * In particular, touch layouts keep actions visible, which otherwise masks a
  * narrow tab button and prevents its spring-load timer from arming. */
-body.mica-dnd-active .mica-entity-strip {
-	pointer-events: none !important;
+body.mica-dnd-active .mica-responsive-actions.mica-entity-strip,
+body.mica-dnd-active .mica-responsive-actions.mica-entity-strip > button {
+	pointer-events: none;
 }
 .mica-tab-chip > .mica-responsive-actions > .mica-chip-menu {
 	position: static;
 	transform: none;
 	opacity: 0;
 }
-.mica-tab-chip > .mica-tab-menu-hidden {
-	opacity: 0 !important;
-	pointer-events: none !important;
+.mica-tab-chip > .mica-responsive-actions.mica-tab-menu-hidden {
+	opacity: 0;
+	pointer-events: none;
 }
 .mica-tab-chip:hover > .mica-responsive-actions > .mica-chip-menu,
 .mica-tab-chip:focus-within > .mica-responsive-actions > .mica-chip-menu,
@@ -421,7 +423,7 @@ body.mica-dnd-active .mica-entity-strip {
 	color: var(--text-muted);
 	font-size: 13px;
 	line-height: 1;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	transition: opacity 0.12s;
 }
@@ -485,7 +487,7 @@ body.mica-dnd-active .mica-entity-strip {
 }
 
 .mica-region.is-editable {
-	cursor: text;
+	cursor: var(--mica-drag-cursor, text);
 }
 
 .mica-region.is-editable:hover {
@@ -509,7 +511,7 @@ body.mica-dnd-active .mica-entity-strip {
 	user-select: none;
 	touch-action: manipulation;
 }
-.mica-region:has(.mica-ghost) {
+.mica-region.has-empty-invitation {
 	-webkit-user-select: none;
 	user-select: none;
 	touch-action: manipulation;
@@ -543,7 +545,7 @@ body.mica-dnd-active .mica-entity-strip {
 	color: var(--text-muted);
 	border-radius: var(--mica-ctrl-radius);
 	padding: 0 var(--mica-ctrl-pad-x);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	font-size: var(--font-ui-smaller);
 	white-space: nowrap;
 	transition:
@@ -582,7 +584,7 @@ body.mica-dnd-active .mica-entity-strip {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	line-height: 1;
 	transition:
 		background 0.1s,
@@ -615,7 +617,7 @@ body.mica-dnd-active .mica-entity-strip {
 	color: var(--text-faint);
 	font-size: 14px;
 	line-height: 1;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	transition:
 		opacity 0.12s,
@@ -628,8 +630,9 @@ body.mica-dnd-active .mica-entity-strip {
 	opacity: 0.7;
 }
 
-.mica-group-x:hover {
-	opacity: 1 !important;
+.mica-tab-nav-outer .mica-group-x:hover,
+.mica-grid-actions .mica-group-x:hover {
+	opacity: 1;
 	color: var(--text-error, var(--mica-diff-del));
 	background: var(--background-modifier-hover);
 }
@@ -685,7 +688,7 @@ body.mica-dnd-active .mica-entity-strip {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	line-height: 1;
 	font-size: var(--font-ui-small);
 	transition:
@@ -714,7 +717,7 @@ body.mica-dnd-active .mica-entity-strip {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-normal);
-	cursor: text;
+	cursor: var(--mica-drag-cursor, text);
 	transition:
 		border-color 0.1s,
 		background 0.1s;
@@ -783,15 +786,14 @@ body.mica-dnd-active .mica-entity-strip {
 	gap: var(--mica-status-control-gap);
 }
 
-/*
- * Author-level display rules for Mica buttons (inline-flex) otherwise override
- * the browser's presentational mapping for the hidden attribute. Dock layout
- * uses hidden as its single source of truth while actions move between their
- * original controls and responsive overflow, so it must win explicitly.
- */
+/* Dock layout hides original controls while responsive copies stay separate.
+ * The owned hidden state outranks button display rules without competing with
+ * the packing controller's inline display on those responsive copies. */
 .mica-long-travel [hidden],
-.mica-source-dock [hidden] {
-	display: none !important;
+.mica-source-dock [hidden],
+.mica-long-travel button[hidden],
+.mica-source-dock button[hidden] {
+	display: none;
 }
 
 .mica-block-edit-controls,
@@ -1072,7 +1074,7 @@ body.mica-dnd-active .mica-entity-strip {
 	border-radius: var(--mica-ctrl-radius);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	font-size: var(--font-ui-smaller);
 	white-space: nowrap;
 	transition:
@@ -1261,7 +1263,7 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 	gap: 4px;
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	user-select: none;
 	white-space: nowrap;
 }
@@ -1287,14 +1289,15 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 	background: color-mix(in srgb, var(--mica-diff-add) 42%, transparent);
 }
 
-/* Side by side */
+/* Each side-by-side row owns the same two equal-width columns. */
 .mica-diff-sbs {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
+	display: flex;
+	flex-direction: column;
 }
 
 .mica-diff-srow {
-	display: contents;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .mica-diff-cell {
@@ -1432,9 +1435,10 @@ body.mica-animate .mica-chip.mica-pulse .mica-chip-icon {
 	display: inline-flex;
 	flex-shrink: 0;
 }
-.mica-ribbon-ico .svg-icon {
-	width: 14px !important;
-	height: 14px !important;
+.mica-ribbon-ico svg.svg-icon {
+	--icon-size: 14px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 .mica-ribbon-mid {
 	display: flex;
@@ -1538,7 +1542,7 @@ body.mica-theme-solar {
 	border-radius: 6px;
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-head-btn:hover {
@@ -1557,7 +1561,7 @@ body.mica-theme-solar {
 	font-size: var(--font-ui-small);
 	font-weight: 600;
 	color: var(--text-normal);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	border-radius: 6px;
 }
 .mica-head-name.is-unnamed {
@@ -1569,7 +1573,7 @@ body.mica-theme-solar {
 	background: color-mix(in srgb, var(--mica-accent) 12%, transparent);
 }
 .mica[data-mica-mode="read"] .mica-head-name {
-	cursor: default;
+	cursor: var(--mica-drag-cursor, default);
 }
 .mica-head-mode {
 	display: inline-flex;
@@ -1611,7 +1615,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	right: auto;
 	left: 4px;
 }
-.mica-region:hover:not(:has(.mica-nested-callout:hover, .mica-nested-code:hover)) > .mica-region-tools,
+.mica-region:hover:not(.has-nested-hover) > .mica-region-tools,
 .mica-region-tools:focus-within {
 	opacity: 1;
 	pointer-events: auto;
@@ -1620,7 +1624,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-nested-code {
 	position: relative;
 }
-.mica-nested-callout:hover:not(:has(.mica-nested-callout:hover)) > .mica-nested-tools,
+.mica-nested-callout:hover:not(.has-nested-callout-hover) > .mica-nested-tools,
 .mica-nested-code:hover > .mica-nested-code-tools,
 .mica-nested-tools:focus-within {
 	opacity: 1;
@@ -1644,16 +1648,16 @@ body[data-mica-grip="left"] .mica-region-tools {
 	border-radius: 5px;
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-region-grip {
-	cursor: grab;
+	cursor: var(--mica-drag-cursor, grab);
 }
 .mica-region-grip:active {
-	cursor: grabbing;
+	cursor: var(--mica-drag-cursor, grabbing);
 }
-.mica-region-x:hover {
-	color: var(--text-error, #e05561) !important;
+button.mica-region-x:hover {
+	color: var(--text-error, #e05561);
 }
 .mica-region-grip:hover,
 .mica-minitool:hover {
@@ -1706,7 +1710,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	border-radius: 50%;
 	background: var(--background-primary);
 	color: var(--mica-accent);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-insert-plus .svg-icon {
@@ -1737,7 +1741,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	padding: 2px 10px;
 	height: 24px;
 	border-radius: 6px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-qe-tools {
 	display: flex;
@@ -1788,7 +1792,6 @@ body[data-mica-grip="left"] .mica-region-tools {
 	visibility: hidden;
 }
 .mica-responsive-action {
-	flex: 0 0 auto !important;
 	min-width: var(--mica-action-size);
 	width: var(--mica-action-size);
 	height: var(--mica-action-size);
@@ -1798,6 +1801,9 @@ body[data-mica-grip="left"] .mica-region-tools {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
+}
+.mica-responsive-actions > button.mica-responsive-action {
+	flex: 0 0 auto;
 }
 .mica-responsive-action:hover,
 .mica-responsive-action:focus-visible,
@@ -1812,11 +1818,12 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-responsive-action.is-danger:focus-visible {
 	color: var(--text-error);
 }
-.mica-responsive-action > .svg-icon {
+.mica-responsive-action > svg.svg-icon {
+	--icon-size: 14px;
 	display: block;
 	flex: 0 0 auto;
-	width: 14px !important;
-	height: 14px !important;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 .mica-qe-host {
 	padding: 2px 0;
@@ -1827,9 +1834,10 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-qe-host.is-fixed .cm-editor {
 	height: 220px;
 }
-.mica-danger {
-	color: var(--text-on-accent) !important;
-	background: var(--color-red) !important;
+.mica-qe-bar > button.mica-danger,
+.mica-lightbox-footer > button.mica-danger {
+	color: var(--text-on-accent);
+	background: var(--color-red);
 }
 
 /* ---------- Toolbar + popovers ---------- */
@@ -1853,7 +1861,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	flex: 0 0 auto;
 }
 .mica-tool:hover {
@@ -1863,18 +1871,20 @@ body[data-mica-grip="left"] .mica-region-tools {
 .mica-tool.is-on {
 	color: var(--mica-accent);
 }
-.mica-tool .svg-icon {
-	width: 15px !important;
-	height: 15px !important;
+.mica-tool svg.svg-icon {
+	--icon-size: 15px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 	min-width: 15px;
 }
 .mica-toolbar.is-compact .mica-tool {
 	width: 22px;
 	height: 22px;
 }
-.mica-toolbar.is-compact .mica-tool .svg-icon {
-	width: 13px !important;
-	height: 13px !important;
+.mica-toolbar.is-compact .mica-tool svg.svg-icon {
+	--icon-size: 13px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 	min-width: 13px;
 }
 .mica-tool-sep {
@@ -1935,41 +1945,44 @@ body[data-mica-grip="left"] .mica-region-tools {
 	max-height: min(55vh, 520px);
 	overflow: auto;
 }
-.mica-icon-picker-option {
+.mica-icon-picker-grid > button.mica-icon-picker-option {
+	--input-height: auto;
+	--input-shadow: none;
+	--input-shadow-hover: none;
 	display: flex;
 	flex-direction: row;
 	align-items: center;
 	justify-content: flex-start;
 	gap: 10px;
 	min-width: 0;
-	height: auto !important;
-	min-height: 54px !important;
-	max-height: none !important;
+	height: auto;
+	min-height: 54px;
+	max-height: none;
 	padding: 8px 10px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--mica-ctrl-radius);
-	background: var(--background-secondary) !important;
+	background: var(--background-secondary);
 	color: var(--text-muted);
-	box-shadow: none !important;
-	text-shadow: none !important;
+	box-shadow: none;
+	text-shadow: none;
 	overflow: hidden;
 	box-sizing: border-box;
-	font-family: var(--font-interface) !important;
-	line-height: 1.25 !important;
-	text-transform: none !important;
+	font-family: var(--font-interface);
+	line-height: 1.25;
+	text-transform: none;
 }
-.mica-icon-picker-option:hover,
-.mica-icon-picker-option:focus-visible {
-	background: var(--background-modifier-hover) !important;
+.mica-icon-picker-grid > button.mica-icon-picker-option:hover,
+.mica-icon-picker-grid > button.mica-icon-picker-option:focus-visible {
+	background: var(--background-modifier-hover);
 	color: var(--text-normal);
 }
-.mica-icon-picker-option:focus-visible {
+.mica-icon-picker-grid > button.mica-icon-picker-option:focus-visible {
 	outline: 2px solid var(--mica-accent);
 	outline-offset: -2px;
 }
-.mica-icon-picker-option.is-selected {
+.mica-icon-picker-grid > button.mica-icon-picker-option.is-selected {
 	border-color: var(--mica-accent);
-	background: color-mix(in srgb, var(--mica-accent) 12%, var(--background-secondary)) !important;
+	background: color-mix(in srgb, var(--mica-accent) 12%, var(--background-secondary));
 	color: var(--text-normal);
 }
 .mica-icon-picker-glyph .svg-icon {
@@ -2019,7 +2032,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	border-radius: 6px;
 	border: 1px solid var(--background-modifier-border);
 	background: transparent;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-pop-seg.is-on {
@@ -2035,7 +2048,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	border: none;
 	background: transparent;
 	border-radius: 6px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-pop-item:hover {
@@ -2063,7 +2076,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	border: 1px solid transparent;
 	border-radius: 8px;
 	background: color-mix(in srgb, var(--mica-co-color, var(--text-accent)) 8%, transparent);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 	text-align: left;
 }
@@ -2187,7 +2200,7 @@ body[data-mica-grip="left"] .mica-region-tools {
 	background: transparent;
 	box-shadow: none;
 	padding: 2px 4px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-lightbox-stats:hover,
 .mica-lightbox-stats:focus-visible {
@@ -2248,9 +2261,10 @@ body[data-mica-grip="left"] .mica-region-tools {
 	height: 26px;
 	padding: 0;
 }
-.mica-find-icon .svg-icon {
-	width: 14px !important;
-	height: 14px !important;
+.mica-find-icon svg.svg-icon {
+	--icon-size: 14px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 .mica-replace-row {
 	padding-left: 2px;
@@ -2381,24 +2395,40 @@ body[data-mica-grip="left"] .mica-region-tools {
 }
 body.mica-dnd-active {
 	user-select: none;
-	cursor: grabbing;
+}
+/* Gesture classes own one inherited override. Removing them restores every
+ * control's fallback cursor; explicit user styles keep normal cascade priority. */
+body.mica-dnd-active,
+body.mica-handle-dragging {
+	--mica-drag-cursor: grabbing;
+	cursor: var(--mica-drag-cursor);
+}
+/* Cover native links/inputs in rendered content as well as Mica's own controls.
+ * Portaled docks and the body-mounted drag preview share the same gesture state. */
+body:is(.mica-dnd-active, .mica-handle-dragging) :is(.mica, .mica-long-travel, .mica-source-dock, .mica-drag-ghost),
+body:is(.mica-dnd-active, .mica-handle-dragging) :is(.mica, .mica-long-travel, .mica-source-dock, .mica-drag-ghost) * {
+	cursor: var(--mica-drag-cursor);
 }
 /* Mid-drag, the ONLY affordance is the drop indicator — insert zones, hover
  * tool clusters, and column strips would pop under the pointer and read as
  * competing targets. */
-body.mica-dnd-active .mica-insert-zone,
-body.mica-dnd-active .mica-region-tools,
-body.mica-dnd-active .mica-cell-bar,
-body.mica-dnd-active .mica-grid-tools,
-body.mica-dnd-active .mica-group-grip,
-body.mica-dnd-active .mica-col-resizer,
-body.mica-dnd-active .mica-row-resizer {
-	opacity: 0 !important;
-	pointer-events: none !important;
-	visibility: hidden !important;
+body.mica-dnd-active .mica .mica-insert-zone,
+body.mica-dnd-active .mica .mica-region > .mica-region-tools,
+body.mica-dnd-active .mica .mica-cell > .mica-cell-bar,
+body.mica-dnd-active .mica .mica-grid-wrap > .mica-grid-tools,
+body.mica-dnd-active .mica .mica-group-grip,
+body.mica-dnd-active .mica .mica-col-resizer,
+body.mica-dnd-active .mica .mica-row-resizer {
+	opacity: 0;
+	pointer-events: none;
+	visibility: hidden;
 }
-body.mica-dnd-active * {
-	cursor: grabbing !important;
+/* Drag previews are cloned under body, outside their owning .mica block. */
+body.mica-dnd-active .mica-drag-ghost:is(.mica-insert-zone, .mica-region-tools, .mica-cell-bar, .mica-grid-tools, .mica-group-grip, .mica-col-resizer, .mica-row-resizer, .mica-col-handle, .mica-row-handle, .mica-edge-add),
+body.mica-dnd-active .mica-drag-ghost :is(.mica-insert-zone, .mica-region-tools, .mica-cell-bar, .mica-grid-tools, .mica-group-grip, .mica-col-resizer, .mica-row-resizer, .mica-col-handle, .mica-row-handle, .mica-edge-add) {
+	opacity: 0;
+	pointer-events: none;
+	visibility: hidden;
 }
 .mica-draggable {
 	touch-action: none;
@@ -2419,7 +2449,7 @@ body.mica-dnd-active * {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-faint);
-	cursor: grab;
+	cursor: var(--mica-drag-cursor, grab);
 	opacity: 0;
 }
 .mica-tab-nav-outer:hover .mica-group-grip,
@@ -2469,7 +2499,7 @@ body.mica-dnd-active * {
 	pointer-events: none;
 	transition: opacity 0.12s;
 }
-.mica-cell:hover:not(:has(.mica-grid-wrap:hover, .mica-tabs:hover)) > .mica-cell-bar,
+.mica-cell:hover:not(.has-nested-layout-hover) > .mica-cell-bar,
 .mica-cell-bar:focus-within {
 	opacity: 1;
 	pointer-events: auto;
@@ -2489,7 +2519,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-cell-tool:hover {
 	color: var(--mica-accent);
@@ -2507,7 +2537,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border-radius: calc(var(--mica-radius) * 0.6);
 	background: transparent;
 	color: var(--text-faint);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 	opacity: 0.5;
 	transition: opacity 120ms ease;
@@ -2524,7 +2554,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border: 1px solid var(--background-modifier-border);
 	background: transparent;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-cols-chip:hover {
@@ -2664,7 +2694,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	position: relative;
 	padding: 7px 26px 7px 10px;
 	border-radius: 8px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	border: 1px solid transparent;
 }
 .mica-vrow-gap {
@@ -2744,7 +2774,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	opacity: 0;
 	pointer-events: none;
 }
@@ -2761,7 +2791,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	justify-content: space-between;
 	gap: 6px;
 	padding-right: 10px;
-	cursor: default;
+	cursor: var(--mica-drag-cursor, default);
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
 }
@@ -2791,7 +2821,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border-radius: 6px;
 	border: 1px solid var(--background-modifier-border);
 	background: transparent;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-base-pick:hover {
@@ -3002,7 +3032,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border: 1px solid var(--mica-accent);
 	background: transparent;
 	color: var(--mica-accent);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 	font-size: var(--font-ui-smaller);
 }
@@ -3025,7 +3055,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
 	background: var(--background-primary);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	box-shadow: none;
 }
 .mica-theme-card.is-on {
@@ -3079,8 +3109,8 @@ body[data-mica-grip="left"] .mica-cell-bar {
 }
 
 /* Cell hover tools never sit over an open editor. */
-.mica-cell:has(.mica-region.is-editing) > .mica-cell-bar {
-	display: none !important;
+.mica-cell.has-region-editor > .mica-cell-bar {
+	display: none;
 }
 
 /* Group-variant caret + quick-editor expand: explicit glyph sizing so no
@@ -3105,20 +3135,22 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	align-items: center;
 	justify-content: center;
 	color: var(--text-faint);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-tool-group:hover .mica-tool-caret {
 	color: var(--mica-accent);
 }
-.mica-tool-caret .svg-icon {
-	width: 9px !important;
-	height: 9px !important;
+.mica-tool-caret svg.svg-icon {
+	--icon-size: 9px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 	min-width: 9px;
 }
-.mica-qe-lines .svg-icon,
-.mica-qe-actions .svg-icon {
-	width: 15px !important;
-	height: 15px !important;
+.mica-qe-lines svg.svg-icon,
+.mica-qe-actions svg.svg-icon {
+	--icon-size: 15px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 	min-width: 15px;
 }
 .mica-qe-lines,
@@ -3219,13 +3251,15 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-small);
 }
-.mica-coedit-type .mica-callout-ico .svg-icon {
-	width: 14px !important;
-	height: 14px !important;
+.mica-coedit-type .mica-callout-ico svg.svg-icon {
+	--icon-size: 14px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
-.mica-coedit-caret .svg-icon {
-	width: 10px !important;
-	height: 10px !important;
+.mica-coedit-caret svg.svg-icon {
+	--icon-size: 10px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 	opacity: 0.7;
 }
 .mica-coedit-title {
@@ -3248,7 +3282,7 @@ body[data-mica-grip="left"] .mica-cell-bar {
 	background: color-mix(in srgb, var(--mica-accent) 4%, transparent);
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	user-select: none;
 }
 .mica-fold-bar:hover {
@@ -3313,8 +3347,8 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	right: 4px;
 	left: auto;
 }
-.mica-grid-wrap:hover:not(:has(.mica-grid-wrap .mica-grid-wrap:hover)) > .mica-grid-tools,
-.mica-grid-wrap.is-pointer-active:not(:has(.mica-grid-wrap.is-pointer-active)) > .mica-grid-tools,
+.mica-grid-wrap:hover:not(.has-deep-grid-hover) > .mica-grid-tools,
+.mica-grid-wrap.is-pointer-active:not(.has-nested-grid-pointer) > .mica-grid-tools,
 .mica-grid-tools:focus-within {
 	opacity: 1;
 	pointer-events: auto;
@@ -3324,7 +3358,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	top: 0;
 	bottom: 0;
 	width: 9px;
-	cursor: col-resize;
+	cursor: var(--mica-drag-cursor, col-resize);
 	display: flex;
 	align-items: stretch;
 	justify-content: center;
@@ -3345,7 +3379,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	left: 6px;
 	right: 6px;
 	height: 9px;
-	cursor: row-resize;
+	cursor: var(--mica-drag-cursor, row-resize);
 	display: flex;
 	align-items: center;
 	justify-content: stretch;
@@ -3456,7 +3490,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	border-radius: 6px;
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	user-select: none;
 	border-top: 2px solid transparent;
 	border-bottom: 2px solid transparent;
@@ -3479,9 +3513,10 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	flex-shrink: 0;
 	opacity: 0.8;
 }
-.mica-nav-ico .svg-icon {
-	width: 13px !important;
-	height: 13px !important;
+.mica-nav-ico svg.svg-icon {
+	--icon-size: 13px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 .mica-nav-label {
 	overflow: hidden;
@@ -3555,11 +3590,12 @@ body[data-mica-grip="left"] .mica-grid-tools {
 		width: 40px;
 		height: 40px;
 	}
-	.mica-region-grip .svg-icon,
-	.mica-minitool .svg-icon,
-	.mica-cell-tool .svg-icon {
-		width: 16px !important;
-		height: 16px !important;
+	.mica-region-grip svg.svg-icon,
+	.mica-minitool svg.svg-icon,
+	.mica-cell-tool svg.svg-icon {
+		--icon-size: 16px;
+		width: var(--icon-size);
+		height: var(--icon-size);
 	}
 	.mica-col-resizer {
 		width: 20px;
@@ -3689,14 +3725,14 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-insert-zone,
 .mica-insert-plus,
 .mica-tab-add {
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-region.is-editable > .mica-md {
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-region.is-editing > .mica-md,
 .mica-region .mica-md .mica-mdeditor {
-	cursor: auto;
+	cursor: var(--mica-drag-cursor, auto);
 }
 .mica-ghost:hover,
 .mica-region.is-editable:hover .mica-ghost {
@@ -3710,9 +3746,10 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	width: 20px;
 	height: 20px;
 }
-.mica-col-step .svg-icon {
-	width: 12px !important;
-	height: 12px !important;
+.mica-col-step svg.svg-icon {
+	--icon-size: 12px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 
 /* The editor surface fills its pane — clicks below the text belong to it. */
@@ -3808,9 +3845,10 @@ body[data-mica-grip="left"] .mica-grid-tools {
 	opacity: 0;
 	transition: opacity 100ms ease;
 }
-.mica-boundary-plus .svg-icon {
-	width: 11px !important;
-	height: 11px !important;
+.mica-boundary-plus svg.svg-icon {
+	--icon-size: 11px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 .mica-col-resizer:hover .mica-boundary-plus,
 .mica-row-resizer:hover .mica-boundary-plus,
@@ -3846,7 +3884,7 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-edge-add {
 	position: absolute;
 	z-index: 4;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-edge-add.is-left {
 	left: 0;
@@ -3894,15 +3932,15 @@ body[data-mica-grip="left"] .mica-grid-tools {
 .mica-edge-add:hover .mica-edge-line {
 	opacity: 1;
 }
-body.mica-dnd-active .mica-edge-add {
-	opacity: 0 !important;
-	pointer-events: none !important;
-	visibility: hidden !important;
+body.mica-dnd-active .mica .mica-edge-add {
+	opacity: 0;
+	pointer-events: none;
+	visibility: hidden;
 }
 /* The ⊕ pill is a real button now — the strip resizes, the pill inserts. */
 .mica-boundary-plus {
 	pointer-events: auto;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	/* Above BOTH strips (they are z-auto so pills stack in the grid's own
 	   context): where strips cross — every column pill sits on the row
 	   boundary in a 2-row grid — the later-painted strip used to swallow
@@ -3939,17 +3977,18 @@ body.mica-dnd-active .mica-edge-add {
 		opacity 100ms ease,
 		color 100ms ease;
 	transform: translateX(-50%);
-	cursor: grab;
+	cursor: var(--mica-drag-cursor, grab);
 }
 .mica-row-handle {
 	width: 14px;
 	height: 26px;
 	transform: translateY(-50%);
 }
-.mica-col-handle .svg-icon,
-.mica-row-handle .svg-icon {
-	width: 10px !important;
-	height: 10px !important;
+.mica-col-handle svg.svg-icon,
+.mica-row-handle svg.svg-icon {
+	--icon-size: 10px;
+	width: var(--icon-size);
+	height: var(--icon-size);
 }
 .mica-grid-wrap:hover .mica-col-handle,
 .mica-grid-wrap:hover .mica-row-handle {
@@ -3974,30 +4013,26 @@ body.mica-dnd-active .mica-edge-add {
 	outline-offset: -2px;
 	opacity: 0.75;
 }
-body.mica-handle-dragging .mica-col-handle.is-dragging,
-body.mica-handle-dragging .mica-row-handle.is-dragging {
-	opacity: 1 !important;
+body.mica-handle-dragging .mica .mica-col-handle.is-dragging,
+body.mica-handle-dragging .mica .mica-row-handle.is-dragging {
+	opacity: 1;
 	color: var(--mica-accent);
 }
-/* During a handle drag only the indicator guides. */
-body.mica-handle-dragging * {
-	cursor: grabbing !important;
+body.mica-handle-dragging .mica .mica-col-resizer,
+body.mica-handle-dragging .mica .mica-row-resizer,
+body.mica-handle-dragging .mica .mica-edge-add,
+body.mica-handle-dragging .mica .mica-cell > .mica-cell-bar,
+body.mica-handle-dragging .mica .mica-insert-zone,
+body.mica-handle-dragging .mica .mica-region > .mica-region-tools,
+body.mica-handle-dragging .mica .mica-grid-wrap > .mica-grid-tools {
+	opacity: 0;
+	pointer-events: none;
 }
-body.mica-handle-dragging .mica-col-resizer,
-body.mica-handle-dragging .mica-row-resizer,
-body.mica-handle-dragging .mica-edge-add,
-body.mica-handle-dragging .mica-cell-bar,
-body.mica-handle-dragging .mica-insert-zone,
-body.mica-handle-dragging .mica-region-tools,
-body.mica-handle-dragging .mica-grid-tools {
-	opacity: 0 !important;
-	pointer-events: none !important;
-}
-body.mica-dnd-active .mica-col-handle,
-body.mica-dnd-active .mica-row-handle {
-	opacity: 0 !important;
-	pointer-events: none !important;
-	visibility: hidden !important;
+body.mica-dnd-active .mica .mica-col-handle,
+body.mica-dnd-active .mica .mica-row-handle {
+	opacity: 0;
+	pointer-events: none;
+	visibility: hidden;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -4184,8 +4219,8 @@ body[data-mica-dock-surface="custom"] {
 
 .mica-dock-contrast.is-warning {
 	font-weight: 600;
-	text-decoration: underline wavy;
-	text-underline-offset: 3px;
+	/* A visible underline on the status span without changing its line box. */
+	box-shadow: inset 0 -1px 0 currentColor;
 }
 .mica-versions-list.is-advanced-compare .mica-vrow-cmp {
 	opacity: 1;
@@ -4264,7 +4299,7 @@ body[data-mica-dock-surface="custom"] {
 }
 .mica-focused-row-summary {
 	padding: 7px 9px;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 /* Flexing an inner span keeps the disclosure marker, which is the only thing
    saying a row opens at all. */
@@ -4389,7 +4424,7 @@ body[data-mica-dock-surface="custom"] {
 .mica-vrow {
 	display: grid;
 	grid-template-columns: auto minmax(0, 1fr);
-	column-gap: 8px;
+	gap: 0 8px;
 	align-items: start;
 }
 .mica-vrow-lead {
@@ -4413,7 +4448,7 @@ button.mica-vrow-gap {
 	border: none;
 	background: transparent;
 	box-shadow: none;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 	text-align: start;
 }
 button.mica-vrow-gap:hover {
@@ -4428,7 +4463,7 @@ button.mica-vrow-gap:hover {
 	position: static;
 	margin: 0;
 	opacity: 0.45;
-	cursor: pointer;
+	cursor: var(--mica-drag-cursor, pointer);
 }
 .mica-vrow-select:checked,
 .mica-vrow:hover .mica-vrow-select,
@@ -4439,7 +4474,7 @@ button.mica-vrow-gap:hover {
 /* A control that cannot act says why rather than sitting inert but enabled. */
 .mica-diff-check.is-disabled {
 	opacity: 0.5;
-	cursor: not-allowed;
+	cursor: var(--mica-drag-cursor, not-allowed);
 }
 
 /* Stacked patches: the layout with no column budget. */

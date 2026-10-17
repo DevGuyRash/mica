@@ -16,7 +16,7 @@ import {
 import { applyOpText, type StructOp } from "../cst/ops";
 import { interactiveDiffIssue } from "../diff/budget";
 import { readLedger, requireObject } from "../storage/sidecar";
-import { assertNoteStoreCurrent, ensureStoreFolder, isLiveNote, storeRoot, validateStoreRoot } from "../storage/store";
+import { assertNoteStoreCurrent, assertStoreRootCurrent, ensureStoreFolder, isLiveNote, storeRoot, validateStoreRoot, type StoreRoot } from "../storage/store";
 import { ensureBlockIds, ensureNoteId } from "../identity/identity";
 import { repair, type RepairReport } from "../identity/reconcile";
 import { migrateFile, migrateVault, type MigrateFileReport } from "../migrate/migrate";
@@ -48,10 +48,15 @@ export class MicaApi {
 		return Promise.allSettled([...this.bridgeTasks]).then(() => undefined);
 	}
 
+	private isCurrentInbox(file: TFile, root: StoreRoot, path = file.path): boolean {
+		return !this.disposed && file.vault === root.vault && file.path === path && file.extension === "json" &&
+			path.startsWith(`${root.paths.bridgeInbox}/`) && root.vault.getAbstractFileByPath(path) === file;
+	}
+
 	/** Serialize file generations; own consumption notifications reduce to no-ops. */
 	private enqueueInbox(file: TFile): void {
-		const inbox = storeRoot(this.plugin.app.vault).paths.bridgeInbox;
-		if (this.disposed || !file.path.startsWith(`${inbox}/`) || file.extension !== "json") return;
+		const root = storeRoot(this.plugin.app.vault);
+		if (!this.isCurrentInbox(file, root)) return;
 		if (!this.pendingInbox.has(file) && this.pendingInbox.size >= 128) {
 			if (!this.queueFullReported) console.error("Mica bridge: inbox queue is full; unconsumed requests were preserved for retry");
 			this.queueFullReported = true;
@@ -64,7 +69,7 @@ export class MicaApi {
 				const next = this.pendingInbox.values().next().value!;
 				this.pendingInbox.delete(next);
 				try { await this.processInbox(next); }
-				catch (error) { console.error("Mica bridge: instruction remains preserved", error); }
+				catch (error) { console.error("Mica bridge: request did not complete; inspect its inbox record", error); }
 			}
 		})().finally(() => {
 			this.bridgeTasks.delete(pump);
@@ -339,19 +344,29 @@ export class MicaApi {
 		const vault = this.plugin.app.vault;
 		const root = storeRoot(vault);
 		const path = file.path;
+		// A queued TFile can be renamed while another request is running. Admission
+		// must still belong to the selected inbox, not merely to the same object.
+		if (!this.isCurrentInbox(file, root, path)) return;
 		const out = normalizePath(`${root.paths.bridgeOutbox}/${file.basename}.json`);
 		const storeId = await validateStoreRoot(root);
 		if (this.disposed) return;
+		assertStoreRootCurrent(root);
+		if (!this.isCurrentInbox(file, root, path)) throw new Error("Mica: inbox file moved before execution");
 		if (!storeId) throw new Error("Mica: initialize history storage before using the bridge");
+		const mtime = file.stat.mtime, size = file.stat.size;
 		const text = await vault.read(file);
 		if (this.disposed) return;
+		assertStoreRootCurrent(root);
+		if (!this.isCurrentInbox(file, root, path) || file.stat.mtime !== mtime || file.stat.size !== size)
+			throw new Error("Mica: inbox generation changed while being read; request was preserved");
 		let result: unknown;
 		let error: string | null = null;
 		try {
 			const instruction: unknown = JSON.parse(text);
 			if (isConsumedInstruction(instruction)) return;
 			const parsed = parseInstruction(instruction);
-			if (vault.getAbstractFileByPath(path) !== file || file.path !== path)
+			assertStoreRootCurrent(root);
+			if (!this.isCurrentInbox(file, root, path) || file.stat.mtime !== mtime || file.stat.size !== size)
 				throw new Error("Mica: inbox file changed before execution");
 			result = await this.runInstruction(parsed);
 		} catch (e) {
@@ -360,11 +375,17 @@ export class MicaApi {
 		if (this.disposed) return;
 		if (await validateStoreRoot(root) !== storeId) throw new Error("Mica: history store changed during instruction processing");
 		if (this.disposed) return;
-		// Trash has no compare-and-swap API. Replacing only the executed bytes
-		// prevents deletion of a newer Sync/editor instruction and prevents replay.
-		const consumed = JSON.stringify({ micaConsumed: 1, instructionHash: hashContent(text) }) + "\n";
+		// Serialize before consumption: if later outbox publication fails, the
+		// non-executable inbox record retains the exact outcome without replay.
+		const body = JSON.stringify({ ok: error === null, result, error }, null, 2);
+		// Trash has no compare-and-swap API. Replace only the executed bytes so
+		// a newer Sync/editor instruction is preserved.
+		const consumed = JSON.stringify({ micaConsumed: 1, instructionHash: hashContent(text), response: body }) + "\n";
+		assertStoreRootCurrent(root);
+		if (!this.isCurrentInbox(file, root, path)) throw new Error("Mica: inbox file moved; request was preserved");
 		await vault.process(file, (current) => {
-			if (this.disposed || file.path !== path || vault.getAbstractFileByPath(path) !== file || current !== text)
+			assertStoreRootCurrent(root);
+			if (!this.isCurrentInbox(file, root, path) || current !== text)
 				throw new Error("Mica: inbox generation changed; newer content was preserved");
 			return consumed;
 		});
@@ -373,17 +394,20 @@ export class MicaApi {
 		if (this.disposed) return;
 		await ensureStoreFolder(root, root.paths.bridgeOutbox);
 		if (this.disposed) return;
+		assertStoreRootCurrent(root);
 		const existing = vault.getAbstractFileByPath(out);
-		const body = JSON.stringify({ ok: error === null, result, error }, null, 2);
 		if (existing instanceof TFile) {
 			const previous = await vault.read(existing);
 			if (this.disposed) return;
+			assertStoreRootCurrent(root);
 			await vault.process(existing, (current) => {
+				assertStoreRootCurrent(root);
 				if (this.disposed || existing.path !== out || vault.getAbstractFileByPath(out) !== existing || current !== previous)
 					throw new Error("Mica: newer bridge response was preserved");
 				return body;
 			});
 		} else {
+			assertStoreRootCurrent(root);
 			await vault.create(out, body);
 		}
 	}

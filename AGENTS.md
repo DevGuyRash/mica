@@ -11,6 +11,40 @@ put it in a regression test, the relevant code comment, or nowhere. WHEN a
 lesson changes how future work should be designed or verified THEN you SHALL
 distill the invariant here.
 
+## Review before promotion
+
+WHEN starting new work THEN you SHALL commit and push it to the permanent
+`review` branch first. Isolated work branches may integrate into `review`;
+preserve existing work and history when switching or integrating branches.
+
+WHEN `review` is ready THEN you SHALL open the entry's Obsidian Community
+**Review branch** control, enter the full current `review` HEAD commit SHA, and
+select **Run preview scan**. Record that SHA and the actual report. Every change
+to `review` HEAD invalidates its earlier pass and requires a fresh preview.
+
+UNTIL that exact SHA has an actual passing preview with zero errors and every
+warning fixed or documented as intentional necessity with a reviewed reason
+THEN you SHALL stop before opening the `review` → `main` PR, merging into
+`main`, tagging, or publishing. Unreviewed warnings block promotion. Keep
+recommendations and unverified optional capabilities or attestations explicit.
+GitHub PR checks and local lint are separate evidence; neither is an Obsidian
+preview result, and no Obsidian GitHub status name is assumed.
+
+WHEN preparing the PR THEN you SHALL include the exact SHA and preview evidence
+using the PR template. After merge, the release source and root manifest SHALL
+match that reviewed candidate; content changes return through `review` and a
+fresh preview. Follow [RELEASING.md](RELEASING.md) for the complete procedure.
+
+WHEN using the local preflight THEN you SHALL run `pnpm run lint:obsidian`
+separately from broader checks, within the authorized scope. It combines the
+official source rules with local `lint:review-css` tripwires. Native DOM
+creation in plugin source is an error. Keep other warnings visible and review
+them without suppressing rules. Do not introduce stylesheet priority overrides,
+`:has()`, or the rejected decoration longhands; use owned state classes and CSS
+variables. The CSS tripwires cover those patterns only. They do not establish
+complete CSS compatibility, reproducible builds, attestations, or an official
+preview pass. Follow the component contracts in `RELEASING.md`.
+
 ## Verification is risk-scaled
 
 Fast feedback belongs in the inner loop; release confidence comes from the
@@ -24,12 +58,16 @@ WHEN changing TypeScript, CSS, WASM boundaries, persistence, editing, or UI
 behavior THEN you SHALL run:
 
 ```sh
+pnpm run build
 pnpm run check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
-pnpm run build
 pnpm run e2e
 ```
+
+The aggregate `check` includes the storage fallback fixture and therefore
+requires WASM generated from the same current source. A clean checkout must
+build first; do not substitute another candidate's generated artifacts.
 
 WHEN claiming release readiness THEN you SHALL additionally run:
 
@@ -46,8 +84,9 @@ pnpm run e2e:latest
 ```
 
 WHEN you add, rename, split, or remove a mandatory verification gate THEN you
-SHALL update CI, the human release procedure, and this command inventory in the
-same change. You SHALL NOT call a subset release-ready.
+SHALL update the human release procedure and this command inventory in the same
+change. Keep authorized automation consistent; hosted CI is not required. You
+SHALL NOT call a subset release-ready.
 
 WHEN a change is documentation-only and does not alter a command, contract, or
 generated artifact THEN you MAY limit verification to formatting, link/path
@@ -587,9 +626,11 @@ collision.
 ## Shipping and active state
 
 WHEN preparing a plugin update THEN you SHALL follow `RELEASING.md`: synchronize
-package, manifest, Rust workspace/lockfile and version mappings; publish the
-exact version tag with matching runtime attachments; then verify downloaded
-release bytes. A completed plugin delivery is a verified GitHub Release.
+package, manifest, Rust workspace/lockfile and version mappings on `review`,
+clear its exact-SHA preview gate, merge the reviewed candidate into `main`, and
+publish its exact version tag with matching runtime attachments. Verify
+downloaded release bytes. A completed plugin delivery is a verified GitHub
+Release.
 Repository pushes and workflow artifacts have their own completion state.
 
 WHEN shipping through the GitOps workflow THEN you SHALL use its scripts for

@@ -124,6 +124,9 @@ separate from the durable version ledger.
   resume with an absent or empty directory, or a marker with that UUID;
   unknown children remain a conflict. Non-null `previousFolder` records a
   pending move and requires the existing UUID and `initializing:false`.
+  An unmarked preexisting directory, even an empty one, is not initialization
+  intent. A custom route also rejects any competing reserved `mica-data` entry;
+  relocation permits that entry only when it is the recorded source or target.
   Ordinary operations fail closed while initialization or a move is pending.
   Plugin preferences hold the requested location; `--store-dir` must agree with the
   active locator. Neither can select a competing store. **Apply after restart**
@@ -135,6 +138,17 @@ separate from the durable version ledger.
   when the recorded source/destination state identifies one matching store;
   conflicting copies remain untouched. Below, `<store>` denotes the selected
   folder.
+- The plugin retains validated locator and marker file generations and checks
+  their visible Vault identity, path, mtime and size after asynchronous I/O and
+  inside publication callbacks. Plugin and CLI marker reads share a 4096-byte
+  limit. An engine retains its startup root. Each live-note publication/rollback
+  guard pins the selected `TFile` and path when captured; a route replacement or
+  later file rename/replacement invalidates that guard. Owned initialization
+  advances only its own verified generations; other pending intent remains
+  blocked. Startup folder
+  moves pin their source and destination markers at each publication boundary.
+  Vault metadata cannot reveal every external write, and no adapter operation
+  atomically compares the locator, marker and another file together.
 - Legacy migrations additionally retain `<store>/notes/<note-key>/migration.json`, a shared
   plugin/CLI transaction record with schema
   `{format,status,note,original,migrated,events}`. `original` and `migrated`
@@ -158,6 +172,15 @@ separate from the durable version ledger.
   and fenced code remain native leaves; only
   contiguous ordinary Markdown runs receive reversible `:::section` wrappers.
   Exact note and manifest generations make interrupted publication resumable.
+- Native journal publishers share the existing append-only ledger lock with
+  appenders and revalidate their retained route after acquiring it. New pending
+  transactions claim the exact bytes observed during planning or absence.
+  Completion requires a matching logical payload and fresh read-only checks of
+  its source, events, objects and operation-specific result under the lock;
+  same-state replays preserve existing bytes. A new claim still publishes pending
+  when a completed predecessor has the same payload. Identical intervening byte
+  cycles are not distinguished. Writers that bypass the lock and portable
+  compare-to-rename races remain outside that cooperative guarantee.
 - The managed root is visible because hidden dot-folders do not participate in the normal Vault event model and Obsidian Sync excludes them. Sync must include other file types for JSON/JSONL/gzip state. The selected folder and reserved default `mica-data` namespace are excluded from live-note scans, rendering mutations, snapshots, migration and watch, so object files never produce history of history. Git is an optional transport/backup tool and never selects the root.
 - Snapshot-on-save is change-gated by a domain-separated, length-framed full BLAKE3 content signature (no structural snapshot storms or leaf-boundary collisions). Per-note plugin work is serialized; exact-content preconditions and guarded rollback protect the note when a ledger append fails. The CLI stages replacements beside their target, syncs them, atomically publishes them, and verifies the result. Append-only + content-addressed means Sync/git normally see additions rather than object rewrites.
 - Explicit snapshots return the block ids whose `checkpoint`/`move-head` pairs
@@ -342,7 +365,7 @@ normalization or identity-bearing checkpoint operation.
 
 ## Scriptable API
 
-`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`) plus `createBlockSource({name?, body})`, the canonical template constructor. It returns a complete UUIDv7-addressed block, validates the optional explicit name through the core header writer, and sizes the outer fence above body backticks; `block.source` mirrors it in the file bridge. Revert, branch edit, and label selectors resolve a stable checkpoint ID first; a full content hash remains a compatibility selector only when it identifies one checkpoint. The other APIs are mirrored by palette commands and that bridge: an agent drops `{verb,args}` JSON in `<store>/bridge/inbox/` (default `mica-data/bridge/inbox/`); the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) executes it, replaces the exact executed inbox bytes with a consumed marker (preserving any newer content), and writes `<store>/bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. The bridge names visibility changes `versions.set-visible`; `versions.visibility` remains an alias for existing callers. Post-registration create and modify events are serialized through a bounded inbox queue, so reusing a filename works without replaying consumed generations. Mutating verbs run through the per-file transaction queue, reject duplicate identities, and surface failures to callers. A desktop loopback transport into a running Obsidian instance remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
+`window.mica` exposes UUID-addressed verbs (`block.list/read/update`, `versions.list/removed/snapshot/revert/restore-checkpoint/reset-head/set-visible/diff/patch/edit/label`, `migrate.scan/run`, `prepare`, `repair`) plus `createBlockSource({name?, body})`, the canonical template constructor. It returns a complete UUIDv7-addressed block, validates the optional explicit name through the core header writer, and sizes the outer fence above body backticks; `block.source` mirrors it in the file bridge. Revert, branch edit, and label selectors resolve a stable checkpoint ID first; a full content hash remains a compatibility selector only when it identifies one checkpoint. The other APIs are mirrored by palette commands and that bridge: an agent drops `{verb,args}` JSON in `<store>/bridge/inbox/` (default `mica-data/bridge/inbox/`); the watcher (registered on `onLayoutReady` so old instructions never replay at vault load) admits it only after validating the file generation and selected inbox, replaces the exact executed inbox bytes with a consumed marker (preserving any newer content), and writes `<store>/bridge/outbox/<same-name>.json` — desktop, mobile, and over Sync with no server. The bridge names visibility changes `versions.set-visible`; `versions.visibility` remains an alias for existing callers. Post-registration create and modify events are serialized through a bounded inbox queue, so reusing a filename works without replaying consumed generations. The consumed marker retains the exact serialized response if later outbox publication fails; it stays non-executable. Operation execution and consumption are not one atomic transaction. Mutating verbs run through the per-file transaction queue, reject duplicate identities, and surface failures to callers. A desktop loopback transport into a running Obsidian instance remains planned; the official Obsidian CLI tier (`tests/e2e-cli/run.sh`) covers shell-driven contract checks meanwhile.
 
 ## Build & distribution
 

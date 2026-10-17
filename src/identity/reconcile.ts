@@ -6,7 +6,7 @@ import {
 } from "../wasm/bridge";
 import { appendEvents, ensureSidecar, readEventsAt, requireObject, writeManifest, writeObject } from "../storage/sidecar";
 import {
-	ensureNoteStore, isLiveNote, readAliases, stageNoteStore, storeRoot, validateStoreRoot,
+	assertLiveNoteCurrent, ensureNoteStore, isLiveNote, readAliases, stageNoteStore, storeRoot, validateStoreRoot,
 	type NoteStore, type StoreRoot,
 } from "../storage/store";
 import { MAX_LEDGER_BYTES, orderedLedgerEvents, remintOrderedLedgerEventIds } from "../storage/ledger";
@@ -102,6 +102,7 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 		for (const copy of group) {
 			if (copy === keeper) continue;
 			await plugin.engine.withFileLock(copy.file, async () => {
+				const path = copy.file.path;
 				const expected = copy.source;
 				if (await root.vault.read(copy.file) !== expected) throw new Error("Mica: copied note changed during repair");
 				const fresh = newId();
@@ -129,7 +130,9 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 				// A failed publication leaves a named, recoverable orphan record rather than hidden history.
 				await writeManifest(store, { noteId: fresh, path: copy.file.path, blocks: names, updated: Date.now() });
 				await appendEvents(store, cloned);
+				await validateStoreRoot(root);
 				await root.vault.process(copy.file, (live) => {
+					assertLiveNoteCurrent(root, copy.file, path);
 					if (live !== expected) throw new Error("Mica: copied note changed before repaired identity could be published");
 					return next;
 				});
@@ -159,6 +162,7 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 		for (const occurrence of group) {
 			if (occurrence === keeper) continue;
 			await plugin.engine.withFileLock(occurrence.note.file, async () => {
+				const path = occurrence.note.file.path;
 				const live = await root.vault.read(occurrence.note.file);
 				if (live !== occurrence.note.source) throw new Error("Mica: block changed during repair");
 				const before = scanBlocksView(live);
@@ -171,7 +175,9 @@ export async function repair(plugin: MicaPlugin): Promise<RepairReport> {
 				await ensureSidecar(prepared.store);
 				await copyReferences(root, record, prepared.store, events);
 				await appendEvents(prepared.store, remintOrderedLedgerEventIds(events, newId).map((event) => ({ ...event, block: fresh })));
+				await validateStoreRoot(root);
 				const next = await root.vault.process(occurrence.note.file, (current) => {
+					assertLiveNoteCurrent(root, occurrence.note.file, path);
 					if (current !== prepared.source) throw new Error("Mica: duplicate block changed before publication");
 					const edit = rewriteBlockIdAt(current, target.start, block, fresh);
 					if (!edit) throw new Error("Mica: duplicate block changed before publication");

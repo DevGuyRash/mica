@@ -165,6 +165,8 @@ export interface RenderCtx {
 	suppressSourceReveal?: () => void;
 	/** Internal: repaint one region back to view mode after a cancel. */
 	repaintRegion?: (region: HTMLElement, target: RegionTarget) => void;
+	/** Internal: refresh cell chrome after an inline editor enters or leaves. */
+	syncCellEditorState?: (region: HTMLElement) => void;
 	/** Internal: repaint the whole block without a doc change (folds). */
 	rerenderBlock?: () => void;
 	/** Internal: the block's root children — ancestry checks for unified
@@ -292,7 +294,7 @@ function entityMenu(
 	const source = entityWidthSource(parent);
 	const pinnedSiblings = Array.from(parent.children).filter(
 		(child): child is HTMLElement =>
-			child instanceof HTMLElement && !child.hasClass("mica-footer-spacer") && !child.hasClass("mica-nav-spacer"),
+			child.instanceOf(HTMLElement) && !child.hasClass("mica-footer-spacer") && !child.hasClass("mica-nav-spacer"),
 	);
 	const tabBudget = parent.hasClass("mica-tab-chip") ? Math.max(0, parent.clientWidth - 48) : null;
 	const mounted = mountResponsiveActionStrip(parent, presented, {
@@ -411,6 +413,84 @@ function takeRegionReveal(ctx: RenderCtx, path: number[]): boolean {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/** Mirror descendant hover state on pointer boundaries, never per pointermove. */
+function mountNestedHoverState(root: HTMLElement, component: Component): () => void {
+	const classNames = [
+		"has-nested-hover",
+		"has-nested-callout-hover",
+		"has-nested-layout-hover",
+		"has-deep-grid-hover",
+		"has-nested-grid-pointer",
+	] as const;
+	const active = new Map<string, Set<HTMLElement>>();
+	const update = (target: Node | null): void => {
+		const next = new Map<string, Set<HTMLElement>>();
+		for (const name of classNames) next.set(name, new Set());
+		let element = target?.instanceOf(HTMLElement) ? target : (target?.parentElement ?? null);
+		if (element && !root.contains(element)) element = null;
+		let nested = false;
+		let callout = false;
+		let layout = false;
+		let grids = 0;
+		while (element) {
+			if (nested && element.hasClass("mica-region")) next.get("has-nested-hover")?.add(element);
+			if (callout && element.hasClass("mica-nested-callout"))
+				next.get("has-nested-callout-hover")?.add(element);
+			if (layout && element.hasClass("mica-cell")) next.get("has-nested-layout-hover")?.add(element);
+			if (element.hasClass("mica-grid-wrap")) {
+				if (grids >= 2) next.get("has-deep-grid-hover")?.add(element);
+				if (grids >= 1) next.get("has-nested-grid-pointer")?.add(element);
+				grids++;
+				layout = true;
+			}
+			if (element.hasClass("mica-tabs")) layout = true;
+			if (element.hasClass("mica-nested-callout")) {
+				nested = true;
+				callout = true;
+			}
+			if (element.hasClass("mica-nested-code")) nested = true;
+			if (element === root) break;
+			element = element.parentElement;
+		}
+		for (const name of classNames) {
+			const previous = active.get(name);
+			const current = next.get(name);
+			if (!current) continue;
+			for (const element of previous ?? []) if (!current.has(element)) element.removeClass(name);
+			for (const element of current) if (!previous?.has(element)) element.addClass(name);
+			active.set(name, current);
+		}
+	};
+	const refresh = (): void => {
+		const hovered = root.querySelectorAll<HTMLElement>(":hover");
+		update(hovered.item(hovered.length - 1) ?? (root.matches(":hover") ? root : null));
+	};
+	component.registerDomEvent(root, "pointerover", (event) => update(event.targetNode), true);
+	component.registerDomEvent(root, "pointerout", (event) => {
+		const related = event.relatedTarget;
+		update(related && "nodeType" in related ? (related as Node) : null);
+	}, true);
+	component.registerDomEvent(root, "pointerleave", () => update(null));
+	const ownerWindow = root.win;
+	let frame: number | null = ownerWindow.requestAnimationFrame(() => {
+		frame = null;
+		refresh();
+	});
+	component.register(() => {
+		if (frame !== null) ownerWindow.cancelAnimationFrame(frame);
+		update(null);
+	});
+	return refresh;
+}
+
+/** Editor transitions are rare; refresh every containing cell, including nested cells. */
+function syncCellEditorState(region: HTMLElement): void {
+	for (let ancestor = region.parentElement; ancestor; ancestor = ancestor.parentElement) {
+		if (ancestor.hasClass("mica-cell"))
+			ancestor.toggleClass("has-region-editor", Boolean(ancestor.querySelector(".mica-region.is-editing")));
+	}
+}
+
 /** Render a parsed block into `el`. Shared by reading view and Live Preview. */
 export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	if (!ctx.renderPassOwner) {
@@ -420,6 +500,8 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 		return;
 	}
 	el.addClass("mica");
+	const refreshNestedHover = mountNestedHoverState(el, ctx.component);
+	ctx.syncCellEditorState = syncCellEditorState;
 	ctx.openMenus = new Set();
 	ctx.component.register(() => {
 		for (const menu of ctx.openMenus ?? []) menu.hide();
@@ -499,7 +581,10 @@ export function renderCst(cst: Cst, el: HTMLElement, ctx: RenderCtx): void {
 	applyBlockAttrs(el, ctx.blockAttrs ?? {});
 
 	// A repaint closure so collapse and cancels can redraw without a doc change.
-	ctx.repaintRegion = (region, target) => paintRegionView(region, ctx, target);
+	ctx.repaintRegion = (region, target) => {
+		paintRegionView(region, ctx, target);
+		refreshNestedHover();
+	};
 	ctx.rerenderBlock = () => rerender(cst, el, ctx);
 	ctx.rootNodes = cst.children;
 
@@ -783,6 +868,7 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): HTMLElement | 
 		"mica-head-btn",
 	);
 	if (ctx.ui?.appearanceOpen) {
+		const ownerWindow = el.win;
 		let frame: number | null = null;
 		let attempts = 0;
 		const resume = (): void => {
@@ -794,14 +880,14 @@ function renderHeader(cst: Cst, el: HTMLElement, ctx: RenderCtx): HTMLElement | 
 			// the controls back much later—or losing them under load.
 			if (!el.isConnected && attempts < 120) {
 				attempts++;
-				frame = window.requestAnimationFrame(resume);
+				frame = ownerWindow.requestAnimationFrame(resume);
 				return;
 			}
 			if (el.isConnected && !el.querySelector(".mica-appearance")) openAppearance(el, ctx, true);
 		};
-		frame = window.requestAnimationFrame(resume);
+		frame = ownerWindow.requestAnimationFrame(resume);
 		ctx.component.register(() => {
-			if (frame !== null) window.cancelAnimationFrame(frame);
+			if (frame !== null) ownerWindow.cancelAnimationFrame(frame);
 		});
 	}
 	return head;
@@ -1075,28 +1161,30 @@ interface NavRow {
  */
 function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e?: MouseEvent): void {
 	closeActiveNavigator?.();
-	const previousFocus = document.activeElement as HTMLElement | null;
+	const ownerDocument = root.ownerDocument;
+	const ownerWindow = root.win;
+	const previousFocus = ownerDocument.activeElement as HTMLElement | null;
 	// Body-level + fixed: never clipped by the block, and it SURVIVES the
 	// block re-renders that reveal/unfold trigger — so it stays open while
 	// the user jumps between several targets. Outside click / Esc closes.
-	const pop = document.body.createDiv({ cls: "mica-popover mica-navpop" });
+	const pop = ownerDocument.body.createDiv({ cls: "mica-popover mica-navpop" });
 	pop.setAttribute("role", "dialog");
 	pop.setAttribute("aria-label", "Block navigator");
 	const anchor = root.getBoundingClientRect();
 	const clientX = e?.clientX ?? anchor.right;
 	const clientY = e?.clientY ?? anchor.top;
-	const left = Math.min(Math.max(8, clientX - 260), window.innerWidth - 348);
-	const top = Math.min(clientY + 12, window.innerHeight - 120);
+	const left = Math.min(Math.max(8, clientX - 260), ownerWindow.innerWidth - 348);
+	const top = Math.min(clientY + 12, ownerWindow.innerHeight - 120);
 	pop.style.left = `${left}px`;
 	pop.style.top = `${top}px`;
-	pop.style.maxHeight = `${Math.max(120, window.innerHeight - top - 16)}px`;
+	pop.style.maxHeight = `${Math.max(120, ownerWindow.innerHeight - top - 16)}px`;
 	let closed = false;
 	const dismiss = (): void => {
 		if (closed) return;
 		closed = true;
 		pop.remove();
-		document.removeEventListener("pointerdown", onOut, true);
-		document.removeEventListener("keydown", onKey, true);
+		ownerDocument.removeEventListener("pointerdown", onOut, true);
+		ownerDocument.removeEventListener("keydown", onKey, true);
 		if (previousFocus?.isConnected) previousFocus.focus();
 		if (closeActiveNavigator === dismiss) closeActiveNavigator = null;
 	};
@@ -1112,8 +1200,8 @@ function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e?: MouseEve
 			dismiss();
 		}
 	};
-	document.addEventListener("pointerdown", onOut, true);
-	document.addEventListener("keydown", onKey, true);
+	ownerDocument.addEventListener("pointerdown", onOut, true);
+	ownerDocument.addEventListener("keydown", onKey, true);
 
 	const ICONS: Record<string, string> = {
 		tabs: "app-window",
@@ -1207,7 +1295,7 @@ function openNavigator(cst: Cst, root: HTMLElement, ctx: RenderCtx, e?: MouseEve
 	};
 	walk(cst.children, [], 0);
 	if (!rows.length) pop.createDiv({ cls: "mica-pop-empty", text: "Nothing here yet" });
-	else requestAnimationFrame(() => rows[0]?.el.focus());
+	else ownerWindow.requestAnimationFrame(() => rows[0]?.el.focus());
 }
 
 /** Click = reveal; drag (5px threshold) = reorder among same-parent rows. */
@@ -1631,19 +1719,21 @@ function setAppearanceAttr(el: HTMLElement, ctx: RenderCtx, key: string, value: 
 	const blockId = el.dataset.micaBlockId;
 	ctx.editable.setAttr(key, value);
 	if (!ctx.ui?.appearanceOpen) return;
+	const ownerDocument = el.ownerDocument;
+	const ownerWindow = el.win;
 	let attempts = 0;
 	const resume = (): void => {
 		if (!ctx.ui?.appearanceOpen) return;
 		const current = blockId
-			? document.querySelector<HTMLElement>(`.mica-lp[data-mica-block-id="${CSS.escape(blockId)}"]`)
+			? ownerDocument.querySelector<HTMLElement>(`.mica-lp[data-mica-block-id="${CSS.escape(blockId)}"]`)
 			: null;
 		if (current?.isConnected && current !== el) {
 			if (!current.querySelector(".mica-appearance")) openAppearance(current, ctx, true, false);
 			return;
 		}
-		if (++attempts < 120) requestAnimationFrame(resume);
+		if (++attempts < 120) ownerWindow.requestAnimationFrame(resume);
 	};
-	requestAnimationFrame(resume);
+	ownerWindow.requestAnimationFrame(resume);
 }
 
 /** Reopen a persisted appearance session after CodeMirror replaces its widget.
@@ -2487,8 +2577,10 @@ function wireNestedCodeBlocks(
 }
 
 function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarget): void {
+	const wasEditing = region.hasClass("is-editing");
 	region.empty();
-	region.removeClass("is-editing");
+	region.removeClass("is-editing", "has-empty-invitation");
+	if (wasEditing) ctx.syncCellEditorState?.(region);
 	region.toggleClass("is-editable", Boolean(ctx.editable));
 	const fkey = foldKeyForRegion(target);
 	if (ctx.ui?.folded.has(fkey) && target.original.trim()) {
@@ -2536,6 +2628,7 @@ function paintRegionView(region: HTMLElement, ctx: RenderCtx, target: RegionTarg
 		wireNestedCallouts(view, ctx, target, nested.callouts);
 		wireNestedCodeBlocks(view, ctx, target, nested.codeBlocks);
 	} else if (ctx.editable) {
+		region.addClass("has-empty-invitation");
 		const ghost = view.createDiv({ cls: "mica-ghost" });
 		setIcon(ghost.createSpan({ cls: "mica-ghost-icon" }), "plus");
 		ghost.createSpan({ cls: "mica-ghost-label", text: "Add…" });
@@ -2924,6 +3017,8 @@ function startRename(
 	resume = false,
 ): void {
 	if (chip.querySelector(".mica-rename")) return;
+	const ownerDocument = chip.ownerDocument;
+	const ownerWindow = chip.win;
 	const pathKey = path.join(".");
 	if (ctx.ui && !resume) {
 		ctx.ui.tabRename = { path: pathKey, index, display, value: display };
@@ -2937,7 +3032,7 @@ function startRename(
 	let done = false;
 	let composing = false;
 	const stop = (): void => {
-		document.removeEventListener("pointerdown", onOutside, true);
+		ownerDocument.removeEventListener("pointerdown", onOutside, true);
 		input.removeEventListener("blur", commit);
 		input.removeEventListener("compositionstart", onCompositionStart);
 		input.removeEventListener("compositionend", onCompositionEnd);
@@ -2985,17 +3080,17 @@ function startRename(
 		const expireIfOrphaned = (): void => {
 			const active = ctx.ui?.tabRename;
 			if (active?.path !== pathKey || active.index !== index) return;
-			if (document.querySelector(".mica-tab-chip .mica-rename")) return;
+			if (ownerDocument.querySelector(".mica-tab-chip .mica-rename")) return;
 			if (++attempts < 120) {
-				requestAnimationFrame(expireIfOrphaned);
+				ownerWindow.requestAnimationFrame(expireIfOrphaned);
 				return;
 			}
 			ctx.ui!.tabRename = undefined;
 		};
-		requestAnimationFrame(expireIfOrphaned);
+		ownerWindow.requestAnimationFrame(expireIfOrphaned);
 	};
 	ctx.component.register(detachForRender);
-	document.addEventListener("pointerdown", onOutside, true);
+	ownerDocument.addEventListener("pointerdown", onOutside, true);
 	input.addEventListener("input", () => {
 		const active = ctx.ui?.tabRename;
 		if (active?.path === pathKey && active.index === index) active.value = input.value;
@@ -3358,8 +3453,15 @@ function mountGridResizers(
 	ro.observe(grid);
 	// Every edit rebuilds the block into a fresh element; disconnect with the
 	// component or each repaint stacks a live observer on a detached grid.
-	ctx.component.register(() => ro.disconnect());
-	window.requestAnimationFrame(layout);
+	const ownerWindow = grid.win;
+	let frame: number | null = ownerWindow.requestAnimationFrame(() => {
+		frame = null;
+		layout();
+	});
+	ctx.component.register(() => {
+		ro.disconnect();
+		if (frame !== null) ownerWindow.cancelAnimationFrame(frame);
+	});
 }
 
 /**
@@ -4193,7 +4295,7 @@ function mountLongBlockStatus(
 						icon: definition.icon,
 						directPriority: Math.min(4, index) as 0 | 1 | 2 | 3 | 4,
 						danger: id === "revert",
-						disabled: element instanceof HTMLButtonElement ? element.disabled : false,
+						disabled: element.instanceOf(HTMLButtonElement) ? element.disabled : false,
 						run: () => element.click(),
 					};
 				})

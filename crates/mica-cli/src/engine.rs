@@ -682,8 +682,19 @@ fn write_version(
 }
 
 /// Rewrite the manifest from an already-scanned current doc.
-fn refresh_manifest(note: &NoteRef, store: &NoteStore, spans: &[mica_core::BlockSpan]) -> Result<()> {
-    let blocks: Vec<(String, String)> = spans
+pub(crate) fn refresh_manifest(note: &NoteRef, store: &NoteStore, spans: &[mica_core::BlockSpan]) -> Result<()> {
+    let blocks = manifest_blocks(spans);
+    sidecar::write_manifest(
+        store,
+        Some(store.note_id.as_str()),
+        &note.vault_rel(),
+        &blocks,
+        now_ms(),
+    )
+}
+
+fn manifest_blocks(spans: &[mica_core::BlockSpan]) -> Vec<(String, String)> {
+    spans
         .iter()
         .filter_map(|b| {
             b.id().map(|id| {
@@ -693,14 +704,49 @@ fn refresh_manifest(note: &NoteRef, store: &NoteStore, spans: &[mica_core::Block
                 )
             })
         })
-        .collect();
-    sidecar::write_manifest(
-        store,
-        Some(store.note_id.as_str()),
-        &note.vault_rel(),
-        &blocks,
-        now_ms(),
-    )
+        .collect()
+}
+
+/// Read-only migration completion checks; called under the existing ledger lock.
+pub(crate) fn verify_migration_completion(
+    store: &NoteStore,
+    journal: &sidecar::MigrationJournal,
+    migrated: &str,
+    ledger: &sidecar::LedgerRead,
+) -> Result<()> {
+    let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
+        CliError::Corrupt("migration completion preimage is missing".to_string())
+    })?;
+    validate_journal_generations(store, &original, migrated)?;
+    let blocks = scan_impl(migrated);
+    let states = fold_ledger_impl(&ledger.events)
+        .map_err(|error| CliError::Corrupt(error.to_string()))?;
+    for block in blocks.iter().filter(|block| block.closed) {
+        let Some(id) = block.id() else { continue };
+        let content = &migrated[block.content_start..block.content_end];
+        let head = states.get(id).and_then(|state| state.raw_head.as_deref().or(state.head.as_deref()));
+        let head_content = match head {
+            Some(hash) => Some(sidecar::read_object(store, hash)?.ok_or_else(|| {
+                CliError::Corrupt("migration completion head object is missing".to_string())
+            })?),
+            None => None,
+        };
+        let head_ref = match head_content.as_deref() {
+            Some(content) => HeadRef::Content(content),
+            None => HeadRef::None,
+        };
+        if should_snapshot_impl(content, head_ref, false) {
+            return Err(CliError::Corrupt(
+                "migration head snapshot is incomplete; the pending journal was preserved".to_string(),
+            ));
+        }
+    }
+    let note = NoteRef {
+        abs: store.note.clone(),
+        vault: store.root.vault.clone(),
+        store: Some(store.root.clone()),
+    };
+    sidecar::verify_manifest_contents(store, &note.vault_rel(), &manifest_blocks(&blocks))
 }
 
 /// Restore stored bytes as a new logical checkpoint.

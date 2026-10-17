@@ -1,6 +1,6 @@
 import { debounce, TFile, TFolder, type Debouncer, type Vault } from "obsidian";
 import type MicaPlugin from "../main";
-import { bindNoteStore, ensureNoteStore, isLiveNote, storeRoot, validateStoreRoot, type NoteStore } from "../storage/store";
+import { assertLiveNoteCurrent, bindNoteStore, ensureNoteStore, isLiveNote, storeRoot, validateStoreRoot, type NoteStore, type StoreRoot } from "../storage/store";
 import {
 	contentSignature,
 	ensureIds,
@@ -67,6 +67,12 @@ interface SnapshotCommit extends SnapshotResult {
 	readonly doc: string;
 }
 
+interface BlockReplacement {
+	readonly previous: string;
+	readonly committed: string;
+	readonly guardPublication: () => void;
+}
+
 type SnapshotDebouncer = Debouncer<[TFile], void>;
 
 /** Internal classification used only when a live note was already published.
@@ -94,14 +100,15 @@ export class VersionEngine {
 	private readonly operationStores = new Map<TFile, NoteStore>();
 	private readonly stateReads = new Map<TFile, Promise<Record<string, BlockState>>>();
 	private readonly listeners = new Set<(event: SnapshotEvent) => void>();
+	private readonly root: StoreRoot;
 	private disposed = false;
 
-	constructor(private readonly plugin: MicaPlugin) {}
+	constructor(private readonly plugin: MicaPlugin) { this.root = storeRoot(plugin.app.vault); }
 
 	/** Called on every note modify; ignores sidecar files and non-markdown. */
 	handleModify(file: TFile): void {
 		if (this.disposed || !isLiveNote(file)) return;
-		const hasHistory = Boolean(this.plugin.app.vault.getAbstractFileByPath(storeRoot(this.plugin.app.vault).paths.marker));
+		const hasHistory = Boolean(this.plugin.app.vault.getAbstractFileByPath(this.root.paths.marker));
 		if (!this.plugin.settings.autoSnapshotEnabled && !this.plugin.settings.autoAddIds && !hasHistory) return;
 		let bounce = this.debouncers.get(file.path);
 		if (!bounce) {
@@ -123,13 +130,15 @@ export class VersionEngine {
 	private maintainNote(file: TFile): Promise<void> {
 		return this.withFileLock(file, async () => {
 			const vault = this.plugin.app.vault;
-			await validateStoreRoot(storeRoot(vault));
+			await validateStoreRoot(this.root);
 			let doc = await vault.read(file);
 			let blocks = scanBlocksView(doc);
 			if (this.plugin.settings.autoAddIds && blocks.some((block) => block.closed && !block.id)) {
 				await this.lookupStore(file, doc); // Reject a copied note identity before changing its blocks.
 				const expectedId = noteId(doc);
+				const guardPublication = await this.notePublicationGuard(file);
 				doc = await vault.process(file, (current) => {
+					guardPublication();
 					if (noteId(current) !== expectedId) throw new Error("Mica: note identity changed before block IDs could be prepared");
 					return ensureIds(current);
 				});
@@ -228,7 +237,7 @@ export class VersionEngine {
 	private async lookupStore(file: TFile, source?: string): Promise<NoteStore | null> {
 		const existing = this.operationStores.get(file);
 		if (existing && (source === undefined || noteId(source) === existing.noteId)) return existing;
-		const root = storeRoot(this.plugin.app.vault);
+		const root = this.root;
 		const store = await bindNoteStore(root, file, source ?? await root.vault.read(file));
 		if (store) this.operationStores.set(file, store);
 		return store;
@@ -253,6 +262,7 @@ export class VersionEngine {
 		this.stateReads.delete(file);
 		this.storeReads.delete(file);
 		return this.enqueue(file, async () => {
+			const guardPublication = await this.notePublicationGuard(file);
 			// Ordinary API edits honor the semantic content gate: adding/reordering
 			// empty structure must not mint a user-visible version. doSnapshot still
 			// returns the exact note it observed, which remains the conflict guard for
@@ -264,6 +274,7 @@ export class VersionEngine {
 			let changed = false;
 			let previousDoc = "";
 			const committedDoc = await this.plugin.app.vault.process(file, (current) => {
+				guardPublication();
 				if (snapshottedDoc !== null && current !== snapshottedDoc) {
 					throw new Error(`Mica: ${file.path} changed after its pre-image was saved; retry the edit`);
 				}
@@ -283,6 +294,7 @@ export class VersionEngine {
 						let rolledBack = false;
 						try {
 							await this.plugin.app.vault.process(file, (current) => {
+								guardPublication();
 								if (current !== committedDoc) {
 									throw new Error("the note changed again before rollback");
 								}
@@ -367,6 +379,9 @@ export class VersionEngine {
 		const previous = this.queues.get(file) ?? Promise.resolve();
 		const operation = previous.then(async () => {
 			if (!isLiveNote(file)) throw new Error(`Mica: managed storage is not a live note: ${file.path}`);
+			const path = file.path;
+			await validateStoreRoot(this.root);
+			assertLiveNoteCurrent(this.root, file, path);
 			this.operationStores.delete(file);
 			try { return await task(); } finally { this.operationStores.delete(file); }
 		});
@@ -405,7 +420,7 @@ export class VersionEngine {
 		let committed = historyCommitted;
 		try {
 			const vault = this.plugin.app.vault;
-			await validateStoreRoot(storeRoot(vault));
+			await validateStoreRoot(this.root);
 			let doc = await vault.read(file);
 			let blocks = scanBlocksView(doc);
 			const hasClosedBlock = blocks.some((block) => block.closed);
@@ -417,7 +432,9 @@ export class VersionEngine {
 			) {
 				await this.lookupStore(file, doc); // Reject a copied note identity before changing its blocks.
 				const expectedId = noteId(doc);
+				const guardPublication = await this.notePublicationGuard(file);
 				doc = await vault.process(file, (current) => {
+					guardPublication();
 					if (noteId(current) !== expectedId) throw new Error("Mica: note identity changed before block IDs could be prepared");
 					return ensureIds(current);
 				});
@@ -456,7 +473,7 @@ export class VersionEngine {
 						if (head && resolveObjectHash(head, alias === undefined ? {} : { [head]: alias }) === hash) continue;
 						if (!force && !(await this.contentChanged(file, content, head))) continue;
 						if (!sidecarReady) {
-							const prepared = await ensureNoteStore(storeRoot(vault), file, doc);
+							const prepared = await ensureNoteStore(this.root, file, doc);
 							if (prepared.source !== doc) { doc = prepared.source; blocks = scanBlocksView(doc); }
 							this.operationStores.set(file, prepared.store);
 							await ensureSidecar(prepared.store);
@@ -747,7 +764,9 @@ export class VersionEngine {
 				requireObject(await this.requireStore(file), recoveryHash),
 				requireObject(await this.requireStore(file), expectedHead),
 			]);
+			const guardPublication = await this.notePublicationGuard(file);
 			await this.plugin.app.vault.process(file, (doc) => {
+				guardPublication();
 				const live = this.uniqueLiveBlock(doc, blockId);
 				if (doc.slice(live.content_start, live.content_end) !== headContent) {
 					throw new Error("Mica: the block changed after the revert; the working copy was left unchanged");
@@ -845,9 +864,11 @@ export class VersionEngine {
 		blockId: string,
 		content: string,
 		expectedDoc: string,
-	): Promise<{ previous: string; committed: string }> {
+	): Promise<BlockReplacement> {
+		const guardPublication = await this.notePublicationGuard(file);
 		let previous: string | null = null;
 		const committed = await this.plugin.app.vault.process(file, (doc) => {
+			guardPublication();
 			if (doc !== expectedDoc)
 				throw new Error(`Mica: ${file.path} changed after its pre-image was saved; retry the edit`);
 			const block = this.uniqueLiveBlock(doc, blockId);
@@ -857,14 +878,14 @@ export class VersionEngine {
 			return next;
 		});
 		if (previous === null) throw new Error(`Mica: block transform did not run for ${blockId}`);
-		return { previous, committed };
+		return { previous, committed, guardPublication };
 	}
 
 	private async commitLiveVersion(
 		file: TFile,
 		blockId: string,
 		attempted: string,
-		replacement: { previous: string; committed: string },
+		replacement: BlockReplacement,
 		events: readonly LedgerEvent[],
 	): Promise<void> {
 		const vault = this.plugin.app.vault;
@@ -875,13 +896,14 @@ export class VersionEngine {
 				attempted,
 				replacement.previous,
 				new Error("the note changed before history could be committed"),
+				replacement.guardPublication,
 			);
 		}
 		try {
 			await appendEvents(await this.requireStore(file), events);
 		} catch (error) {
 			if (ledgerAppendProvesNoCommit(error)) {
-				await this.rollbackBlock(file, blockId, attempted, replacement.previous, error);
+				await this.rollbackBlock(file, blockId, attempted, replacement.previous, error, replacement.guardPublication);
 			}
 			// A partial/unknown append may already contain the authoritative head.
 			// Rolling the note back in that state would manufacture divergence.
@@ -914,10 +936,12 @@ export class VersionEngine {
 		attempted: string,
 		previous: string,
 		cause: unknown,
+		guardPublication: () => void,
 	): Promise<never> {
 		const expected = normalizeBlockContent(attempted);
 		try {
 			await this.plugin.app.vault.process(file, (doc) => {
+				guardPublication();
 				let block: ReturnType<typeof scanBlocksView>[number] | null = null;
 				for (const candidate of scanBlocksView(doc)) {
 					if (!candidate.closed || candidate.id !== blockId) continue;
@@ -939,6 +963,14 @@ export class VersionEngine {
 			);
 		}
 		throw new Error(`Mica: history update failed; the live block was rolled back (${blockId})`, { cause });
+	}
+
+	/** Retain the selected route and live file identity across publication's await. */
+	private async notePublicationGuard(file: TFile): Promise<() => void> {
+		const root = this.root;
+		const path = file.path;
+		await validateStoreRoot(root);
+		return () => assertLiveNoteCurrent(root, file, path);
 	}
 }
 

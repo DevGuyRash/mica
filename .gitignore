@@ -8,6 +8,7 @@ node_modules/
 
 # Rust / WASM
 /target/
+# Generated runtime output; source-owned declarations live in src/wasm/bindings.d.ts.
 /src/wasm/pkg/
 
 # E2E (downloaded Obsidian binaries + runner logs)

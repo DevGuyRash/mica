@@ -1356,6 +1356,11 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
     engine::preflight_journal_events(&plan.store, &plan.journal.events)?;
     sidecar::validate_manifest_bytes(&plan.store, &plan.manifest_consolidated)?;
     engine::validate_note_identity(&plan.note, &plan.original)?;
+    sidecar::preflight_journal_claim(
+        &plan.store,
+        &sidecar::tab_consolidation_journal_path(&plan.store),
+        None,
+    )?;
     plan.store.root.claim_location()?;
     sidecar::preflight_note_record(&plan.store)?;
     if plan.source_preimage != plan.original {
@@ -1370,7 +1375,7 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
         sidecar::write_object(&plan.store, hash, content)?;
         sidecar::verify_written_object(&plan.store, hash, content)?;
     }
-    sidecar::write_tab_consolidation_journal(&plan.store, &plan.journal)?;
+    sidecar::claim_tab_consolidation_journal(&plan.store, &plan.journal, None)?;
     if plan.original != plan.consolidated {
         engine::guard_note_store(&plan.note, &plan.store, &plan.original)?;
         fsutil::atomic_write_if_unchanged(

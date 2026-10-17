@@ -10,7 +10,7 @@ import {
 	writeManifest,
 	writeObject,
 } from "../storage/sidecar";
-import { assertNoteStoreCurrent, bindNoteStore, isLiveNote, stageNoteStore, storeRoot, validateStoreRoot, type NoteStore } from "../storage/store";
+import { assertLiveNoteCurrent, assertNoteStoreCurrent, assertStoreRootCurrent, bindNoteStore, isLiveNote, stageNoteStore, storeRoot, validateStoreRoot, type NoteStore, type StoreRoot } from "../storage/store";
 import {
 	classifyEventBatch,
 	isLedgerEvent,
@@ -59,6 +59,8 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 	}
 
 	const migrated = await plugin.engine.withFileLock(file, async () => {
+		const path = file.path;
+		await validateStoreRoot(root);
 		const initial = await vault.read(file);
 		const existingStore = await bindNoteStore(root, file, initial);
 		const recoveryStore = existingStore ?? await findPendingMigrationStore(plugin, file, initial);
@@ -68,6 +70,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 		let original = "";
 		let result: ReturnType<typeof migrateTabs> | null = null;
 		await vault.process(file, (current) => {
+			assertLiveNoteCurrent(root, file, path);
 			original = current;
 			result = migrateTabs(current, plugin.settings.versionCalloutTypes);
 			return current;
@@ -130,6 +133,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 		let committed: string;
 		try {
 			committed = await vault.process(file, (current) => {
+				assertLiveNoteCurrent(root, file, path);
 				if (current !== original)
 					throw new Error(`Mica: ${file.path} changed while migration was staged; retry`);
 				return finalized.doc;
@@ -150,7 +154,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 			await appendEvents(store, events);
 		} catch (error) {
 			if (ledgerAppendProvesNoCommit(error)) {
-				await rollbackMigrationNote(plugin, file, committed, original);
+				await rollbackMigrationNote(plugin, root, file, path, committed, original);
 				throw new Error(`Mica: migration history failed; ${file.path} was rolled back`, { cause: error });
 			}
 			// Partial/unknown means rollback is unsafe. The pending journal retains
@@ -172,6 +176,7 @@ async function resumePendingMigration(
 	const journal = await readMigrationJournal(plugin, store);
 	if (!journal || journal.status === "complete") return null;
 	const vault = plugin.app.vault;
+	const path = file.path;
 	const [original, migrated] = await Promise.all([
 		requireObject(store, journal.original),
 		requireObject(store, journal.migrated),
@@ -185,6 +190,7 @@ async function resumePendingMigration(
 	if (current === original) {
 		await assertNoteStoreCurrent(store, true);
 		current = await vault.process(file, (latest) => {
+			assertLiveNoteCurrent(store.root, file, path);
 			if (latest !== original) throw new Error(`Mica: ${file.path} diverged while migration recovery was staged`);
 			return migrated;
 		});
@@ -283,6 +289,9 @@ async function createPendingMigrationJournal(
 	if (existing) {
 		if (!(existing instanceof TFile)) throw new Error(`Mica: migration journal path is not a file: ${path}`);
 		await plugin.app.vault.process(existing, (current) => {
+			assertStoreRootCurrent(store.root);
+			if (existing.path !== path || plugin.app.vault.getAbstractFileByPath(path) !== existing)
+				throw new Error("Mica: migration journal changed before publication");
 			const previous = parseMigrationJournal(current, path);
 			if (previous.status === "pending") {
 				throw new Error(`Mica: refusing to overwrite pending migration journal: ${path}`);
@@ -293,6 +302,7 @@ async function createPendingMigrationJournal(
 		return;
 	}
 	try {
+		assertStoreRootCurrent(store.root);
 		await plugin.app.vault.create(path, body);
 	} catch (error) {
 		if (plugin.app.vault.getAbstractFileByPath(path)) {
@@ -372,6 +382,9 @@ async function replaceMigrationJournal(
 	const body = encodeMigrationJournal(next);
 	await assertNoteStoreCurrent(store, true);
 	await plugin.app.vault.process(af, (current) => {
+		assertStoreRootCurrent(store.root);
+		if (af.path !== path || plugin.app.vault.getAbstractFileByPath(path) !== af)
+			throw new Error("Mica: migration journal changed before publication");
 		const actual = parseMigrationJournal(current, path);
 		if (!sameMigrationJournal(actual, expected) && !sameMigrationJournal(actual, next)) {
 			throw new Error(`Mica: migration journal changed concurrently: ${path}`);
@@ -394,11 +407,15 @@ function sameMigrationJournal(left: MigrationJournal, right: MigrationJournal): 
 
 async function rollbackMigrationNote(
 	plugin: MicaPlugin,
+	root: StoreRoot,
 	file: TFile,
+	path: string,
 	expectedMigrated: string,
 	original: string,
 ): Promise<void> {
+	await validateStoreRoot(root);
 	await plugin.app.vault.process(file, (current) => {
+		assertLiveNoteCurrent(root, file, path);
 		if (current !== expectedMigrated) throw new Error("the note changed again before migration rollback");
 		return original;
 	});

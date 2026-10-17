@@ -53,7 +53,7 @@ pub struct NoteStore {
 
 const MAX_ALIAS_BYTES: usize = 1024 * 1024;
 const MAX_ALIAS_ENTRIES: usize = 16_384;
-const MAX_MARKER_BYTES: usize = 16 * 1024;
+const MAX_MARKER_BYTES: usize = 4096;
 
 impl StoreRoot {
     /// Resolve the authoritative vault locator without creating persistent state.
@@ -576,6 +576,25 @@ enum HistoricalNoteId {
     Absent(()),
 }
 
+/// Check the current summary after migration's final snapshot/manifest work.
+pub(crate) fn verify_manifest_contents(
+    note: &NoteStore,
+    path: &str,
+    blocks: &[(String, String)],
+) -> Result<()> {
+    preflight_note_record(note)?;
+    let bytes = read_bounded_file(&note.root.vault.join(&note.paths.manifest), MAX_LEDGER_BYTES, "note manifest")?
+        .ok_or_else(|| CliError::Corrupt("completed migration manifest is missing".to_string()))?;
+    let manifest: StoredManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid note manifest: {error}")))?;
+    if manifest.note_id != note.note_id || manifest.path != path || manifest.blocks.as_slice() != blocks {
+        return Err(CliError::Corrupt(
+            "migration manifest does not describe the completed source; the pending journal was preserved".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Compare journaled metadata while allowing a moved path and a previously absent anchor.
 /// Only a null historical anchor may bind to this store's now-established identity.
 pub(crate) fn manifest_matches_except_hint(
@@ -925,15 +944,37 @@ pub fn write_tab_consolidation_journal(
     note: &NoteStore,
     journal: &TabConsolidationJournal,
 ) -> Result<()> {
+    persist_tab_consolidation_journal(note, journal, JournalPublication::Owned)
+}
+
+/// Claim one pending transaction against the exact journal observed during planning.
+pub(crate) fn claim_tab_consolidation_journal(
+    note: &NoteStore,
+    journal: &TabConsolidationJournal,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    persist_tab_consolidation_journal(note, journal, JournalPublication::Claim(expected))
+}
+
+fn persist_tab_consolidation_journal(
+    note: &NoteStore,
+    journal: &TabConsolidationJournal,
+    publication: JournalPublication<'_>,
+) -> Result<()> {
     note.invalidate_references()?;
     validate_tab_consolidation_journal_encoding(journal, MAX_LEDGER_BYTES)?;
     let mut bytes =
         serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
     bytes.push(b'\n');
-    ensure_sidecar(note)?;
     let path = tab_consolidation_journal_path(note);
-    validate_regular_file_or_missing(&path, "tab-consolidation journal")?;
-    fsutil::atomic_write(&path, &bytes)
+    publish_journal(note, &path, &bytes, publication, |current| {
+        let previous: TabConsolidationJournal = serde_json::from_slice(current)
+            .map_err(|error| CliError::Corrupt(format!("invalid transaction journal: {error}")))?;
+        validate_tab_consolidation_journal(&previous)
+    }, || {
+        verify_journal_completion(note, &journal.consolidated, &journal.events)?;
+        crate::consolidate::inspect_completed_journal(note, journal)
+    })
 }
 
 fn validate_tab_consolidation_journal(journal: &TabConsolidationJournal) -> Result<()> {
@@ -1109,6 +1150,14 @@ fn validate_tab_consolidation_journal(journal: &TabConsolidationJournal) -> Resu
 pub fn read_section_normalization_journal(
     note: &NoteStore,
 ) -> Result<Option<SectionNormalizationJournal>> {
+    read_section_normalization_journal_record(note)
+        .map(|record| record.map(|(journal, _)| journal))
+}
+
+/// Read a validated journal together with its exact planning preimage.
+pub(crate) fn read_section_normalization_journal_record(
+    note: &NoteStore,
+) -> Result<Option<(SectionNormalizationJournal, Vec<u8>)>> {
     validate_sidecar_layout_for_write(note)?;
     let path = section_normalization_journal_path(note);
     let Some(file) = open_regular_for_read(&path, "section-normalization journal")? else {
@@ -1131,7 +1180,7 @@ pub fn read_section_normalization_journal(
         ))
     })?;
     validate_section_normalization_journal(&journal)?;
-    Ok(Some(journal))
+    Ok(Some((journal, bytes)))
 }
 
 /// Atomically write a validated logical-section normalization journal.
@@ -1160,15 +1209,37 @@ pub fn write_section_normalization_journal(
     note: &NoteStore,
     journal: &SectionNormalizationJournal,
 ) -> Result<()> {
+    persist_section_normalization_journal(note, journal, JournalPublication::Owned)
+}
+
+/// Claim one pending transaction against the exact journal observed during planning.
+pub(crate) fn claim_section_normalization_journal(
+    note: &NoteStore,
+    journal: &SectionNormalizationJournal,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    persist_section_normalization_journal(note, journal, JournalPublication::Claim(expected))
+}
+
+fn persist_section_normalization_journal(
+    note: &NoteStore,
+    journal: &SectionNormalizationJournal,
+    publication: JournalPublication<'_>,
+) -> Result<()> {
     note.invalidate_references()?;
     validate_section_normalization_journal_encoding(journal, MAX_LEDGER_BYTES)?;
     let mut bytes =
         serde_json::to_vec_pretty(journal).map_err(|error| CliError::Corrupt(error.to_string()))?;
     bytes.push(b'\n');
-    ensure_sidecar(note)?;
     let path = section_normalization_journal_path(note);
-    validate_regular_file_or_missing(&path, "section-normalization journal")?;
-    fsutil::atomic_write(&path, &bytes)
+    publish_journal(note, &path, &bytes, publication, |current| {
+        let previous: SectionNormalizationJournal = serde_json::from_slice(current)
+            .map_err(|error| CliError::Corrupt(format!("invalid transaction journal: {error}")))?;
+        validate_section_normalization_journal(&previous)
+    }, || {
+        let (doc, ledger) = verify_journal_completion(note, &journal.normalized, &journal.events)?;
+        crate::normalize::verify_journal_completion(note, journal, &doc, &ledger)
+    })
 }
 
 fn validate_section_normalization_journal(journal: &SectionNormalizationJournal) -> Result<()> {
@@ -1315,6 +1386,14 @@ pub fn ledger_bad_lines(path: &Path) -> Result<usize> {
 
 /// Read the bounded migration journal, if one exists.
 pub fn read_migration_journal(note: &NoteStore) -> Result<Option<MigrationJournal>> {
+    read_migration_journal_record(note)
+        .map(|record| record.map(|(journal, _)| journal))
+}
+
+/// Read a validated journal together with its exact planning preimage.
+pub(crate) fn read_migration_journal_record(
+    note: &NoteStore,
+) -> Result<Option<(MigrationJournal, Vec<u8>)>> {
     validate_sidecar_layout_for_write(note)?;
     let path = migration_journal_path(note);
     let Some(file) = open_regular_for_read(&path, "migration journal")? else {
@@ -1337,17 +1416,39 @@ pub fn read_migration_journal(note: &NoteStore) -> Result<Option<MigrationJourna
         ))
     })?;
     validate_migration_journal(&journal)?;
-    Ok(Some(journal))
+    Ok(Some((journal, bytes)))
 }
 
 /// Atomically and durably write a validated migration journal.
 pub fn write_migration_journal(note: &NoteStore, journal: &MigrationJournal) -> Result<()> {
+    persist_migration_journal(note, journal, JournalPublication::Owned)
+}
+
+/// Claim one pending transaction against the exact journal observed during planning.
+pub(crate) fn claim_migration_journal(
+    note: &NoteStore,
+    journal: &MigrationJournal,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    persist_migration_journal(note, journal, JournalPublication::Claim(expected))
+}
+
+fn persist_migration_journal(
+    note: &NoteStore,
+    journal: &MigrationJournal,
+    publication: JournalPublication<'_>,
+) -> Result<()> {
     note.invalidate_references()?;
     let bytes = encode_migration_journal(journal)?;
-    ensure_sidecar(note)?;
     let path = migration_journal_path(note);
-    validate_regular_file_or_missing(&path, "migration journal")?;
-    fsutil::atomic_write(&path, &bytes)
+    publish_journal(note, &path, &bytes, publication, |current| {
+        let previous: MigrationJournal = serde_json::from_slice(current)
+            .map_err(|error| CliError::Corrupt(format!("invalid transaction journal: {error}")))?;
+        validate_migration_journal(&previous)
+    }, || {
+        let (doc, ledger) = verify_journal_completion(note, &journal.migrated, &journal.events)?;
+        crate::engine::verify_migration_completion(note, journal, &doc, &ledger)
+    })
 }
 
 fn encode_migration_journal(journal: &MigrationJournal) -> Result<Vec<u8>> {
@@ -1476,35 +1577,7 @@ fn encode_event_batch(events: &[Event]) -> Result<String> {
 }
 
 fn append_encoded_events(note: &NoteStore, lines: &str) -> Result<()> {
-    ensure_sidecar(note)?;
-    let path = ledger_path(note);
-    validate_regular_file_or_missing(&path, "ledger")?;
-    let mut options = fs::OpenOptions::new();
-    options
-        .create(true)
-        .read(true)
-        .write(true)
-        // O_APPEND makes the final single-buffer write land at the then-current
-        // end even when a non-cooperating host writes between seek and write.
-        .append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
-    let mut file = options
-        .open(&path)
-        .map_err(io_ctx(path.display().to_string()))?;
-    if !file
-        .metadata()
-        .map_err(io_ctx(path.display().to_string()))?
-        .file_type()
-        .is_file()
-    {
-        return Err(CliError::Corrupt(format!(
-            "ledger is not a regular file: {}",
-            path.display()
-        )));
-    }
-    file.lock().map_err(io_ctx(path.display().to_string()))?;
-    let write_result = (|| {
+    with_locked_ledger(note, |file, path| {
         let len = file
             .metadata()
             .map_err(io_ctx(path.display().to_string()))?
@@ -1544,10 +1617,208 @@ fn append_encoded_events(note: &NoteStore, lines: &str) -> Result<()> {
             .map_err(io_ctx(path.display().to_string()))?;
         file.sync_all()
             .map_err(io_ctx(path.display().to_string()))?;
-        fsutil::sync_parent(&path)
+        fsutil::sync_parent(path)
+    })
+}
+
+/// Native appenders and journal publishers share the existing append-only ledger lock.
+/// Other hosts must honor the documented writer-quiescence requirement; portable
+/// guarded replacement cannot exclude a non-cooperating compare-to-rename race.
+fn with_locked_ledger(
+    note: &NoteStore,
+    write: impl FnOnce(&mut fs::File, &Path) -> Result<()>,
+) -> Result<()> {
+    ensure_sidecar(note)?;
+    let path = ledger_path(note);
+    validate_regular_file_or_missing(&path, "ledger")?;
+    let mut options = fs::OpenOptions::new();
+    options
+        .create(true)
+        .read(true)
+        .write(true)
+        // O_APPEND makes the final single-buffer write land at the then-current
+        // end even when a non-cooperating host writes between seek and write.
+        .append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    let mut file = options
+        .open(&path)
+        .map_err(io_ctx(path.display().to_string()))?;
+    if !file
+        .metadata()
+        .map_err(io_ctx(path.display().to_string()))?
+        .file_type()
+        .is_file()
+    {
+        return Err(CliError::Corrupt(format!(
+            "ledger is not a regular file: {}",
+            path.display()
+        )));
+    }
+    file.lock().map_err(io_ctx(path.display().to_string()))?;
+    let write_result = (|| {
+        // The file lock may block while another host changes the store route.
+        preflight_note_record(note)?;
+        write(&mut file, &path)
     })();
     let unlock_result = file.unlock().map_err(io_ctx(path.display().to_string()));
     write_result.and(unlock_result)
+}
+
+#[derive(Clone, Copy)]
+enum JournalPublication<'a> {
+    Claim(Option<&'a [u8]>),
+    Owned,
+}
+
+/// Recheck the exact bytes observed while planning before the producer's first effect.
+pub(crate) fn preflight_journal_claim(
+    note: &NoteStore,
+    path: &Path,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    preflight_note_record(note)?;
+    let current = read_bounded_file(path, MAX_LEDGER_BYTES, "transaction journal")?;
+    validate_journal_claim(current.as_deref(), expected)
+}
+
+/// Publish a claimed pending payload, or complete a matching pending payload
+/// after verifying its effects. Same-state replay preserves the existing bytes,
+/// including event and embedded manifest representations.
+fn publish_journal(
+    note: &NoteStore,
+    path: &Path,
+    bytes: &[u8],
+    publication: JournalPublication<'_>,
+    validate_current: impl Fn(&[u8]) -> Result<()>,
+    verify_complete: impl Fn() -> Result<()>,
+) -> Result<()> {
+    let next: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid journal publication: {error}")))?;
+    preflight_note_record(note)?;
+    let current = read_bounded_file(path, MAX_LEDGER_BYTES, "transaction journal")?;
+    if let Some(bytes) = current.as_deref() { validate_current(bytes)?; }
+    if !journal_publication_needed(current.as_deref(), &next, publication)? {
+        return Ok(());
+    }
+    with_locked_ledger(note, |_, _| {
+        let current = read_bounded_file(path, MAX_LEDGER_BYTES, "transaction journal")?;
+        if let Some(bytes) = current.as_deref() { validate_current(bytes)?; }
+        if !journal_publication_needed(current.as_deref(), &next, publication)? {
+            return Ok(());
+        }
+        if matches!(publication, JournalPublication::Owned) && journal_status(&next)? == "complete" {
+            verify_complete()?;
+        }
+        match current {
+            Some(expected) => fsutil::atomic_write_if_unchanged(path, &expected, bytes)?,
+            None => publish_immutable(path, bytes)?,
+        }
+        if read_bounded_file(path, MAX_LEDGER_BYTES, "transaction journal")?.as_deref()
+            != Some(bytes)
+        {
+            return Err(CliError::Corrupt(
+                "transaction journal changed during publication; current bytes were preserved".to_string(),
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Completion postconditions are observed only while the caller owns the ledger lock.
+/// No writer, append, snapshot, or nested ledger-lock acquisition is allowed here.
+fn verify_journal_completion(
+    note: &NoteStore,
+    postimage: &str,
+    events: &[Event],
+) -> Result<(String, LedgerRead)> {
+    let expected = read_object(note, postimage)?.ok_or_else(|| {
+        CliError::Corrupt("journal completion postimage is missing".to_string())
+    })?;
+    let current = read_bounded_file(&note.note, MAX_OBJECT_BYTES, "live note")?.ok_or_else(|| {
+        CliError::Corrupt("journal completion live note is missing".to_string())
+    })?;
+    if current.as_slice() != expected.as_bytes()
+        || mica_core::note_id_impl(&expected).map_err(store_error)?.as_deref()
+            != Some(note.note_id.as_str())
+    {
+        return Err(CliError::Corrupt(
+            "journal completion source is not the bound postimage; the pending journal was preserved".to_string(),
+        ));
+    }
+    crate::engine::validate_unique_ids(&expected)?;
+    let ledger = read_ledger_report(note)?;
+    if ledger.bad_lines != 0 || !classify_event_batch_in(&ledger.events, events)?.missing.is_empty() {
+        return Err(CliError::Corrupt(
+            "journal completion events are not fully present in a valid ledger; the pending journal was preserved".to_string(),
+        ));
+    }
+    Ok((expected, ledger))
+}
+
+fn journal_publication_needed(
+    current: Option<&[u8]>,
+    next: &serde_json::Value,
+    publication: JournalPublication<'_>,
+) -> Result<bool> {
+    let next_status = journal_status(next)?;
+    if let JournalPublication::Claim(expected) = publication {
+        if next_status != "pending" {
+            return Err(CliError::Corrupt("a transaction claim must be pending".to_string()));
+        }
+        validate_journal_claim(current, expected)?;
+        return Ok(true);
+    }
+    let Some(bytes) = current else {
+        if next_status == "pending" { return Ok(true); }
+        return Err(CliError::Corrupt(
+            "cannot complete a transaction without its pending journal".to_string(),
+        ));
+    };
+    let mut previous: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid transaction journal: {error}")))?;
+    let previous_status = journal_status(&previous)?.to_string();
+    previous.as_object_mut().ok_or_else(|| CliError::Corrupt("transaction journal must be an object".to_string()))?
+        .insert("status".to_string(), serde_json::Value::String(next_status.to_string()));
+    if previous != *next {
+        return Err(CliError::Corrupt(
+            "journal publication belongs to a different transaction; the existing journal was preserved".to_string(),
+        ));
+    }
+    match (previous_status.as_str(), next_status) {
+        ("pending", "complete") => Ok(true),
+        ("pending", "pending") | ("complete", "complete") => Ok(false),
+        _ => Err(CliError::Corrupt(
+            "a completed transaction cannot be reopened; its journal was preserved".to_string(),
+        )),
+    }
+}
+
+fn validate_journal_claim(
+    current: Option<&[u8]>,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    if current != expected {
+        return Err(CliError::Corrupt(
+            "transaction journal changed after planning; the existing transaction was preserved".to_string(),
+        ));
+    }
+    let Some(bytes) = current else { return Ok(()); };
+    let previous: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid transaction journal: {error}")))?;
+    if journal_status(&previous)? != "complete" {
+        return Err(CliError::Corrupt(
+            "a pending transaction already owns this journal; resume it before starting another".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn journal_status(value: &serde_json::Value) -> Result<&str> {
+    match value.get("status").and_then(serde_json::Value::as_str) {
+        Some(status @ ("pending" | "complete")) => Ok(status),
+        _ => Err(CliError::Corrupt("invalid transaction journal status".to_string())),
+    }
 }
 
 pub(crate) fn preflight_object_write(note: &NoteStore, hash: &str, content: &str) -> Result<bool> {

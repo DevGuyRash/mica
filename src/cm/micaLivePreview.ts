@@ -843,7 +843,7 @@ function sourceBlockDock(plugin: MicaPlugin): Extension {
 					);
 					if (!this.actionEnabled("history")) history.remove();
 					history.disabled = !block.id || !(info?.file instanceof TFile);
-					if (history.disabled) history.title = "Version history requires a stable block id.";
+					if (history.disabled) history.title = "Version history requires a stable block ID.";
 					const count = history.createSpan({ cls: "mica-source-dock-count", text: "…" });
 					if (block.id && info)
 						history.addEventListener("contextmenu", (event) => {
