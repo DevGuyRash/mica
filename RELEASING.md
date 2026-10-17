@@ -211,14 +211,28 @@ are separate from the three Obsidian runtime attachments.
 
 WHEN publication finishes THEN you SHALL download the three release attachments
 and compare their bytes and SHA-256 hashes with the reviewed candidate; verify
-the tag target and public release access. A workflow artifact upload is not a
-GitHub Release attachment. Record build, publication, installation, activation
-and directory review separately.
+the tag target and public release access. Use supported `gh release verify` and
+`gh release verify-asset` commands and retain their actual reports. A workflow
+artifact upload is not a GitHub Release attachment.
 
+An exact branch preview does not verify the future release's attachments or
+attestations. GitHub's immutable `release/v0.2` attestations bind the tag, commit
+and asset digests; they do not establish SLSA workflow build provenance. Keep
+unverified build-provenance claims explicit.
 
-WHEN the release assets exist THEN you SHALL install those assets, rather than a
-development symlink, into a clean vault and smoke-test block creation, tabs,
-grids, editing, the versions timeline, restore, and the CLI against that vault.
+WHEN installing or activating an update THEN you SHALL first require the
+published version's completed full Obsidian release review with zero errors and
+every warning fixed or justified by a reviewed necessity, plus passing release
+and asset integrity checks.
+
+WHEN these gates pass THEN, within the user's authorized scope, install verified
+assets rather than a development symlink into a clean vault and smoke-test block
+creation, tabs, grids, editing, the versions timeline, restore, and the CLI.
+
+WHEN GitHub and Obsidian verification disagree THEN you SHALL preserve both
+reports, release protections and published assets and stop affected delivery
+pending diagnosis. Never fabricate provenance or weaken checks to force agreement.
+Record build, publication, installation, activation and directory review separately.
 
 ## 6. Submit and observe
 
@@ -247,9 +261,9 @@ and human review. Submission does not establish acceptance or installability.
 WHEN the community release becomes installable THEN you SHALL repeat the clean
 vault smoke test using the community-installed copy.
 
-IF a release check fails after publication THEN you SHALL preserve the failed
-artifacts and evidence, publish a corrected version, and SHALL NOT replace assets
-under an existing tag.
+IF diagnosis requires source or asset changes after publication THEN you SHALL
+preserve the original artifacts and evidence and publish a corrected version;
+you SHALL NOT replace assets under an existing tag.
 
 ## Official references
 

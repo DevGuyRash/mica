@@ -606,9 +606,19 @@ WHEN preparing a plugin update THEN you SHALL follow `RELEASING.md`: synchronize
 package, manifest, Rust workspace/lockfile and version mappings on `review`,
 clear its exact-SHA preview gate, merge the reviewed candidate into `main`, and
 publish its exact version tag with matching runtime attachments. Verify
-downloaded release bytes. A completed plugin delivery is a verified GitHub
-Release.
-Repository pushes and workflow artifacts have their own completion state.
+downloaded release bytes. A completed publication is a verified GitHub Release.
+Repository pushes, installation, activation and directory review have separate
+completion states.
+
+An exact branch preview does not verify future release assets or attestations.
+WHEN installing or activating an update THEN you SHALL verify the release and
+downloaded assets with supported `gh release` verification and require the
+published version's completed Obsidian full release review with zero errors and
+reviewed warning dispositions. Immutable `release/v0.2` attestations bind the
+tag, commit and assets; SLSA workflow build provenance remains separate evidence.
+WHEN GitHub and Obsidian disagree THEN you SHALL preserve both reports,
+protections and published assets and stop affected delivery pending diagnosis.
+Never fabricate provenance or weaken checks.
 
 WHEN shipping through the GitOps workflow THEN you SHALL use its scripts for
 sync, inventory, staged sensitive-data scanning, signed Conventional Commit
