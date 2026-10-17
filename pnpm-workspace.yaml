@@ -12,6 +12,7 @@ allowBuilds:
 # request vulnerable transitive versions; the patched overrides preserve their
 # consumed APIs and support this repo's Node 22 floor.
 overrides:
+    "@codemirror/language": 6.12.4
     "@codemirror/state": 6.5.0
     "@codemirror/view": 6.38.6
     brace-expansion@1: 1.1.16
