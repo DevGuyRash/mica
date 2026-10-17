@@ -3,7 +3,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Top-level CLI: `mica [--vault DIR] [--json] <command>`.
+/// Top-level CLI: `mica [--vault DIR] [--store-dir FOLDER] [--json] <command>`.
 #[derive(Parser, Debug)]
 #[command(
     name = "mica",
@@ -14,9 +14,12 @@ use std::path::PathBuf;
                   Version addressing: a stable checkpoint id, unambiguous hash, label, or visible vN (v1 = oldest)."
 )]
 pub struct Cli {
-    /// Vault root (default: walk up from the note / cwd to a `.obsidian` folder)
+    /// Vault root; plain directories are valid (default: nearest `mica.json`, `mica-data/root.json`, or `.obsidian`)
     #[arg(long, global = true, value_name = "DIR")]
     pub vault: Option<PathBuf>,
+    /// Vault-relative store folder; must agree with `mica.json` (default: configured folder or `mica-data`)
+    #[arg(long, global = true, value_name = "FOLDER")]
+    pub store_dir: Option<String>,
     /// Machine-readable JSON output
     #[arg(long, global = true)]
     pub json: bool,
@@ -228,9 +231,9 @@ pub enum Cmd {
         /// Note path
         note: String,
     },
-    /// Reconcile sidecars ↔ notes across the vault (rehome renamed notes)
+    /// Reconcile central history records and refresh renamed-note path hints
     Repair,
-    /// Vault/sidecar health report (missing objects, orphans, parse errors)
+    /// Central-store health report (missing objects, orphan records, parse errors)
     Doctor,
 }
 

@@ -1,5 +1,7 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 import { initCore, scanBlocksView } from "./wasm/bridge";
+import { installStoreLifecycle, isLiveNote } from "./storage/store";
+import { initializeStorageLocation, requestStorageFolder } from "./storage/location";
 import { installQuickEditGlobalListeners, setEditorBehavior } from "./ui/quickEdit";
 import { registerViewPrefsPersistence, setEditorViewPrefs, setSaveShortcut } from "./ui/mdEditor";
 import { bumpConfigEpoch, micaRefreshEffect } from "./cm/micaLivePreview";
@@ -38,6 +40,14 @@ export default class MicaPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await initCore();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
+		try { await initializeStorageLocation(this); }
+		catch (error) {
+			new Notice(error instanceof Error ? error.message : "Mica: storage startup failed");
+			throw error;
+		}
+		this.register(installStoreLifecycle(this.app.vault, async () => {
+			await Promise.all([this.engine?.settled(), this.api?.settled()]);
+		}));
 		const customConfig = normalizeCustomToolConfig(this.settings.customTools ?? [], this.settings.toolbarLayout);
 		const sectionActionConfig = normalizeHiddenSectionActions(this.settings.hiddenSectionActions);
 		const dockActionLayout = normalizeDockActionLayout(this.settings.dockActionLayout);
@@ -108,7 +118,8 @@ export default class MicaPlugin extends Plugin {
 		this.addCommand({
 			id: "insert-block",
 			name: "Insert block (tabs) here",
-			editorCallback: (editor) => {
+			editorCallback: (editor, context) => {
+				if (context.file && !isLiveNote(context.file)) { new Notice("Mica: choose a live note outside history storage"); return; }
 				const cur = editor.getCursor();
 				editor.replaceRange(`\n${createBlockSource({ body: "tab: New tab\n\n" })}`, cur);
 				editor.setCursor({ line: cur.line + 3, ch: 0 });
@@ -117,7 +128,8 @@ export default class MicaPlugin extends Plugin {
 		this.addCommand({
 			id: "wrap-selection",
 			name: "Wrap selection in a block",
-			editorCallback: (editor) => {
+			editorCallback: (editor, context) => {
+				if (context.file && !isLiveNote(context.file)) { new Notice("Mica: choose a live note outside history storage"); return; }
 				const sel = editor.getSelection();
 				if (!sel.trim()) {
 					new Notice("Select the Markdown to wrap first.");
@@ -177,6 +189,7 @@ export default class MicaPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		this.api?.dispose();
 		this.engine?.dispose();
 		delete (window as unknown as { mica?: MicaApi }).mica;
 		const b = document.body;
@@ -197,6 +210,10 @@ export default class MicaPlugin extends Plugin {
 		]) {
 			b.style.removeProperty(k);
 		}
+	}
+
+	changeStorageFolder(draft: string): Promise<void> {
+		return requestStorageFolder(this, draft);
 	}
 
 	async saveSettings(): Promise<void> {
@@ -302,7 +319,7 @@ export default class MicaPlugin extends Plugin {
 
 	private async prepareActiveNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
-		if (!file) return;
+		if (!file || !isLiveNote(file)) return;
 		try {
 			await ensureNoteId(this, file);
 			await ensureBlockIds(this, file);
@@ -314,7 +331,7 @@ export default class MicaPlugin extends Plugin {
 
 	private async snapshotActiveNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
-		if (!file) return;
+		if (!file || !isLiveNote(file)) return;
 		try {
 			const result = await this.engine.snapshot(file, true);
 			new Notice(
@@ -329,7 +346,7 @@ export default class MicaPlugin extends Plugin {
 
 	private async diffActiveBlock(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
-		if (!file) return;
+		if (!file || !isLiveNote(file)) return;
 		const blocks = scanBlocksView(await this.app.vault.read(file));
 		const counts = new Map<string, number>();
 		for (const candidate of blocks) {
@@ -382,7 +399,7 @@ export default class MicaPlugin extends Plugin {
 
 	private async migrateActive(dryRun: boolean): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
-		if (!file) return;
+		if (!file || !isLiveNote(file)) return;
 		try {
 			const report = await migrateFile(this, file, dryRun);
 			if (!report) {

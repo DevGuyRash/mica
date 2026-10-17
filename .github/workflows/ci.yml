@@ -45,7 +45,11 @@ jobs:
             - name: Audit Rust dependencies
               run: cargo deny check advisories
 
-            # Tier 1+gate: format, typecheck, lint, Rust unit/regression tests.
+            # The storage fallback checks use this candidate's generated core.
+            - name: Build
+              run: pnpm run build
+
+            # Format, typecheck, lint, Rust unit/regression tests and storage checks.
             - name: Check
               run: pnpm run check
             - name: Version identity stress corpus
@@ -57,9 +61,7 @@ jobs:
             - name: CLI build
               run: cargo build --release -p mica-cli --locked
 
-            # Tier 2: build the WASM core + bundle, then boundary smoke in Node.
-            - name: Build
-              run: pnpm run build
+            # Verify the built assets and their WASM boundary in Node.
             - name: Verify release assets
               run: pnpm run check:release:assets
             - name: Smoke

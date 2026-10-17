@@ -1,6 +1,6 @@
 # Mica — Active State
 
-- WHEN preparing the public release THEN you SHALL complete the physical Android/iOS, real two-device Obsidian Sync, clean-vault artifact install, canonical public-repository, and community-submission gates in `RELEASING.md`.
+- WHEN preparing the next public release THEN you SHALL complete the physical Android/iOS, real two-device Obsidian Sync and clean-vault artifact-install gates in `RELEASING.md`. The public repository and initial Community submission are established.
 - The v0.2 rebuild still needs daily-driver use in a real vault; focus on editor feel, pointer drag/drop, folds, the versions timeline, and grid boundary controls.
 - The external 46-file legacy migration corpus and sustained 13k-line/60-fps performance claim still need recorded evidence; the PRD marks both as unverified.
 - WHEN bumping the externalized CodeMirror/Lezer packages THEN you SHALL run a live-Obsidian highlighting check; TypeScript remains pinned to `~5.9` until its ESLint toolchain supports the next major.
@@ -25,3 +25,16 @@
   there is no repair command; deciding whether to offer one is open, since it
   would rewrite stored history.
 - The Jul 2026 `brace-expansion` OOM advisory remains in WDIO/ESLint's dev-only transitive graph: v5 fixes the issue but is export-incompatible with their pinned `minimatch` branches. Production dependencies audit clean; remove this risk when those tools accept the patched major.
+
+- Central storage format 1 has passed focused isolated qualification on
+  `67400e3`: plugin WASM/production JavaScript and native CLI builds, TypeScript
+  checking, 27 plugin storage/guard scenarios, seven native history/routing/
+  recovery scenarios, decoded asset/privacy/notice review and core export/version
+  integrity. Dependencies were relinked offline from the frozen lockfile. These
+  results do not establish full-suite, real-Obsidian, mobile, Sync/concurrency or
+  cross-host qualification. The integrated review candidate still needs its
+  fresh exact-SHA official preview, staged artifact installation and the owner's
+  independently backed-up one-off Kingdom transfer with history/restore checks.
+  Retain all old state until cutover and recovery verification complete; no
+  automatic conversion or object GC exists. Existing fallback and E2E fixture
+  adapters are updated for central identities/shared objects but remain unrun.

@@ -3,6 +3,7 @@
 use crate::commands::Ctx;
 use crate::error::{io_ctx, CliError, Result};
 use crate::{engine, fsutil, sidecar, vault};
+use crate::sidecar::NoteStore;
 use mica_core::ops::{normalize_section_impl, SectionNormalization};
 use mica_core::{
     content_signature_impl, hash_content_impl, migrate_tabs_impl, new_id_impl, parse_block_impl,
@@ -25,11 +26,14 @@ struct TabBody {
 
 struct NotePlan {
     note: vault::NoteRef,
+    store: NoteStore,
+    source_preimage: String,
     original: String,
     consolidated: String,
     ledger_preimage: Vec<Event>,
     objects: BTreeMap<String, String>,
     journal: sidecar::TabConsolidationJournal,
+    manifest_source_preimage: Option<Vec<u8>>,
     manifest_original: Option<Vec<u8>>,
     manifest_consolidated: Vec<u8>,
     source_blocks: usize,
@@ -437,11 +441,11 @@ fn current_titles(spans: &[BlockSpan], note_path: &str) -> Result<Vec<String>> {
     Ok(titles)
 }
 
-fn legacy_titles(note: &vault::NoteRef, count: usize) -> Result<Option<Vec<String>>> {
-    let Some(journal) = sidecar::read_migration_journal(&note.abs)? else {
+fn legacy_titles(note: &vault::NoteRef, store: &NoteStore, count: usize) -> Result<Option<Vec<String>>> {
+    let Some(journal) = sidecar::read_migration_journal(store)? else {
         return Ok(None);
     };
-    let Some(original) = sidecar::read_object(&note.abs, &journal.original)? else {
+    let Some(original) = sidecar::read_object(store, &journal.original)? else {
         return Err(CliError::Corrupt(format!(
             "legacy migration original object {} is missing for {}",
             journal.original,
@@ -465,8 +469,8 @@ fn legacy_titles(note: &vault::NoteRef, count: usize) -> Result<Option<Vec<Strin
     Ok(Some(titles))
 }
 
-fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
-    if let Some(journal) = sidecar::read_section_normalization_journal(&note.abs)? {
+fn plan_note(note: &vault::NoteRef, store: NoteStore, source_preimage: String, original: String, history: bool) -> Result<Option<NotePlan>> {
+    if let Some(journal) = sidecar::read_section_normalization_journal(&store)? {
         if journal.status != "complete" {
             return Err(CliError::Corrupt(format!(
                 "section normalization is still pending for {} — resume it before consolidating tabs",
@@ -474,7 +478,7 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
             )));
         }
     }
-    if let Some(journal) = sidecar::read_migration_journal(&note.abs)? {
+    if let Some(journal) = sidecar::read_migration_journal(&store)? {
         if journal.status != "complete" {
             return Err(CliError::Corrupt(format!(
                 "legacy migration is still pending for {} — resume it before consolidating tabs",
@@ -482,11 +486,10 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
             )));
         }
     }
-    if sidecar::read_tab_consolidation_journal(&note.abs)?.is_some() {
+    if sidecar::read_tab_consolidation_journal(&store)?.is_some() {
         return Ok(None);
     }
 
-    let original = engine::read_doc(&note.abs)?;
     let spans = prompt_spans(&original)?;
     if spans.is_empty() {
         return Ok(None);
@@ -509,7 +512,7 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
         source_ids.push(id.to_string());
     }
     let titles =
-        legacy_titles(note, spans.len())?.unwrap_or(current_titles(&spans, &note.vault_rel())?);
+        legacy_titles(note, &store, spans.len())?.unwrap_or(current_titles(&spans, &note.vault_rel())?);
     validate_titles(&titles, note)?;
 
     let mut tabs = Vec::with_capacity(spans.len());
@@ -543,7 +546,7 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
     };
     engine::validate_unique_ids(&consolidated)?;
 
-    let ledger_read = sidecar::read_ledger_report(&note.abs)?;
+    let ledger_read = sidecar::read_ledger_report(&store)?;
     if ledger_read.bad_lines != 0 {
         return Err(CliError::Corrupt(format!(
             "the ledger for {} contains invalid lines — repair it before consolidating",
@@ -588,7 +591,7 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
                     &version.hash,
                     || {
                         let raw =
-                            sidecar::read_object(&note.abs, &version.hash)?.ok_or_else(|| {
+                            sidecar::read_object(&store, &version.hash)?.ok_or_else(|| {
                                 CliError::Corrupt(format!(
                                     "effective source object {} for checkpoint {} is missing in {}",
                                     version.hash,
@@ -652,7 +655,7 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
     if history && spans.len() == 1 && !identity_history {
         let mutation_ts = next_timestamp(&ledger)?;
         for candidate in &candidates {
-            if candidate.source_effective_hash == candidate.target_hash {
+            if sidecar::resolve_note_hash(&store, &candidate.source_effective_hash)? == candidate.target_hash {
                 continue;
             }
             let target_event = consolidated_event_id("replace", &candidate.source_event);
@@ -825,8 +828,12 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
         .entry(consolidated_hash.clone())
         .or_insert_with(|| consolidated.clone());
 
-    let manifest_path = sidecar::sidecar_dir(&note.abs).join("manifest.json");
-    let manifest_original = read_optional_regular(&manifest_path)?;
+    let manifest_path = sidecar::sidecar_dir(&store).join("manifest.json");
+    let manifest_source_preimage = read_optional_regular(&manifest_path)?;
+    let manifest_original = Some(match &manifest_source_preimage {
+        Some(bytes) => bytes.clone(),
+        None => sidecar::initial_manifest_bytes(&store)?,
+    });
     let manifest_original_text = manifest_original
         .as_deref()
         .map(std::str::from_utf8)
@@ -850,7 +857,7 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
         })
         .collect();
     let manifest_consolidated = sidecar::manifest_bytes(
-        engine::frontmatter_mica_id(&consolidated).as_deref(),
+        Some(store.note_id.as_str()),
         &note.vault_rel(),
         &manifest_blocks,
         head_ts,
@@ -880,28 +887,32 @@ fn plan_note(note: &vault::NoteRef, history: bool) -> Result<Option<NotePlan>> {
     };
     preflight_plan(
         note,
-        &original,
+        &store,
+        &source_preimage,
         &ledger,
         &objects,
         &journal,
-        manifest_original.as_deref(),
+        manifest_source_preimage.as_deref(),
         &manifest_consolidated,
     )?;
     let planned_writes = objects
         .iter()
         .filter_map(|(hash, content)| {
-            sidecar::preflight_object_write(&note.abs, hash, content)
+            sidecar::preflight_object_write(&store, hash, content)
                 .ok()
                 .filter(|needs_write| *needs_write)
         })
         .count();
     Ok(Some(NotePlan {
         note: note.clone(),
+        store,
+        source_preimage,
         original,
         consolidated,
         ledger_preimage: ledger,
         objects,
         journal,
+        manifest_source_preimage,
         manifest_original,
         manifest_consolidated,
         source_blocks: spans.len(),
@@ -1039,6 +1050,7 @@ fn read_optional_regular(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
 
 fn preflight_plan(
     note: &vault::NoteRef,
+    store: &NoteStore,
     original: &str,
     ledger: &[Event],
     objects: &BTreeMap<String, String>,
@@ -1046,24 +1058,25 @@ fn preflight_plan(
     manifest_original: Option<&[u8]>,
     manifest_consolidated: &[u8],
 ) -> Result<()> {
+    sidecar::preflight_note_record(store)?;
     if engine::read_doc(&note.abs)? != original {
         return Err(CliError::BadArgs(format!(
             "note changed during tab-consolidation planning: {}",
             note.vault_rel()
         )));
     }
-    if sidecar::read_ledger(&note.abs)? != ledger {
+    if sidecar::read_ledger(store)? != ledger {
         return Err(CliError::BadArgs(format!(
             "ledger changed during tab-consolidation planning: {}",
             note.vault_rel()
         )));
     }
     for (hash, content) in objects {
-        sidecar::preflight_object_write(&note.abs, hash, content)?;
+        sidecar::preflight_object_write(store, hash, content)?;
     }
-    sidecar::preflight_tab_consolidation_journal(&note.abs, journal)?;
-    sidecar::preflight_event_append(&note.abs, &journal.events)?;
-    let manifest_path = sidecar::sidecar_dir(&note.abs).join("manifest.json");
+    sidecar::preflight_tab_consolidation_journal(store, journal)?;
+    sidecar::preflight_event_append(store, &journal.events)?;
+    let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
     if read_optional_regular(&manifest_path)?.as_deref() != manifest_original {
         return Err(CliError::BadArgs(format!(
             "manifest changed during tab-consolidation planning: {}",
@@ -1156,7 +1169,8 @@ pub fn consolidate_tabs(
     history: bool,
     dry_run: bool,
 ) -> Result<ConsolidateReport> {
-    let scope = vault::resolve_note_scope(path, ctx.vault.as_deref())?;
+    let scope = vault::resolve_note_scope_at(path, ctx.vault.as_deref(), ctx.store_dir.as_deref())?;
+    if dry_run { scope.store.require_ready()?; }
     let mut report = ConsolidateReport {
         path: path.to_string(),
         history,
@@ -1177,9 +1191,11 @@ pub fn consolidate_tabs(
     let mut plans = Vec::new();
     let mut pending = Vec::new();
     for note in &scope.notes {
-        match sidecar::read_tab_consolidation_journal(&note.abs) {
+        let source_preimage = engine::read_doc(&note.abs)?;
+        let (original, store) = engine::plan_history_store(note, &source_preimage, dry_run)?;
+        match sidecar::read_tab_consolidation_journal(&store) {
             Ok(Some(journal)) if journal.status == "complete" => {
-                match verify_completed(note, &journal) {
+                match verify_completed(&store, &journal) {
                     Ok(()) => {
                         accumulate_journal(&mut report, &journal);
                         report.already_consolidated += 1;
@@ -1194,9 +1210,9 @@ pub fn consolidate_tabs(
             }
             Ok(Some(journal)) => {
                 accumulate_journal(&mut report, &journal);
-                pending.push((note.clone(), journal));
+                pending.push((store, journal));
             }
-            Ok(None) => match plan_note(note, history) {
+            Ok(None) => match plan_note(note, store, source_preimage, original, history) {
                 Ok(Some(plan)) => {
                     accumulate_plan(&mut report, &plan);
                     plans.push(plan);
@@ -1220,8 +1236,8 @@ pub fn consolidate_tabs(
     if !report.conflicts.is_empty() || dry_run {
         return Ok(report);
     }
-    for (note, journal) in pending {
-        resume_pending(&note, &journal)?;
+    for (store, journal) in pending {
+        resume_pending(&store, &journal)?;
     }
     for plan in &plans {
         publish_plan(plan)?;
@@ -1321,108 +1337,162 @@ fn accumulate_journal(report: &mut ConsolidateReport, journal: &sidecar::TabCons
 }
 
 fn publish_plan(plan: &NotePlan) -> Result<()> {
-    if engine::read_doc(&plan.note.abs)? != plan.original
-        || sidecar::read_ledger(&plan.note.abs)? != plan.ledger_preimage
+    if engine::read_doc(&plan.note.abs)? != plan.source_preimage
+        || sidecar::read_ledger(&plan.store)? != plan.ledger_preimage
     {
         return Err(CliError::BadArgs(format!(
             "tab-consolidation plan became stale for {} — rerun against the latest note and ledger",
             plan.note.vault_rel()
         )));
     }
-    let manifest_path = sidecar::sidecar_dir(&plan.note.abs).join("manifest.json");
-    if read_optional_regular(&manifest_path)? != plan.manifest_original {
+    let manifest_path = sidecar::sidecar_dir(&plan.store).join("manifest.json");
+    if read_optional_regular(&manifest_path)? != plan.manifest_source_preimage {
         return Err(CliError::BadArgs(format!(
             "tab-consolidation plan became stale because the manifest changed for {}",
             plan.note.vault_rel()
         )));
     }
-    for (hash, content) in &plan.objects {
-        sidecar::write_object(&plan.note.abs, hash, content)?;
-        if sidecar::read_object(&plan.note.abs, hash)?.as_deref() != Some(content) {
-            return Err(CliError::Corrupt(format!(
-                "could not verify planned object {hash} for {}",
-                plan.note.vault_rel()
-            )));
-        }
+    engine::validate_journal_generations(&plan.store, &plan.original, &plan.consolidated)?;
+    engine::preflight_journal_events(&plan.store, &plan.journal.events)?;
+    sidecar::validate_manifest_bytes(&plan.store, &plan.manifest_consolidated)?;
+    engine::validate_note_identity(&plan.note, &plan.original)?;
+    sidecar::preflight_journal_claim(
+        &plan.store,
+        &sidecar::tab_consolidation_journal_path(&plan.store),
+        None,
+    )?;
+    plan.store.root.claim_location()?;
+    sidecar::preflight_note_record(&plan.store)?;
+    if plan.source_preimage != plan.original {
+        fsutil::atomic_write_if_unchanged(&plan.note.abs, plan.source_preimage.as_bytes(), plan.original.as_bytes())?;
     }
-    sidecar::write_tab_consolidation_journal(&plan.note.abs, &plan.journal)?;
+    engine::guard_note_store(&plan.note, &plan.store, &plan.original)?;
+    sidecar::ensure_note_record(&plan.store)?;
+    if read_optional_regular(&manifest_path)? != plan.manifest_original {
+        return Err(CliError::Corrupt("initialized manifest does not match the planned exact preimage".to_string()));
+    }
+    for (hash, content) in &plan.objects {
+        sidecar::write_object(&plan.store, hash, content)?;
+        sidecar::verify_written_object(&plan.store, hash, content)?;
+    }
+    sidecar::claim_tab_consolidation_journal(&plan.store, &plan.journal, None)?;
     if plan.original != plan.consolidated {
+        engine::guard_note_store(&plan.note, &plan.store, &plan.original)?;
         fsutil::atomic_write_if_unchanged(
             &plan.note.abs,
             plan.original.as_bytes(),
             plan.consolidated.as_bytes(),
         )?;
     }
-    append_missing_events(&plan.note.abs, &plan.journal.events)?;
+    append_missing_events(&plan.store, &plan.journal.events)?;
     publish_manifest(
+        &plan.store,
         &manifest_path,
         plan.manifest_original.as_deref(),
         &plan.manifest_consolidated,
     )?;
-    verify_pending_result(&plan.note, &plan.journal)?;
+    verify_pending_result(&plan.store, &plan.journal)?;
     let mut completed = plan.journal.clone();
     completed.status = "complete".to_string();
-    sidecar::write_tab_consolidation_journal(&plan.note.abs, &completed)
+    sidecar::write_tab_consolidation_journal(&plan.store, &completed)
 }
 
-fn resume_pending(note: &vault::NoteRef, journal: &sidecar::TabConsolidationJournal) -> Result<()> {
-    let original = sidecar::read_object(&note.abs, &journal.original)?.ok_or_else(|| {
+fn resume_pending(store: &NoteStore, journal: &sidecar::TabConsolidationJournal) -> Result<()> {
+    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
+    let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
         CliError::Corrupt(format!(
             "pending tab-consolidation preimage {} is missing",
             journal.original
         ))
     })?;
     let consolidated =
-        sidecar::read_object(&note.abs, &journal.consolidated)?.ok_or_else(|| {
+        sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
             CliError::Corrupt(format!(
                 "pending tab-consolidation result {} is missing",
                 journal.consolidated
             ))
         })?;
+    engine::validate_journal_generations(store, &original, &consolidated)?;
+    engine::preflight_journal_events(store, &journal.events)?;
+    let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
+    let _manifest_state = manifest_publication_state(
+        store,
+        &manifest_path,
+        journal.manifest_original.as_deref().map(str::as_bytes),
+        journal.manifest_consolidated.as_bytes(),
+    )?;
     let current = engine::read_doc(&note.abs)?;
-    if current == original && original != consolidated {
-        fsutil::atomic_write_if_unchanged(&note.abs, original.as_bytes(), consolidated.as_bytes())?;
-    } else if current != consolidated {
+    if current != original && current != consolidated {
         return Err(CliError::Corrupt(format!(
             "pending tab-consolidation note diverged from both journaled generations: {}",
             note.vault_rel()
         )));
     }
-    append_missing_events(&note.abs, &journal.events)?;
-    let manifest_path = sidecar::sidecar_dir(&note.abs).join("manifest.json");
+    store.root.claim_location()?;
+    engine::guard_note_store(&note, store, &current)?;
+    if current == original && original != consolidated {
+        fsutil::atomic_write_if_unchanged(&note.abs, original.as_bytes(), consolidated.as_bytes())?;
+    }
+    append_missing_events(store, &journal.events)?;
+    let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
     publish_manifest(
+        store,
         &manifest_path,
         journal.manifest_original.as_deref().map(str::as_bytes),
         journal.manifest_consolidated.as_bytes(),
     )?;
-    verify_pending_result(note, journal)?;
+    verify_pending_result(store, journal)?;
     let mut completed = journal.clone();
     completed.status = "complete".to_string();
-    sidecar::write_tab_consolidation_journal(&note.abs, &completed)
+    sidecar::write_tab_consolidation_journal(store, &completed)
 }
 
-fn publish_manifest(
+fn manifest_publication_state(
+    store: &NoteStore,
     path: &std::path::Path,
     original: Option<&[u8]>,
     consolidated: &[u8],
-) -> Result<()> {
+) -> Result<(Option<Vec<u8>>, bool)> {
+    sidecar::preflight_note_record(store)?;
+    sidecar::validate_manifest_bytes(store, consolidated)?;
     let current = read_optional_regular(path)?;
-    if current.as_deref() == Some(consolidated) {
-        return Ok(());
+    if let Some(bytes) = current.as_deref() {
+        if bytes == consolidated || sidecar::manifest_matches_except_hint(store, bytes, consolidated)? {
+            return Ok((current, true));
+        }
     }
-    if current.as_deref() != original {
+    let matches_original = match (current.as_deref(), original) {
+        (Some(bytes), Some(expected)) => bytes == expected || sidecar::manifest_matches_except_hint(store, bytes, expected)?,
+        (None, None) => true,
+        _ => false,
+    };
+    if !matches_original {
         return Err(CliError::Corrupt(format!(
             "manifest diverged from both tab-consolidation generations: {}",
             path.display()
         )));
     }
-    match original {
+    Ok((current, false))
+}
+
+fn publish_manifest(
+    store: &NoteStore,
+    path: &std::path::Path,
+    original: Option<&[u8]>,
+    consolidated: &[u8],
+) -> Result<()> {
+    let (current, already_published) = manifest_publication_state(store, path, original, consolidated)?;
+    if already_published { return Ok(()); }
+    store.root.claim_location()?;
+    sidecar::preflight_note_record(store)?;
+    match current.as_deref() {
         Some(bytes) => fsutil::atomic_write_if_unchanged(path, bytes, consolidated),
         None => fsutil::atomic_write(path, consolidated),
     }
 }
 
-fn append_missing_events(note: &std::path::Path, events: &[Event]) -> Result<()> {
+fn append_missing_events(note: &NoteStore, events: &[Event]) -> Result<()> {
+    engine::preflight_journal_events(note, events)?;
     let status = sidecar::classify_event_batch(note, events)?;
     sidecar::append_events(note, &status.missing)?;
     if sidecar::classify_event_batch(note, events)?
@@ -1433,29 +1503,40 @@ fn append_missing_events(note: &std::path::Path, events: &[Event]) -> Result<()>
     } else {
         Err(CliError::Corrupt(format!(
             "tab-consolidation events could not be verified for {} — rerun to resume",
-            note.display()
+            note.note.display()
         )))
     }
 }
 
 fn verify_pending_result(
-    note: &vault::NoteRef,
+    store: &NoteStore,
     journal: &sidecar::TabConsolidationJournal,
 ) -> Result<()> {
+    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
     let consolidated =
-        sidecar::read_object(&note.abs, &journal.consolidated)?.ok_or_else(|| {
+        sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
             CliError::Corrupt(format!(
                 "tab-consolidation result object {} is missing",
                 journal.consolidated
             ))
         })?;
-    if engine::read_doc(&note.abs)? != consolidated {
+    // An offline cutover may have prepared a previously unanchored note.
+    // Compare that one shared, guarded source insertion in memory; immutable
+    // objects and historical journal bytes retain their original addresses.
+    let expected_source = match mica_core::note_id_impl(&consolidated)
+        .map_err(|error| CliError::Corrupt(error.to_string()))? {
+        Some(id) if id == store.note_id => consolidated.clone(),
+        None if journal.status == "complete" => mica_core::set_note_id_impl(&consolidated, None, &store.note_id)
+            .map_err(|error| CliError::Corrupt(error.to_string()))?,
+        _ => return Err(CliError::Corrupt("consolidated source identity conflicts with its note record".to_string())),
+    };
+    if engine::read_doc(&note.abs)? != expected_source {
         return Err(CliError::Corrupt(format!(
             "live note does not equal the journaled tab-consolidation result for {}",
             note.vault_rel()
         )));
     }
-    let events = sidecar::read_ledger(&note.abs)?;
+    let events = sidecar::read_ledger(store)?;
     let resolution = resolve_ledger_impl(&events).map_err(|error| {
         CliError::Corrupt(format!(
             "tab-consolidation ledger verification failed for {}: {error}",
@@ -1480,16 +1561,21 @@ fn verify_pending_result(
             )
         })?;
     let live_hash = hash_content_impl(block_body(&doc, &target));
-    if state.head.as_deref() != Some(live_hash.as_str()) {
+    let head_hash = state.head.as_deref().map(|hash| sidecar::resolve_note_hash(store, hash)).transpose()?;
+    if head_hash.as_deref() != Some(live_hash.as_str()) {
         return Err(CliError::Corrupt(format!(
             "target head does not equal the live tabbed body for {}",
             note.vault_rel()
         )));
     }
-    let manifest_path = sidecar::sidecar_dir(&note.abs).join("manifest.json");
-    if read_optional_regular(&manifest_path)?.as_deref()
-        != Some(journal.manifest_consolidated.as_bytes())
-    {
+    let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
+    let manifest = read_optional_regular(&manifest_path)?;
+    let manifest_matches = match manifest.as_deref() {
+        Some(bytes) => bytes == journal.manifest_consolidated.as_bytes()
+            || sidecar::manifest_matches_except_hint(store, bytes, journal.manifest_consolidated.as_bytes())?,
+        None => false,
+    };
+    if !manifest_matches {
         return Err(CliError::Corrupt(format!(
             "manifest does not equal the journaled tab-consolidation result for {}",
             note.vault_rel()
@@ -1502,8 +1588,8 @@ fn verify_pending_result(
         ));
     }
     for mapping in &journal.versions {
-        if sidecar::read_object(&note.abs, &mapping.source_hash)?.is_none()
-            || sidecar::read_object(&note.abs, &mapping.target_hash)?.is_none()
+        if sidecar::read_object(store, &mapping.source_hash)?.is_none()
+            || sidecar::read_object(store, &mapping.target_hash)?.is_none()
         {
             return Err(CliError::Corrupt(format!(
                 "mapped source or target version object is missing for event {}",
@@ -1515,17 +1601,17 @@ fn verify_pending_result(
 }
 
 fn verify_completed(
-    note: &vault::NoteRef,
+    store: &NoteStore,
     journal: &sidecar::TabConsolidationJournal,
 ) -> Result<()> {
-    verify_pending_result(note, journal)
+    verify_pending_result(store, journal)
 }
 
 pub(crate) fn inspect_completed_journal(
-    note: &vault::NoteRef,
+    store: &NoteStore,
     journal: &sidecar::TabConsolidationJournal,
 ) -> Result<()> {
-    verify_completed(note, journal)
+    verify_completed(store, journal)
 }
 
 #[cfg(test)]
@@ -1535,6 +1621,15 @@ mod tests {
     use super::*;
     use crate::output::Style;
 
+    fn test_store(path: &std::path::Path) -> NoteStore {
+        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault"), store: None };
+        let source = engine::read_doc(path).expect("fixture source");
+        let prepared = mica_core::note_id_impl(&source).expect("fixture identity")
+            .map(|_| source.clone()).unwrap_or_else(|| mica_core::set_note_id_impl(&source, None, &format!("fixture-{}", hash_content_impl(&path.to_string_lossy()))).expect("fixture anchor"));
+        if prepared != source { std::fs::write(path, &prepared).expect("stamp fixture identity"); }
+        engine::require_store(&note, &prepared).expect("fixture handle")
+    }
+
     fn fixture(doc: &str) -> (tempfile::TempDir, Ctx, std::path::PathBuf) {
         let directory = tempfile::tempdir().expect("temporary vault");
         std::fs::create_dir(directory.path().join(".obsidian")).expect("vault marker");
@@ -1542,6 +1637,7 @@ mod tests {
         std::fs::write(&note, doc).expect("seed note");
         let ctx = Ctx {
             vault: Some(directory.path().to_path_buf()),
+            store_dir: None,
             json: true,
             style: Style::forced(false),
         };
@@ -1703,7 +1799,7 @@ mod tests {
         let body = block_body(&published, &spans[0]);
         assert!(body.contains("tab: First\n"));
         assert!(body.contains("tab: Second\n"));
-        let journal = sidecar::read_tab_consolidation_journal(&note)
+        let journal = sidecar::read_tab_consolidation_journal(&test_store(&note))
             .expect("read journal")
             .expect("journal exists");
         assert_eq!(journal.status, "complete");
@@ -1726,10 +1822,10 @@ mod tests {
         let second = ":::section\nold two\n:::\n";
         let first_hash = hash_content_impl(first);
         let second_hash = hash_content_impl(second);
-        sidecar::write_object(&note, &first_hash, first).expect("first object");
-        sidecar::write_object(&note, &second_hash, second).expect("second object");
+        sidecar::write_object(&test_store(&note), &first_hash, first).expect("first object");
+        sidecar::write_object(&test_store(&note), &second_hash, second).expect("second object");
         sidecar::append_events(
-            &note,
+            &test_store(&note),
             &[
                 Event::AddVersion {
                     eid: "source-a".to_string(),
@@ -1754,12 +1850,12 @@ mod tests {
         .expect("source ledger");
 
         consolidate_tabs(&ctx, "Note.md", true, false).expect("history consolidation");
-        let journal = sidecar::read_tab_consolidation_journal(&note)
+        let journal = sidecar::read_tab_consolidation_journal(&test_store(&note))
             .expect("journal read")
             .expect("journal exists");
         assert_eq!(journal.versions.len(), 2);
         let resolution =
-            resolve_ledger_impl(&sidecar::read_ledger(&note).expect("ledger")).expect("fold");
+            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger")).expect("fold");
         let target = resolution
             .blocks
             .get(&journal.target_block)
@@ -1789,10 +1885,10 @@ mod tests {
         let edited = ":::section\nedited\n:::\n";
         let old_hash = hash_content_impl(old);
         let edited_hash = hash_content_impl(edited);
-        sidecar::write_object(&note, &old_hash, old).expect("old object");
-        sidecar::write_object(&note, &edited_hash, edited).expect("edited object");
+        sidecar::write_object(&test_store(&note), &old_hash, old).expect("old object");
+        sidecar::write_object(&test_store(&note), &edited_hash, edited).expect("edited object");
         sidecar::append_events(
-            &note,
+            &test_store(&note),
             &[
                 Event::Checkpoint {
                     eid: "a-v1".to_string(),
@@ -1837,7 +1933,7 @@ mod tests {
         .expect("identity source ledger");
 
         consolidate_tabs(&ctx, "Note.md", true, false).expect("identity history consolidation");
-        let journal = sidecar::read_tab_consolidation_journal(&note)
+        let journal = sidecar::read_tab_consolidation_journal(&test_store(&note))
             .expect("journal read")
             .expect("journal exists");
         assert_eq!(journal.versions.len(), 2);
@@ -1846,7 +1942,7 @@ mod tests {
             .iter()
             .all(|event| !matches!(event, Event::AddVersion { .. })));
         let resolution =
-            resolve_ledger_impl(&sidecar::read_ledger(&note).expect("ledger")).expect("fold");
+            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger")).expect("fold");
         let target = resolution
             .blocks
             .get(&journal.target_block)
@@ -1881,9 +1977,9 @@ mod tests {
             ":::\n",
         );
         let historical_hash = hash_content_impl(historical);
-        sidecar::write_object(&note, &historical_hash, historical).expect("history object");
+        sidecar::write_object(&test_store(&note), &historical_hash, historical).expect("history object");
         sidecar::append_events(
-            &note,
+            &test_store(&note),
             &[Event::AddVersion {
                 eid: "source-only".to_string(),
                 ts: 10,
@@ -1900,7 +1996,7 @@ mod tests {
         let published = std::fs::read_to_string(&note).expect("published note");
         assert_eq!(prompt_spans(&published).expect("spans").len(), 1);
         assert!(published.contains(":::\n> [!example]- Live Example"));
-        let journal = sidecar::read_tab_consolidation_journal(&note)
+        let journal = sidecar::read_tab_consolidation_journal(&test_store(&note))
             .expect("journal read")
             .expect("journal exists");
         assert_eq!(journal.target_block, "a");
@@ -1908,9 +2004,9 @@ mod tests {
             |event| matches!(event, Event::ReplaceVersion { target, .. } if target == "source-only")
         ));
         let resolution =
-            resolve_ledger_impl(&sidecar::read_ledger(&note).expect("ledger")).expect("fold");
+            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger")).expect("fold");
         let historical_effective = &resolution.blocks["a"].versions[0].hash;
-        let effective = sidecar::read_object(&note, historical_effective)
+        let effective = sidecar::read_object(&test_store(&note), historical_effective)
             .expect("read effective")
             .expect("effective exists");
         assert!(effective.contains(":::\n```json"));

@@ -58,12 +58,16 @@ WHEN changing TypeScript, CSS, WASM boundaries, persistence, editing, or UI
 behavior THEN you SHALL run:
 
 ```sh
+pnpm run build
 pnpm run check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
-pnpm run build
 pnpm run e2e
 ```
+
+The aggregate `check` includes the storage fallback fixture and therefore
+requires WASM generated from the same current source. A clean checkout must
+build first; do not substitute another candidate's generated artifacts.
 
 WHEN claiming release readiness THEN you SHALL additionally run:
 
@@ -196,6 +200,25 @@ its delimiters from the payload so nested fences cannot terminate it.
 
 All note files, Mica blocks, sidecars, ledgers, migration journals, clipboard
 payloads, and bridge messages are untrusted at their boundary.
+
+WHEN resolving central storage THEN you SHALL use the portable vault-root
+`mica.json` as the routing authority and the shared Rust policy for paths.
+Plugin preferences SHALL follow the active route, and `--store-dir` SHALL agree
+with it. Root selection SHALL work for plain directories independently of Git;
+pending or inconsistent routing SHALL fail closed.
+
+WHEN initializing central storage THEN you SHALL record the chosen store UUID
+and `initializing:true` in the locator before creating directories. Recovery
+SHALL resume only that recorded intent with an absent or empty directory or
+the exact UUID marker, reject unknown contents, and clear the flag through an
+exact locator guard. An active null-UUID route SHALL NOT adopt existing storage.
+
+WHEN relocating central storage THEN you SHALL perform the guarded whole-folder
+move at startup with CLI/watch writers stopped, before engine, bridge, or
+identity-index work starts. Publish a pending route before the move, preserve
+the store UUID and every history file's bytes, and activate only a verified
+destination. Recovery SHALL preserve conflicting copies. Legacy sidecar
+conversion remains outside this location-change operation.
 
 WHEN an operation can write user data THEN you SHALL validate every
 precondition before its first persistent side effect. Ambiguous identity,
