@@ -2,7 +2,8 @@ import * as path from "node:path";
 
 type E2eProfile = "default" | "minimum" | "mobile" | "desktop-latest";
 
-const VERIFIED_APP_VERSION = "1.12.7";
+// Minimum-version qualification target; a target is not evidence of a completed run.
+const MINIMUM_APP_VERSION = "1.13.0";
 const VERIFIED_INSTALLER_VERSION = "1.5.8";
 
 const requestedProfile = process.env.MICA_E2E_PROFILE ?? "default";
@@ -18,7 +19,7 @@ function capabilityFor(selected: E2eProfile): WebdriverIO.Capabilities {
 	const mobile = selected === "mobile";
 	return {
 		browserName: "obsidian",
-		browserVersion: latest ? "latest" : VERIFIED_APP_VERSION,
+		browserVersion: latest ? "latest" : MINIMUM_APP_VERSION,
 		"wdio:obsidianOptions": {
 			...(mobile ? { emulateMobile: true } : {}),
 			installerVersion: latest ? "latest" : VERIFIED_INSTALLER_VERSION,

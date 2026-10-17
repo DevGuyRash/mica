@@ -74,7 +74,7 @@ assert.deepEqual(
 );
 
 const escapedMinVersion = manifest.minAppVersion.replaceAll(".", "\\.");
-assert.match(wdio, new RegExp(`VERIFIED_APP_VERSION = "${escapedMinVersion}"`));
+assert.match(wdio, new RegExp(`MINIMUM_APP_VERSION = "${escapedMinVersion}"`));
 assert.match(wdio, /VERIFIED_INSTALLER_VERSION = "1\.5\.8"/);
 assert.match(wdio, /selected === "desktop-latest"/);
 assert.match(compatibility, /profile: desktop-latest/);

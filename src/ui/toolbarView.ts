@@ -551,9 +551,9 @@ function buildTablePicker(panel: HTMLElement, getView: () => EditorView, close: 
 
 	// Custom dimensions for anything past the hover grid.
 	const custom = panel.createDiv({ cls: "mica-pop-row mica-table-custom" });
-	const rows = custom.createEl("input", { attr: { type: "number", min: "1", max: "50", placeholder: "rows" } });
+	const rows = custom.createEl("input", { attr: { type: "number", min: "1", max: "50", placeholder: "Rows" } });
 	custom.createSpan({ text: "×" });
-	const cols = custom.createEl("input", { attr: { type: "number", min: "1", max: "20", placeholder: "cols" } });
+	const cols = custom.createEl("input", { attr: { type: "number", min: "1", max: "20", placeholder: "Columns" } });
 	const go = custom.createEl("button", { cls: "mod-cta", text: "Insert", attr: { type: "button" } });
 	const insertCustom = (): void => {
 		verbs.insertTable(getView(), Number(rows.value) || 2, Number(cols.value) || 2);

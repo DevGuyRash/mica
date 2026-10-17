@@ -1,3 +1,4 @@
+// Source-owned types in bindings.d.ts keep this boundary typed before WASM generation.
 import init, {
 	apply_op,
 	apply_op_text,

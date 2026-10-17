@@ -181,8 +181,11 @@ export function openQuickEdit(region: HTMLElement, ctx: RenderCtx, target: Regio
 	// raw source, killing this editor as it opens. Mounting after the menu
 	// has fully closed leaves the final focus (and selection) with us.
 	region.addClass("is-editing"); // reserve now — a double click must not stack two mounts
+	region.removeClass("has-empty-invitation");
+	ctx.syncCellEditorState?.(region);
 	window.setTimeout(() => {
 		region.removeClass("is-editing");
+		ctx.syncCellEditorState?.(region);
 		if (!region.isConnected) return; // the block re-rendered meanwhile
 		// A native caret parked in this region (a trusted click plants one in
 		// chrome even past preventDefault) would be RELOCATED by the mount's
@@ -199,6 +202,8 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 	region.empty();
 	region.removeClass("is-editable");
 	region.addClass("is-editing");
+	region.removeClass("has-empty-invitation");
+	ctx.syncCellEditorState?.(region);
 
 	const key = draftKey(target);
 	const setDraft = (text: string | null): void => {
@@ -276,6 +281,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		document.removeEventListener("mica-editor-prefs-change", updateLineButton);
 		editor.destroy();
 		region.removeClass("is-editing");
+		ctx.syncCellEditorState?.(region);
 		ctx.repaintRegion?.(region, target);
 		openLightboxFor(ctx, target, value);
 	};
@@ -331,6 +337,7 @@ function openQuickEditNow(region: HTMLElement, ctx: RenderCtx, target: RegionTar
 		document.removeEventListener("mica-editor-prefs-change", updateLineButton);
 		editor.destroy();
 		region.removeClass("is-editing");
+		ctx.syncCellEditorState?.(region);
 		if (region.isConnected) ctx.repaintRegion?.(region, target);
 	};
 	const preserveDraft = (value: string): void => setDraft(value === target.original ? null : value);

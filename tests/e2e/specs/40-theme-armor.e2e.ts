@@ -115,7 +115,7 @@ describe("embedded editor under a hostile theme", function () {
 			{ timeout: 8000, timeoutMsg: "cell editor never opened" },
 		);
 		const m = await browser.executeObsidian(() => {
-			const cell = document.querySelector(".mica-lp .mica-cell:has(.mica-mdeditor)") as HTMLElement;
+			const cell = document.querySelector(".mica-lp .mica-cell.has-region-editor") as HTMLElement;
 			const ed = cell.querySelector(".mica-mdeditor") as HTMLElement;
 			const root = ed.shadowRoot;
 			if (!root)

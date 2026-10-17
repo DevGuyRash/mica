@@ -121,6 +121,8 @@ export class VersionLabelModal extends Modal {
 	private error: HTMLElement | null = null;
 	private saving = false;
 	private closed = false;
+	private focusFrame: number | null = null;
+	private focusFrameWindow: Window | null = null;
 
 	constructor(private readonly options: VersionLabelOptions) {
 		super(options.app);
@@ -146,7 +148,12 @@ export class VersionLabelModal extends Modal {
 				void this.save();
 			}
 		});
-		requestAnimationFrame(() => {
+		this.cancelFocusFrame();
+		this.focusFrameWindow = this.contentEl.win;
+		this.focusFrame = this.focusFrameWindow.requestAnimationFrame(() => {
+			this.focusFrame = null;
+			this.focusFrameWindow = null;
+			if (this.closed) return;
 			this.input?.focus();
 			this.input?.select();
 		});
@@ -178,8 +185,15 @@ export class VersionLabelModal extends Modal {
 		}
 	}
 
+	private cancelFocusFrame(): void {
+		if (this.focusFrame !== null) this.focusFrameWindow?.cancelAnimationFrame(this.focusFrame);
+		this.focusFrame = null;
+		this.focusFrameWindow = null;
+	}
+
 	onClose(): void {
 		this.closed = true;
+		this.cancelFocusFrame();
 		this.input = null;
 		this.error = null;
 		this.contentEl.empty();

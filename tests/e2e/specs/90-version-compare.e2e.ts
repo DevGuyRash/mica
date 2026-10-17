@@ -888,7 +888,7 @@ describe("version history comparison", function () {
 				id,
 			);
 			await openVersionMenu(await versionIdByLabel("v1"));
-			await clickLatestMenuItem("Reset HEAD here");
+			await clickLatestMenuItem("Reset head here");
 			await browser.waitUntil(
 				() =>
 					browser.executeObsidian(

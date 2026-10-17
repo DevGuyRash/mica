@@ -11,7 +11,7 @@ interface SearchRequest {
 	regex: boolean;
 	flags: string;
 	matchCase: boolean;
-	global: boolean;
+	allMatches: boolean;
 	replacement?: string;
 	target?: number;
 }
@@ -24,11 +24,12 @@ type SearchResponse =
 /** Full-lightbox find/replace. Matching is O(document + matches) off-thread;
  * compact UTF-16 pairs provide exact counts and instant navigation. */
 export class LightboxSearch {
+	private readonly ownerWindow: Window;
 	private readonly input: HTMLInputElement;
 	private readonly replacement: HTMLInputElement;
 	private readonly regex: HTMLInputElement;
 	private readonly matchCase: HTMLInputElement;
-	private readonly global: HTMLInputElement;
+	private readonly allMatches: HTMLInputElement;
 	private readonly multiline: HTMLInputElement;
 	private readonly dotAll: HTMLInputElement;
 	private readonly flags: HTMLInputElement;
@@ -55,6 +56,7 @@ export class LightboxSearch {
 		private readonly editor: MdEditor,
 		private readonly onVisibilityChange?: (open: boolean) => void,
 	) {
+		this.ownerWindow = host.win;
 		host.addClass("mica-find-ribbon");
 		host.hidden = true;
 		const findRow = host.createDiv({ cls: "mica-find-row" });
@@ -73,8 +75,8 @@ export class LightboxSearch {
 		this.matchCase = caseLabel.createEl("input", { attr: { type: "checkbox" } });
 		caseLabel.createSpan({ text: "Match case" });
 		const globalLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
-		this.global = globalLabel.createEl("input", { attr: { type: "checkbox" } });
-		this.global.checked = true;
+		this.allMatches = globalLabel.createEl("input", { attr: { type: "checkbox" } });
+		this.allMatches.checked = true;
 		globalLabel.createSpan({ text: "Global" });
 		const multilineLabel = optionsRow.createEl("label", { cls: "mica-find-option" });
 		this.multiline = multilineLabel.createEl("input", { attr: { type: "checkbox" } });
@@ -89,7 +91,7 @@ export class LightboxSearch {
 			attr: {
 				type: "text",
 				value: "",
-				placeholder: "uvdy",
+				placeholder: "Flags: u, v, d, y",
 				spellcheck: "false",
 				"aria-label": "Other JavaScript regular expression flags",
 			},
@@ -140,9 +142,9 @@ export class LightboxSearch {
 		this.worker = this.createWorker();
 		for (const control of [this.input, this.replacement, this.flags])
 			control.addEventListener("input", () => this.invalidateAndSchedule());
-		for (const control of [this.matchCase, this.global, this.regex, this.multiline, this.dotAll])
+		for (const control of [this.matchCase, this.allMatches, this.regex, this.multiline, this.dotAll])
 			control.addEventListener("change", () => this.invalidateAndSchedule());
-		this.global.addEventListener("change", () => this.updateReplaceAllState());
+		this.allMatches.addEventListener("change", () => this.updateReplaceAllState());
 		this.regex.addEventListener("change", () => {
 			this.flagsWrap.hidden = !this.regex.checked;
 			multilineLabel.hidden = !this.regex.checked;
@@ -181,7 +183,7 @@ export class LightboxSearch {
 		// Do not push the editor's Obsidian keymap Scope while the Escape that
 		// closed search is still being dispatched. Otherwise the same keystroke
 		// can reach the editor's cancel binding and arm/confirm lightbox discard.
-		queueMicrotask(() => {
+		this.ownerWindow.queueMicrotask(() => {
 			if (!this.destroyed && this.host.isConnected && this.host.hidden) this.editor.focus();
 		});
 	}
@@ -195,8 +197,8 @@ export class LightboxSearch {
 	destroy(): void {
 		this.destroyed = true;
 		this.onVisibilityChange?.(false);
-		if (this.debounce !== null) window.clearTimeout(this.debounce);
-		if (this.timeout !== null) window.clearTimeout(this.timeout);
+		if (this.debounce !== null) this.ownerWindow.clearTimeout(this.debounce);
+		if (this.timeout !== null) this.ownerWindow.clearTimeout(this.timeout);
 		this.worker.terminate();
 		URL.revokeObjectURL(this.workerUrl);
 		this.clearResults();
@@ -209,8 +211,8 @@ export class LightboxSearch {
 	}
 
 	private schedule(delay = 120): void {
-		if (this.debounce !== null) window.clearTimeout(this.debounce);
-		this.debounce = window.setTimeout(() => {
+		if (this.debounce !== null) this.ownerWindow.clearTimeout(this.debounce);
+		this.debounce = this.ownerWindow.setTimeout(() => {
 			this.debounce = null;
 			this.scan();
 		}, delay);
@@ -244,14 +246,14 @@ export class LightboxSearch {
 			regex: this.regex.checked,
 			flags,
 			matchCase: this.matchCase.checked,
-			global: this.global.checked,
+			allMatches: this.allMatches.checked,
 			replacement: this.replacement.value,
 		});
 		this.status.setText("Searching…");
 	}
 
 	private runReplace(all: boolean): void {
-		if (all && !this.global.checked) return;
+		if (all && !this.allMatches.checked) return;
 		if (this.resultsGeneration !== this.generation || !this.ranges.length || (!all && this.current < 0)) return;
 		const flags = this.flagsForRequest();
 		if (flags === null) return;
@@ -264,7 +266,7 @@ export class LightboxSearch {
 			regex: this.regex.checked,
 			flags,
 			matchCase: this.matchCase.checked,
-			global: this.global.checked,
+			allMatches: this.allMatches.checked,
 			replacement: this.replacement.value,
 			target,
 		};
@@ -290,10 +292,10 @@ export class LightboxSearch {
 	}
 
 	private post(request: SearchRequest): void {
-		if (this.timeout !== null) window.clearTimeout(this.timeout);
+		if (this.timeout !== null) this.ownerWindow.clearTimeout(this.timeout);
 		this.activeRequest = request.id;
 		this.worker.postMessage(request);
-		this.timeout = window.setTimeout(() => {
+		this.timeout = this.ownerWindow.setTimeout(() => {
 			if (request.id !== this.activeRequest || this.destroyed) return;
 			this.worker.terminate();
 			this.worker = this.createWorker();
@@ -306,7 +308,7 @@ export class LightboxSearch {
 
 	private receive(response: SearchResponse): void {
 		if (response.id === this.activeRequest) {
-			if (this.timeout !== null) window.clearTimeout(this.timeout);
+			if (this.timeout !== null) this.ownerWindow.clearTimeout(this.timeout);
 			this.timeout = null;
 			this.activeRequest = -1;
 		}
@@ -330,7 +332,7 @@ export class LightboxSearch {
 		const count = this.ranges.length / 2;
 		if (!count) {
 			this.current = -1;
-			this.status.setText("0 matches");
+			this.status.setText("No matches");
 			this.editor.setSearchHighlights(this.ranges, -1);
 			this.updateReplaceAllState();
 			return;
@@ -402,10 +404,10 @@ export class LightboxSearch {
 
 	private updateReplaceAllState(): void {
 		this.replaceAll.disabled =
-			!this.global.checked || this.resultsGeneration !== this.generation || this.ranges.length === 0;
+			!this.allMatches.checked || this.resultsGeneration !== this.generation || this.ranges.length === 0;
 		this.replaceAll.setAttribute(
 			"aria-description",
-			this.global.checked ? "Replace every match" : "Enable Global to replace every match",
+			this.allMatches.checked ? "Replace every match" : "Enable Global to replace every match",
 		);
 	}
 

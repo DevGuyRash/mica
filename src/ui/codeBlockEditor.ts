@@ -54,7 +54,7 @@ export function openCodeBlockEditorFor(
 				cls: "mica-coedit-title mica-codeedit-info",
 				attr: {
 					type: "text",
-					placeholder: "e.g. markdown, md, javascript",
+					placeholder: "Language ID: markdown, md, javascript",
 					"aria-label": "Language / info (optional)",
 					spellcheck: "false",
 				},

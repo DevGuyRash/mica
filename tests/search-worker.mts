@@ -18,7 +18,7 @@ interface Request {
 	regex: boolean;
 	flags: string;
 	matchCase: boolean;
-	global?: boolean;
+	allMatches?: boolean;
 	replacement?: string;
 	target?: number;
 }
@@ -128,7 +128,7 @@ const preview = await run({
 	regex: true,
 	flags: "u",
 	matchCase: true,
-	global: true,
+	allMatches: true,
 	replacement: "<$<word>>-$&-$$",
 });
 assert.deepEqual(preview.replacements, ["<one>-one-$", "<one>-one-$"]);
@@ -142,7 +142,7 @@ const nonGlobal = await run({
 	regex: false,
 	flags: "",
 	matchCase: true,
-	global: false,
+	allMatches: false,
 	replacement: "ONE",
 });
 assert.deepEqual([...new Uint32Array(nonGlobal.ranges!)], [0, 3]);
@@ -156,7 +156,7 @@ const zeroWidthPreview = await run({
 	regex: true,
 	flags: "u",
 	matchCase: true,
-	global: true,
+	allMatches: true,
 	replacement: "x",
 });
 assert.deepEqual([...new Uint32Array(zeroWidthPreview.ranges!)], [0, 0, 2, 2]);
@@ -175,7 +175,7 @@ for (const [label, doc, expectedRanges, expectedText] of [
 		regex: true,
 		flags: "gu",
 		matchCase: true,
-		global: true,
+		allMatches: true,
 		replacement: "|",
 	});
 	assert.deepEqual([...new Uint32Array(scan.ranges!)], expectedRanges, `${label} scan offsets`);
@@ -192,7 +192,7 @@ const nonGlobalReplace = await run({
 	regex: false,
 	flags: "",
 	matchCase: true,
-	global: false,
+	allMatches: false,
 	replacement: "ONE",
 	target: -1,
 });

@@ -308,24 +308,8 @@ export class MicaSettingTab extends PluginSettingTab {
 		return this.settingGroups();
 	}
 
-	/** Compatibility fallback for Obsidian before 1.13. */
-	display(): void {
-		this.renderLegacySettings();
-	}
-
-	private renderLegacySettings(): void {
-		this.containerEl.empty();
-		for (const group of this.settingGroups()) {
-			new Setting(this.containerEl).setHeading().setName(group.heading);
-			for (const item of group.items) {
-				item.render(new Setting(this.containerEl).setName(item.name).setDesc(item.desc));
-			}
-		}
-	}
-
 	private refreshSettings(): void {
-		if (typeof this.update === "function") this.update();
-		else this.renderLegacySettings();
+		this.update();
 	}
 
 	/** The accent as a hex for the color picker: the user's override if set, else
@@ -344,8 +328,7 @@ export class MicaSettingTab extends PluginSettingTab {
 	}
 
 	/** Grouped by intent: Versioning, Comparing, Appearance, Migration. Knobs that
-	 * only matter when a toggle is on are hidden until then. Metadata is shared
-	 * with the legacy renderer; callbacks retain each setting’s lifecycle effects. */
+	 * only matter when a toggle is on are hidden until then. Callbacks retain each setting’s lifecycle effects. */
 	private settingGroups(): MicaSettingGroup[] {
 		const s = this.micaPlugin.settings;
 		const commit = (key: keyof MicaSettings): Promise<void> => commitSetting(this.micaPlugin, key);
@@ -1569,7 +1552,7 @@ class CustomToolModal extends Modal {
 		);
 		new Setting(contentEl)
 			.setName("Icon")
-			.setDesc("A Lucide icon name (lucide.dev), e.g. rocket, stamp, wand-2.")
+			.setDesc("Choose an icon from lucide.dev, such as rocket, stamp, or wand-2.")
 			.addText((t) =>
 				t.setValue(this.icon).onChange((v) => {
 					this.icon = v.trim();
