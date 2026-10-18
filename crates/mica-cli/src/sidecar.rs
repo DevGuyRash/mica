@@ -902,16 +902,16 @@ pub fn section_normalization_journal_path(note: &NoteStore) -> PathBuf {
 /// Return the identity-bound tab-consolidation transaction journal path.
 ///
 /// # Arguments
-/// * `note` - Markdown note path
+/// * `note` - Validated identity-bound note store
 ///
 /// # Returns
-/// `<Note>.mica/tab-consolidation.json`.
+/// `<store>/notes/<safe-note-key>/tab-consolidation.json`.
 ///
 /// # Panics
 /// None.
 ///
 /// # Examples
-/// ```
+/// ```no_run
 /// # let note: mica_cli::sidecar::NoteStore = todo!();
 /// let path = mica_cli::sidecar::tab_consolidation_journal_path(
 ///     &note,
@@ -3838,6 +3838,7 @@ mod tests {
         let note = fixture_store(tmp.path().join("N.md"));
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&outside).expect("outside directory");
+        note.root.ensure().expect("central parent directories");
         symlink(&outside, sidecar_dir(&note)).expect("sidecar symlink");
         let event = Event::SetHead {
             eid: "e".into(),

@@ -2375,14 +2375,23 @@ mod tests {
             vault: _directory.path().to_path_buf(),
             store: None,
         };
-
-        let inspection =
-            inspect_normalization_journal(&engine::require_store(&note_ref, &engine::read_doc(&note_ref.abs).expect("fixture source")).expect("fixture store"), None, &journal).expect("inspect journal");
+        let store = engine::require_store(&note_ref, &engine::read_doc(&note_ref.abs).expect("fixture source"))
+            .expect("fixture store");
+        // Historical completion is retained on disk before later replacements.
+        // Scoped reads must not grant access merely because an in-memory value names an object.
+        let journal_bytes = serde_json::to_vec_pretty(&journal).expect("retained historical journal");
+        let journal_path = sidecar::section_normalization_journal_path(&store);
+        std::fs::write(&journal_path, &journal_bytes).expect("seed retained completion evidence");
+        let ledger_path = sidecar::ledger_path(&store);
+        let ledger_bytes = std::fs::read(&ledger_path).expect("historical ledger");
+        let inspection = inspect_normalization_journal(&store, None, &journal).expect("inspect journal");
 
         assert!(
             inspection.conflicts.is_empty(),
             "{:?}",
             inspection.conflicts
         );
+        assert_eq!(std::fs::read(journal_path).expect("unchanged journal"), journal_bytes);
+        assert_eq!(std::fs::read(ledger_path).expect("unchanged ledger"), ledger_bytes);
     }
 }

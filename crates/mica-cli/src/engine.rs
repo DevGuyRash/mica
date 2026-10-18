@@ -1221,14 +1221,15 @@ mod tests {
     fn failed_post_publish_snapshot_rolls_back_exact_note_generation() {
         let (_dir, note) = note_fixture("```mica id=a\nnew\n```\n");
         let previous = fixture_source("```mica id=a\nold\n```\n");
+        let store = test_store(&note);
+        sidecar::ensure_note_record(&store).expect("initialize the operation's fixed store");
         let published = PublishedMutation {
-            store: test_store(&note),
+            store: store.clone(),
             doc: read_doc(&note.abs).expect("published note"),
             blocks: scan_impl(&read_doc(&note.abs).expect("fixture source")),
             previous: previous.clone(),
         };
-        sidecar::ensure_note_record(&test_store(&note)).expect("initialize fixture record");
-        std::fs::create_dir_all(sidecar::ledger_path(&test_store(&note))).expect("invalid ledger directory");
+        std::fs::create_dir_all(sidecar::ledger_path(&store)).expect("invalid ledger directory");
 
         assert!(snapshot_published(&note, &published, false).is_err());
         assert_eq!(read_doc(&note.abs).expect("rolled back note"), previous);

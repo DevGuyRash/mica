@@ -2005,14 +2005,14 @@ mod tests {
             store: None,
         };
         std::fs::write(&note.abs, with_note_frontmatter_id(current)).expect("seed note");
-        let original = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nold\n```\n";
-        let migrated = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nnew\n```\n";
+        let original = with_note_frontmatter_id("```mica id=block\nold\n```\n");
+        let migrated = with_note_frontmatter_id("```mica id=block\nnew\n```\n");
         let archive = "archived\n";
-        let original_hash = hash_content_impl(original);
-        let migrated_hash = hash_content_impl(migrated);
+        let original_hash = hash_content_impl(&original);
+        let migrated_hash = hash_content_impl(&migrated);
         let archive_hash = hash_content_impl(archive);
-        sidecar::write_object(&test_store(&note), &original_hash, original).expect("original object");
-        sidecar::write_object(&test_store(&note), &migrated_hash, migrated).expect("migrated object");
+        sidecar::write_object(&test_store(&note), &original_hash, &original).expect("original object");
+        sidecar::write_object(&test_store(&note), &migrated_hash, &migrated).expect("migrated object");
         sidecar::write_object(&test_store(&note), &archive_hash, archive).expect("archive object");
         let journal = sidecar::MigrationJournal {
             format: 1,
@@ -2078,8 +2078,8 @@ mod tests {
 
     #[test]
     fn migration_dry_run_does_not_resume_pending_journal() {
-        let original = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nold\n```\n";
-        let (_dir, note, _journal) = pending_migration_fixture(original);
+        let original = with_note_frontmatter_id("```mica id=block\nold\n```\n");
+        let (_dir, note, _journal) = pending_migration_fixture(&original);
         let ctx = Ctx {
             vault: Some(note.vault.clone()),
             store_dir: None,
@@ -2102,10 +2102,13 @@ mod tests {
     fn failed_migration_ledger_append_remains_recoverable() {
         use std::os::unix::fs::symlink;
 
-        let original = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nold\n```\n";
-        let (_dir, note, mut journal) = pending_migration_fixture(original);
+        let original = with_note_frontmatter_id("```mica id=block\nold\n```\n");
+        let (_dir, note, mut journal) = pending_migration_fixture(&original);
         let outside = note.vault.join("outside-ledger");
         std::fs::write(&outside, b"outside").expect("outside file");
+        let ledger = sidecar::ledger_path(&test_store(&note));
+        assert_eq!(std::fs::read(&ledger).expect("journal-owned ledger"), b"");
+        std::fs::remove_file(ledger).expect("replace the empty fixture ledger with a fault");
         symlink(&outside, sidecar::ledger_path(&test_store(&note))).expect("ledger symlink");
 
         assert!(matches!(
@@ -2116,12 +2119,22 @@ mod tests {
             .expect("read journal")
             .expect("journal");
         assert_eq!(pending.status, "pending");
-        assert!(sidecar::read_object(&test_store(&note), &pending.original)
-            .expect("read original")
-            .is_some());
+        assert!(matches!(
+            sidecar::read_object(&test_store(&note), &pending.original),
+            Err(CliError::Corrupt(_))
+        ));
+        sidecar::verify_written_object(&test_store(&note), &pending.original, &original)
+            .expect("original recovery bytes remain intact behind the rejected ledger");
+        assert_eq!(engine::read_doc(&note.abs).expect("preserved note"), original);
         assert_eq!(std::fs::read(&outside).expect("outside"), b"outside");
 
         std::fs::remove_file(sidecar::ledger_path(&test_store(&note))).expect("remove bad ledger");
+        assert_eq!(
+            sidecar::read_object(&test_store(&note), &pending.original)
+                .expect("read retained original after removing the fixture fault")
+                .as_deref(),
+            Some(original.as_str())
+        );
         resume_migration(&note, &test_store(&note), &mut journal).expect("retry migration");
         assert_eq!(
             sidecar::read_migration_journal(&test_store(&note))
