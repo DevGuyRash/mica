@@ -37,11 +37,11 @@ pub use parser::{parse_block_impl, serialize_impl, Cst, Node};
 pub use reconcile::{reconcile_impl, ContentRef, ReconcileAction, SidecarRef};
 pub use scanner::{scan_impl, scan_view_impl, BlockSpan, BlockView};
 pub use store::{
-    is_managed_path_at_impl, is_managed_path_impl, note_id_impl, note_paths_at_impl, note_paths_impl,
-    object_paths_at_impl, object_paths_impl, resolve_object_hash_impl, set_note_id_impl,
-    storage_layout_at_impl, storage_layout_impl, validate_store_folder_impl,
-    validate_store_location_impl, validate_store_marker_impl, NotePaths, ObjectPaths, StorageLayout,
-    StoreError, StoreLocation, StoreMarker, MAX_STORE_LOCATION_BYTES,
+    is_managed_path_at_impl, is_managed_path_impl, note_id_impl, note_paths_at_impl,
+    note_paths_impl, object_paths_at_impl, object_paths_impl, resolve_object_hash_impl,
+    set_note_id_impl, storage_layout_at_impl, storage_layout_impl, validate_store_folder_impl,
+    validate_store_location_impl, validate_store_marker_impl, NotePaths, ObjectPaths,
+    StorageLayout, StoreError, StoreLocation, StoreMarker, MAX_STORE_LOCATION_BYTES,
 };
 pub use versions::{
     content_signature_impl, fold_ledger_impl, has_content_impl, resolve_ledger_impl,
@@ -100,8 +100,7 @@ pub fn new_id() -> String {
 pub fn storage_layout(folder: Option<String>) -> Result<JsValue, JsValue> {
     let layout = storage_layout_at_impl(folder.as_deref())
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    serde_wasm_bindgen::to_value(&layout)
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    serde_wasm_bindgen::to_value(&layout).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Derive safe, identity-bound note paths relative to the vault root.
@@ -109,8 +108,7 @@ pub fn storage_layout(folder: Option<String>) -> Result<JsValue, JsValue> {
 pub fn note_paths(note_id: &str, folder: Option<String>) -> Result<JsValue, JsValue> {
     let paths = note_paths_at_impl(note_id, folder.as_deref())
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    serde_wasm_bindgen::to_value(&paths)
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    serde_wasm_bindgen::to_value(&paths).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Derive shared object paths from a complete canonical BLAKE3 address.
@@ -118,8 +116,7 @@ pub fn note_paths(note_id: &str, folder: Option<String>) -> Result<JsValue, JsVa
 pub fn object_paths(full_hash: &str, folder: Option<String>) -> Result<JsValue, JsValue> {
     let paths = object_paths_at_impl(full_hash, folder.as_deref())
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    serde_wasm_bindgen::to_value(&paths)
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    serde_wasm_bindgen::to_value(&paths).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Reserve the default and selected managed paths after host normalization.
@@ -143,11 +140,7 @@ pub fn note_id(source: &str) -> Result<Option<String>, JsValue> {
 
 /// Set a note identity under an exact expected-identity guard.
 #[wasm_bindgen]
-pub fn set_note_id(
-    source: &str,
-    expected: Option<String>,
-    id: &str,
-) -> Result<String, JsValue> {
+pub fn set_note_id(source: &str, expected: Option<String>, id: &str) -> Result<String, JsValue> {
     set_note_id_impl(source, expected.as_deref(), id)
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
@@ -159,8 +152,7 @@ pub fn validate_store_marker(marker: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let marker = validate_store_marker_impl(marker)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    serde_wasm_bindgen::to_value(&marker)
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    serde_wasm_bindgen::to_value(&marker).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Validate an already JSON-decoded portable location, rejecting unknown fields.
@@ -180,10 +172,10 @@ pub fn validate_store_location(location: JsValue) -> Result<JsValue, JsValue> {
 /// Resolve a legacy object address through note-scoped aliases only.
 #[wasm_bindgen]
 pub fn resolve_object_hash(hash: &str, aliases: JsValue) -> Result<String, JsValue> {
-    let aliases: std::collections::BTreeMap<String, String> = serde_wasm_bindgen::from_value(aliases)
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    resolve_object_hash_impl(hash, &aliases)
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    let aliases: std::collections::BTreeMap<String, String> =
+        serde_wasm_bindgen::from_value(aliases)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    resolve_object_hash_impl(hash, &aliases).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Locate every top-level ` ```mica ` block in a document. Returns `BlockSpan[]`.

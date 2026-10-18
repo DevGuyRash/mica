@@ -1,6 +1,15 @@
 import { debounce, TFile, TFolder, type Debouncer, type Vault } from "obsidian";
 import type MicaPlugin from "../main";
-import { assertLiveNoteCurrent, bindNoteStore, ensureNoteStore, isLiveNote, storeRoot, validateStoreRoot, type NoteStore, type StoreRoot } from "../storage/store";
+import {
+	assertLiveNoteCurrent,
+	bindNoteStore,
+	ensureNoteStore,
+	isLiveNote,
+	storeRoot,
+	validateStoreRoot,
+	type NoteStore,
+	type StoreRoot,
+} from "../storage/store";
 import {
 	contentSignature,
 	ensureIds,
@@ -103,7 +112,9 @@ export class VersionEngine {
 	private readonly root: StoreRoot;
 	private disposed = false;
 
-	constructor(private readonly plugin: MicaPlugin) { this.root = storeRoot(plugin.app.vault); }
+	constructor(private readonly plugin: MicaPlugin) {
+		this.root = storeRoot(plugin.app.vault);
+	}
 
 	/** Called on every note modify; ignores sidecar files and non-markdown. */
 	handleModify(file: TFile): void {
@@ -139,7 +150,8 @@ export class VersionEngine {
 				const guardPublication = await this.notePublicationGuard(file);
 				doc = await vault.process(file, (current) => {
 					guardPublication();
-					if (noteId(current) !== expectedId) throw new Error("Mica: note identity changed before block IDs could be prepared");
+					if (noteId(current) !== expectedId)
+						throw new Error("Mica: note identity changed before block IDs could be prepared");
 					return ensureIds(current);
 				});
 				blocks = scanBlocksView(doc);
@@ -238,7 +250,7 @@ export class VersionEngine {
 		const existing = this.operationStores.get(file);
 		if (existing && (source === undefined || noteId(source) === existing.noteId)) return existing;
 		const root = this.root;
-		const store = await bindNoteStore(root, file, source ?? await root.vault.read(file));
+		const store = await bindNoteStore(root, file, source ?? (await root.vault.read(file)));
 		if (store) this.operationStores.set(file, store);
 		return store;
 	}
@@ -383,7 +395,11 @@ export class VersionEngine {
 			await validateStoreRoot(this.root);
 			assertLiveNoteCurrent(this.root, file, path);
 			this.operationStores.delete(file);
-			try { return await task(); } finally { this.operationStores.delete(file); }
+			try {
+				return await task();
+			} finally {
+				this.operationStores.delete(file);
+			}
 		});
 		// The queue tail must settle so one rejected task cannot poison later work,
 		// but callers receive `operation`, which retains the original rejection.
@@ -435,7 +451,8 @@ export class VersionEngine {
 				const guardPublication = await this.notePublicationGuard(file);
 				doc = await vault.process(file, (current) => {
 					guardPublication();
-					if (noteId(current) !== expectedId) throw new Error("Mica: note identity changed before block IDs could be prepared");
+					if (noteId(current) !== expectedId)
+						throw new Error("Mica: note identity changed before block IDs could be prepared");
 					return ensureIds(current);
 				});
 				blocks = scanBlocksView(doc);
@@ -459,7 +476,9 @@ export class VersionEngine {
 				this.requireUniqueSnapshotIds(blocks);
 				if (blocks.some((block) => block.id && block.closed)) {
 					const existingStore = await this.lookupStore(file, doc);
-					const state: Record<string, BlockState> = existingStore ? foldLedger(await readLedger(existingStore)) : {};
+					const state: Record<string, BlockState> = existingStore
+						? foldLedger(await readLedger(existingStore))
+						: {};
 					const scannedSource = doc;
 					for (const block of blocks) {
 						const id = block.id;
@@ -470,11 +489,15 @@ export class VersionEngine {
 						const blockState = state[id];
 						const head = blockState?.rawHead ?? blockState?.head ?? null;
 						const alias = head ? existingStore?.aliases[head] : undefined;
-						if (head && resolveObjectHash(head, alias === undefined ? {} : { [head]: alias }) === hash) continue;
+						if (head && resolveObjectHash(head, alias === undefined ? {} : { [head]: alias }) === hash)
+							continue;
 						if (!force && !(await this.contentChanged(file, content, head))) continue;
 						if (!sidecarReady) {
 							const prepared = await ensureNoteStore(this.root, file, doc);
-							if (prepared.source !== doc) { doc = prepared.source; blocks = scanBlocksView(doc); }
+							if (prepared.source !== doc) {
+								doc = prepared.source;
+								blocks = scanBlocksView(doc);
+							}
 							this.operationStores.set(file, prepared.store);
 							await ensureSidecar(prepared.store);
 							sidecarReady = true;
@@ -903,7 +926,14 @@ export class VersionEngine {
 			await appendEvents(await this.requireStore(file), events);
 		} catch (error) {
 			if (ledgerAppendProvesNoCommit(error)) {
-				await this.rollbackBlock(file, blockId, attempted, replacement.previous, error, replacement.guardPublication);
+				await this.rollbackBlock(
+					file,
+					blockId,
+					attempted,
+					replacement.previous,
+					error,
+					replacement.guardPublication,
+				);
 			}
 			// A partial/unknown append may already contain the authoritative head.
 			// Rolling the note back in that state would manufacture divergence.

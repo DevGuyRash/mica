@@ -2,8 +2,8 @@
 
 use crate::commands::Ctx;
 use crate::error::{io_ctx, CliError, Result};
-use crate::{engine, fsutil, sidecar, vault};
 use crate::sidecar::NoteStore;
+use crate::{engine, fsutil, sidecar, vault};
 use mica_core::ops::{normalize_section_impl, SectionNormalization};
 use mica_core::{
     content_signature_impl, hash_content_impl, migrate_tabs_impl, new_id_impl, parse_block_impl,
@@ -441,7 +441,11 @@ fn current_titles(spans: &[BlockSpan], note_path: &str) -> Result<Vec<String>> {
     Ok(titles)
 }
 
-fn legacy_titles(note: &vault::NoteRef, store: &NoteStore, count: usize) -> Result<Option<Vec<String>>> {
+fn legacy_titles(
+    note: &vault::NoteRef,
+    store: &NoteStore,
+    count: usize,
+) -> Result<Option<Vec<String>>> {
     let Some(journal) = sidecar::read_migration_journal(store)? else {
         return Ok(None);
     };
@@ -469,7 +473,13 @@ fn legacy_titles(note: &vault::NoteRef, store: &NoteStore, count: usize) -> Resu
     Ok(Some(titles))
 }
 
-fn plan_note(note: &vault::NoteRef, store: NoteStore, source_preimage: String, original: String, history: bool) -> Result<Option<NotePlan>> {
+fn plan_note(
+    note: &vault::NoteRef,
+    store: NoteStore,
+    source_preimage: String,
+    original: String,
+    history: bool,
+) -> Result<Option<NotePlan>> {
     if let Some(journal) = sidecar::read_section_normalization_journal(&store)? {
         if journal.status != "complete" {
             return Err(CliError::Corrupt(format!(
@@ -511,8 +521,8 @@ fn plan_note(note: &vault::NoteRef, store: NoteStore, source_preimage: String, o
         }
         source_ids.push(id.to_string());
     }
-    let titles =
-        legacy_titles(note, &store, spans.len())?.unwrap_or(current_titles(&spans, &note.vault_rel())?);
+    let titles = legacy_titles(note, &store, spans.len())?
+        .unwrap_or(current_titles(&spans, &note.vault_rel())?);
     validate_titles(&titles, note)?;
 
     let mut tabs = Vec::with_capacity(spans.len());
@@ -655,7 +665,9 @@ fn plan_note(note: &vault::NoteRef, store: NoteStore, source_preimage: String, o
     if history && spans.len() == 1 && !identity_history {
         let mutation_ts = next_timestamp(&ledger)?;
         for candidate in &candidates {
-            if sidecar::resolve_note_hash(&store, &candidate.source_effective_hash)? == candidate.target_hash {
+            if sidecar::resolve_note_hash(&store, &candidate.source_effective_hash)?
+                == candidate.target_hash
+            {
                 continue;
             }
             let target_event = consolidated_event_id("replace", &candidate.source_event);
@@ -1170,7 +1182,9 @@ pub fn consolidate_tabs(
     dry_run: bool,
 ) -> Result<ConsolidateReport> {
     let scope = vault::resolve_note_scope_at(path, ctx.vault.as_deref(), ctx.store_dir.as_deref())?;
-    if dry_run { scope.store.require_ready()?; }
+    if dry_run {
+        scope.store.require_ready()?;
+    }
     let mut report = ConsolidateReport {
         path: path.to_string(),
         history,
@@ -1364,12 +1378,18 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
     plan.store.root.claim_location()?;
     sidecar::preflight_note_record(&plan.store)?;
     if plan.source_preimage != plan.original {
-        fsutil::atomic_write_if_unchanged(&plan.note.abs, plan.source_preimage.as_bytes(), plan.original.as_bytes())?;
+        fsutil::atomic_write_if_unchanged(
+            &plan.note.abs,
+            plan.source_preimage.as_bytes(),
+            plan.original.as_bytes(),
+        )?;
     }
     engine::guard_note_store(&plan.note, &plan.store, &plan.original)?;
     sidecar::ensure_note_record(&plan.store)?;
     if read_optional_regular(&manifest_path)? != plan.manifest_original {
-        return Err(CliError::Corrupt("initialized manifest does not match the planned exact preimage".to_string()));
+        return Err(CliError::Corrupt(
+            "initialized manifest does not match the planned exact preimage".to_string(),
+        ));
     }
     for (hash, content) in &plan.objects {
         sidecar::write_object(&plan.store, hash, content)?;
@@ -1398,20 +1418,23 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
 }
 
 fn resume_pending(store: &NoteStore, journal: &sidecar::TabConsolidationJournal) -> Result<()> {
-    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
+    let note = vault::NoteRef {
+        abs: store.note.clone(),
+        vault: store.root.vault.clone(),
+        store: Some(store.root.clone()),
+    };
     let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
         CliError::Corrupt(format!(
             "pending tab-consolidation preimage {} is missing",
             journal.original
         ))
     })?;
-    let consolidated =
-        sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
-            CliError::Corrupt(format!(
-                "pending tab-consolidation result {} is missing",
-                journal.consolidated
-            ))
-        })?;
+    let consolidated = sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
+        CliError::Corrupt(format!(
+            "pending tab-consolidation result {} is missing",
+            journal.consolidated
+        ))
+    })?;
     engine::validate_journal_generations(store, &original, &consolidated)?;
     engine::preflight_journal_events(store, &journal.events)?;
     let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
@@ -1457,12 +1480,16 @@ fn manifest_publication_state(
     sidecar::validate_manifest_bytes(store, consolidated)?;
     let current = read_optional_regular(path)?;
     if let Some(bytes) = current.as_deref() {
-        if bytes == consolidated || sidecar::manifest_matches_except_hint(store, bytes, consolidated)? {
+        if bytes == consolidated
+            || sidecar::manifest_matches_except_hint(store, bytes, consolidated)?
+        {
             return Ok((current, true));
         }
     }
     let matches_original = match (current.as_deref(), original) {
-        (Some(bytes), Some(expected)) => bytes == expected || sidecar::manifest_matches_except_hint(store, bytes, expected)?,
+        (Some(bytes), Some(expected)) => {
+            bytes == expected || sidecar::manifest_matches_except_hint(store, bytes, expected)?
+        }
         (None, None) => true,
         _ => false,
     };
@@ -1481,8 +1508,11 @@ fn publish_manifest(
     original: Option<&[u8]>,
     consolidated: &[u8],
 ) -> Result<()> {
-    let (current, already_published) = manifest_publication_state(store, path, original, consolidated)?;
-    if already_published { return Ok(()); }
+    let (current, already_published) =
+        manifest_publication_state(store, path, original, consolidated)?;
+    if already_published {
+        return Ok(());
+    }
     store.root.claim_location()?;
     sidecar::preflight_note_record(store)?;
     match current.as_deref() {
@@ -1512,23 +1542,33 @@ fn verify_pending_result(
     store: &NoteStore,
     journal: &sidecar::TabConsolidationJournal,
 ) -> Result<()> {
-    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
-    let consolidated =
-        sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
-            CliError::Corrupt(format!(
-                "tab-consolidation result object {} is missing",
-                journal.consolidated
-            ))
-        })?;
+    let note = vault::NoteRef {
+        abs: store.note.clone(),
+        vault: store.root.vault.clone(),
+        store: Some(store.root.clone()),
+    };
+    let consolidated = sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
+        CliError::Corrupt(format!(
+            "tab-consolidation result object {} is missing",
+            journal.consolidated
+        ))
+    })?;
     // An offline cutover may have prepared a previously unanchored note.
     // Compare that one shared, guarded source insertion in memory; immutable
     // objects and historical journal bytes retain their original addresses.
     let expected_source = match mica_core::note_id_impl(&consolidated)
-        .map_err(|error| CliError::Corrupt(error.to_string()))? {
+        .map_err(|error| CliError::Corrupt(error.to_string()))?
+    {
         Some(id) if id == store.note_id => consolidated.clone(),
-        None if journal.status == "complete" => mica_core::set_note_id_impl(&consolidated, None, &store.note_id)
-            .map_err(|error| CliError::Corrupt(error.to_string()))?,
-        _ => return Err(CliError::Corrupt("consolidated source identity conflicts with its note record".to_string())),
+        None if journal.status == "complete" => {
+            mica_core::set_note_id_impl(&consolidated, None, &store.note_id)
+                .map_err(|error| CliError::Corrupt(error.to_string()))?
+        }
+        _ => {
+            return Err(CliError::Corrupt(
+                "consolidated source identity conflicts with its note record".to_string(),
+            ))
+        }
     };
     if engine::read_doc(&note.abs)? != expected_source {
         return Err(CliError::Corrupt(format!(
@@ -1561,7 +1601,11 @@ fn verify_pending_result(
             )
         })?;
     let live_hash = hash_content_impl(block_body(&doc, &target));
-    let head_hash = state.head.as_deref().map(|hash| sidecar::resolve_note_hash(store, hash)).transpose()?;
+    let head_hash = state
+        .head
+        .as_deref()
+        .map(|hash| sidecar::resolve_note_hash(store, hash))
+        .transpose()?;
     if head_hash.as_deref() != Some(live_hash.as_str()) {
         return Err(CliError::Corrupt(format!(
             "target head does not equal the live tabbed body for {}",
@@ -1571,8 +1615,14 @@ fn verify_pending_result(
     let manifest_path = sidecar::sidecar_dir(store).join("manifest.json");
     let manifest = read_optional_regular(&manifest_path)?;
     let manifest_matches = match manifest.as_deref() {
-        Some(bytes) => bytes == journal.manifest_consolidated.as_bytes()
-            || sidecar::manifest_matches_except_hint(store, bytes, journal.manifest_consolidated.as_bytes())?,
+        Some(bytes) => {
+            bytes == journal.manifest_consolidated.as_bytes()
+                || sidecar::manifest_matches_except_hint(
+                    store,
+                    bytes,
+                    journal.manifest_consolidated.as_bytes(),
+                )?
+        }
         None => false,
     };
     if !manifest_matches {
@@ -1776,11 +1826,27 @@ mod tests {
     use crate::output::Style;
 
     fn test_store(path: &std::path::Path) -> NoteStore {
-        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault"), store: None };
+        let note = vault::NoteRef {
+            abs: path.to_path_buf(),
+            vault: vault::find_vault(None, path.parent().expect("fixture parent"))
+                .expect("fixture vault"),
+            store: None,
+        };
         let source = engine::read_doc(path).expect("fixture source");
-        let prepared = mica_core::note_id_impl(&source).expect("fixture identity")
-            .map(|_| source.clone()).unwrap_or_else(|| mica_core::set_note_id_impl(&source, None, &format!("fixture-{}", hash_content_impl(&path.to_string_lossy()))).expect("fixture anchor"));
-        if prepared != source { std::fs::write(path, &prepared).expect("stamp fixture identity"); }
+        let prepared = mica_core::note_id_impl(&source)
+            .expect("fixture identity")
+            .map(|_| source.clone())
+            .unwrap_or_else(|| {
+                mica_core::set_note_id_impl(
+                    &source,
+                    None,
+                    &format!("fixture-{}", hash_content_impl(&path.to_string_lossy())),
+                )
+                .expect("fixture anchor")
+            });
+        if prepared != source {
+            std::fs::write(path, &prepared).expect("stamp fixture identity");
+        }
         engine::require_store(&note, &prepared).expect("fixture handle")
     }
 
@@ -2305,7 +2371,8 @@ mod tests {
             .expect("journal exists");
         assert_eq!(journal.versions.len(), 2);
         let resolution =
-            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger")).expect("fold");
+            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger"))
+                .expect("fold");
         let target = resolution
             .blocks
             .get(&journal.target_block)
@@ -2392,7 +2459,8 @@ mod tests {
             .iter()
             .all(|event| !matches!(event, Event::AddVersion { .. })));
         let resolution =
-            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger")).expect("fold");
+            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger"))
+                .expect("fold");
         let target = resolution
             .blocks
             .get(&journal.target_block)
@@ -2427,7 +2495,8 @@ mod tests {
             ":::\n",
         );
         let historical_hash = hash_content_impl(historical);
-        sidecar::write_object(&test_store(&note), &historical_hash, historical).expect("history object");
+        sidecar::write_object(&test_store(&note), &historical_hash, historical)
+            .expect("history object");
         sidecar::append_events(
             &test_store(&note),
             &[Event::AddVersion {
@@ -2454,7 +2523,8 @@ mod tests {
             |event| matches!(event, Event::ReplaceVersion { target, .. } if target == "source-only")
         ));
         let resolution =
-            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger")).expect("fold");
+            resolve_ledger_impl(&sidecar::read_ledger(&test_store(&note)).expect("ledger"))
+                .expect("fold");
         let historical_effective = &resolution.blocks["a"].versions[0].hash;
         let effective = sidecar::read_object(&test_store(&note), historical_effective)
             .expect("read effective")

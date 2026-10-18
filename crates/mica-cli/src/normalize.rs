@@ -6,8 +6,8 @@
 
 use crate::commands::Ctx;
 use crate::error::{CliError, Result};
-use crate::{engine, fsutil, sidecar, vault};
 use crate::sidecar::NoteStore;
+use crate::{engine, fsutil, sidecar, vault};
 use mica_core::ops::{normalize_section_impl, SectionNormalization};
 use mica_core::{
     content_signature_impl, hash_content_impl, new_id_impl, resolve_ledger_impl, scan_impl, Event,
@@ -147,7 +147,9 @@ pub fn normalize_sections(
     dry_run: bool,
 ) -> Result<NormalizeReport> {
     let scope = vault::resolve_note_scope_at(path, ctx.vault.as_deref(), ctx.store_dir.as_deref())?;
-    if dry_run { scope.store.require_ready()?; }
+    if dry_run {
+        scope.store.require_ready()?;
+    }
     let mut report = NormalizeReport {
         path: path.to_string(),
         history,
@@ -489,7 +491,11 @@ pub(crate) fn inspect_normalization_journal_with_ledger(
     journal: &sidecar::SectionNormalizationJournal,
     ledger_read: Option<&sidecar::LedgerRead>,
 ) -> Result<NormalizationJournalInspection> {
-    let note = vault::NoteRef { abs: store.note.clone(), vault: store.root.vault.clone(), store: Some(store.root.clone()) };
+    let note = vault::NoteRef {
+        abs: store.note.clone(),
+        vault: store.root.vault.clone(),
+        store: Some(store.root.clone()),
+    };
     let report_path = note.vault_rel();
     let mut conflicts = Vec::new();
     if !journal.history && !journal.events.is_empty() {
@@ -1335,8 +1341,11 @@ fn preflight_transaction_storage(
 ) -> usize {
     if let Err(error) = sidecar::preflight_note_record(note) {
         conflicts.push(NormalizationConflict {
-            path: report_path.to_string(), block: None, target: None,
-            kind: "note-record-unpublishable".to_string(), detail: error.to_string(),
+            path: report_path.to_string(),
+            block: None,
+            target: None,
+            kind: "note-record-unpublishable".to_string(),
+            detail: error.to_string(),
         });
     }
     let mut missing = 0;
@@ -1482,7 +1491,11 @@ fn publish_plan(plan: &NotePlan) -> Result<()> {
     plan.store.root.claim_location()?;
     sidecar::preflight_note_record(&plan.store)?;
     if plan.source_preimage != plan.original {
-        fsutil::atomic_write_if_unchanged(&plan.note.abs, plan.source_preimage.as_bytes(), plan.original.as_bytes())?;
+        fsutil::atomic_write_if_unchanged(
+            &plan.note.abs,
+            plan.source_preimage.as_bytes(),
+            plan.original.as_bytes(),
+        )?;
     }
     engine::guard_note_store(&plan.note, &plan.store, &plan.original)?;
     for (hash, content) in &plan.objects {
@@ -1540,7 +1553,9 @@ pub(crate) fn verify_journal_completion(
     engine::validate_journal_generations(note, &original, normalized)?;
     validate_exact_postimage(&original, normalized).map_err(CliError::Corrupt)?;
     if !journal.history && !journal.events.is_empty() {
-        return Err(CliError::Corrupt("normalization completion has undeclared history events".to_string()));
+        return Err(CliError::Corrupt(
+            "normalization completion has undeclared history events".to_string(),
+        ));
     }
     verify_published_replacements_in(note, journal, &ledger.events)
 }
@@ -1688,11 +1703,27 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_store(path: &std::path::Path) -> NoteStore {
-        let note = vault::NoteRef { abs: path.to_path_buf(), vault: vault::find_vault(None, path.parent().expect("fixture parent")).expect("fixture vault"), store: None };
+        let note = vault::NoteRef {
+            abs: path.to_path_buf(),
+            vault: vault::find_vault(None, path.parent().expect("fixture parent"))
+                .expect("fixture vault"),
+            store: None,
+        };
         let source = engine::read_doc(path).expect("fixture source");
-        let prepared = mica_core::note_id_impl(&source).expect("fixture identity")
-            .map(|_| source.clone()).unwrap_or_else(|| mica_core::set_note_id_impl(&source, None, &format!("fixture-{}", hash_content_impl(&path.to_string_lossy()))).expect("fixture anchor"));
-        if prepared != source { std::fs::write(path, &prepared).expect("stamp fixture identity"); }
+        let prepared = mica_core::note_id_impl(&source)
+            .expect("fixture identity")
+            .map(|_| source.clone())
+            .unwrap_or_else(|| {
+                mica_core::set_note_id_impl(
+                    &source,
+                    None,
+                    &format!("fixture-{}", hash_content_impl(&path.to_string_lossy())),
+                )
+                .expect("fixture anchor")
+            });
+        if prepared != source {
+            std::fs::write(path, &prepared).expect("stamp fixture identity");
+        }
         engine::require_store(&note, &prepared).expect("fixture handle")
     }
 
@@ -1731,13 +1762,20 @@ mod tests {
 
     #[test]
     fn directory_normalization_accumulates_per_note_corruption() {
-        let (directory, ctx, good_note) = fixture("---\nmica-id: fixture-note\n---\n\n```mica id=good\nalpha\n```\n");
+        let (directory, ctx, good_note) =
+            fixture("---\nmica-id: fixture-note\n---\n\n```mica id=good\nalpha\n```\n");
         let bad_ledger_note = directory.path().join("Bad ledger.md");
         let bad_journal_note = directory.path().join("Bad journal.md");
-        std::fs::write(&bad_ledger_note, "---\nmica-id: fixture-ledger\n---\n\n```mica id=ledger\nbeta\n```\n")
-            .expect("seed bad ledger note");
-        std::fs::write(&bad_journal_note, "---\nmica-id: fixture-journal\n---\n\n```mica id=journal\ngamma\n```\n")
-            .expect("seed bad journal note");
+        std::fs::write(
+            &bad_ledger_note,
+            "---\nmica-id: fixture-ledger\n---\n\n```mica id=ledger\nbeta\n```\n",
+        )
+        .expect("seed bad ledger note");
+        std::fs::write(
+            &bad_journal_note,
+            "---\nmica-id: fixture-journal\n---\n\n```mica id=journal\ngamma\n```\n",
+        )
+        .expect("seed bad journal note");
         crate::sidecar::ensure_note_record(&test_store(&bad_ledger_note))
             .expect("bad ledger sidecar");
         std::fs::write(
@@ -1806,7 +1844,8 @@ mod tests {
         )
         .expect("seed ledger");
         let before_note = std::fs::read(&note).expect("read original note");
-        let before_ledger = std::fs::read(crate::sidecar::ledger_path(&test_store(&note))).expect("read ledger");
+        let before_ledger =
+            std::fs::read(crate::sidecar::ledger_path(&test_store(&note))).expect("read ledger");
 
         let report = normalize_sections(&ctx, "Note.md", true, true).expect("conflict report");
 
@@ -1816,7 +1855,8 @@ mod tests {
         assert_eq!(report.conflicts[0].kind, "missing-history-object");
         assert_eq!(std::fs::read(&note).expect("unchanged note"), before_note);
         assert_eq!(
-            std::fs::read(crate::sidecar::ledger_path(&test_store(&note))).expect("unchanged ledger"),
+            std::fs::read(crate::sidecar::ledger_path(&test_store(&note)))
+                .expect("unchanged ledger"),
             before_ledger
         );
         assert!(!crate::sidecar::section_normalization_journal_path(&test_store(&note)).exists());
@@ -1891,7 +1931,8 @@ mod tests {
         assert_eq!(first.add_events, 2);
         assert_eq!(first.planned_replacements, 2);
         assert_eq!(first.notes[0].status, "normalized");
-        let ledger = crate::sidecar::read_ledger(&test_store(&note)).expect("read normalized ledger");
+        let ledger =
+            crate::sidecar::read_ledger(&test_store(&note)).expect("read normalized ledger");
         let replacements: Vec<_> = ledger
             .iter()
             .filter_map(|event| {
@@ -1933,14 +1974,16 @@ mod tests {
             .expect("journal exists");
         assert_eq!(journal.status, "complete");
         assert_eq!(journal.events.len(), 2);
-        let ledger_bytes = std::fs::read(crate::sidecar::ledger_path(&test_store(&note))).expect("ledger bytes");
+        let ledger_bytes =
+            std::fs::read(crate::sidecar::ledger_path(&test_store(&note))).expect("ledger bytes");
 
         let second = normalize_sections(&ctx, "Note.md", true, false).expect("rerun history");
 
         assert_eq!(second.planned_replacements, 0);
         assert_eq!(second.notes[0].status, "unchanged");
         assert_eq!(
-            std::fs::read(crate::sidecar::ledger_path(&test_store(&note))).expect("rerun ledger bytes"),
+            std::fs::read(crate::sidecar::ledger_path(&test_store(&note)))
+                .expect("rerun ledger bytes"),
             ledger_bytes
         );
     }
@@ -1969,7 +2012,8 @@ mod tests {
         let (_directory, ctx, note) = fixture("---\nmica-id: fixture-note\n---\n\nplain note\n");
         let normalized = ":::section\nalpha\n:::\n";
         let hash = hash_content_impl(normalized);
-        crate::sidecar::write_object(&test_store(&note), &hash, normalized).expect("history object");
+        crate::sidecar::write_object(&test_store(&note), &hash, normalized)
+            .expect("history object");
         crate::sidecar::append_events(
             &test_store(&note),
             &[Event::AddVersion {
@@ -1993,7 +2037,8 @@ mod tests {
     #[test]
     fn publication_rejects_a_stale_history_plan_before_writes() {
         let original = "---\nmica-id: fixture-note\n---\n\n```mica id=demo\nalpha\n```\n";
-        let normalized = "---\nmica-id: fixture-note\n---\n\n```mica id=demo\n:::section\nalpha\n:::\n```\n";
+        let normalized =
+            "---\nmica-id: fixture-note\n---\n\n```mica id=demo\n:::section\nalpha\n:::\n```\n";
         let (_directory, ctx, note) = fixture(original);
         let note_ref =
             crate::vault::resolve_note("Note.md", ctx.vault.as_deref()).expect("resolved note");
@@ -2006,7 +2051,8 @@ mod tests {
             origin: None,
             parent: None,
         };
-        crate::sidecar::append_events(&test_store(&note), std::slice::from_ref(&add)).expect("initial ledger");
+        crate::sidecar::append_events(&test_store(&note), std::slice::from_ref(&add))
+            .expect("initial ledger");
         let plan = NotePlan {
             store: test_store(&note),
             source_preimage: engine::read_doc(&note).expect("fixture preimage"),
@@ -2060,7 +2106,8 @@ mod tests {
             (raw_hash.clone(), raw),
             (wrapped_hash.clone(), wrapped),
         ] {
-            crate::sidecar::write_object(&test_store(&note), &hash, content).expect("seed recovery object");
+            crate::sidecar::write_object(&test_store(&note), &hash, content)
+                .expect("seed recovery object");
         }
         crate::sidecar::append_events(
             &test_store(&note),
@@ -2116,13 +2163,15 @@ mod tests {
     #[test]
     fn pending_journal_fails_closed_when_note_diverged() {
         let original = "---\nmica-id: fixture-note\n---\n\n```mica id=demo\noriginal\n```\n";
-        let normalized = "---\nmica-id: fixture-note\n---\n\n```mica id=demo\n:::section\noriginal\n:::\n```\n";
+        let normalized =
+            "---\nmica-id: fixture-note\n---\n\n```mica id=demo\n:::section\noriginal\n:::\n```\n";
         let (_directory, ctx, note) = fixture("user changed this\n");
         for (hash, content) in [
             (hash_content_impl(original), original),
             (hash_content_impl(normalized), normalized),
         ] {
-            crate::sidecar::write_object(&test_store(&note), &hash, content).expect("seed recovery object");
+            crate::sidecar::write_object(&test_store(&note), &hash, content)
+                .expect("seed recovery object");
         }
         crate::sidecar::write_section_normalization_journal(
             &test_store(&note),
@@ -2160,7 +2209,8 @@ mod tests {
             (hash_content_impl(original), original),
             (hash_content_impl(forged), forged),
         ] {
-            crate::sidecar::write_object(&test_store(&note), &hash, content).expect("seed recovery object");
+            crate::sidecar::write_object(&test_store(&note), &hash, content)
+                .expect("seed recovery object");
         }
         crate::sidecar::write_section_normalization_journal(
             &test_store(&note),
@@ -2195,7 +2245,8 @@ mod tests {
         let (_directory, ctx, note) = fixture(note_body);
         let note_hash = hash_content_impl(note_body);
         let raw_hash = hash_content_impl(raw);
-        crate::sidecar::write_object(&test_store(&note), &note_hash, note_body).expect("whole note object");
+        crate::sidecar::write_object(&test_store(&note), &note_hash, note_body)
+            .expect("whole note object");
         crate::sidecar::write_object(&test_store(&note), &raw_hash, raw).expect("raw object");
         crate::sidecar::append_events(
             &test_store(&note),
@@ -2326,7 +2377,8 @@ mod tests {
             (normalized_hash.clone(), normalized),
             (later_hash.clone(), later),
         ] {
-            crate::sidecar::write_object(&test_store(&note), &hash, content).expect("seed history object");
+            crate::sidecar::write_object(&test_store(&note), &hash, content)
+                .expect("seed history object");
         }
         let intended = Event::ReplaceVersion {
             eid: "replace-intended".to_string(),
@@ -2359,8 +2411,12 @@ mod tests {
         )
         .expect("seed superseding ledger");
         let note_hash = hash_content_impl("---\nmica-id: fixture-note\n---\n\nplain note\n");
-        crate::sidecar::write_object(&test_store(&note), &note_hash, "---\nmica-id: fixture-note\n---\n\nplain note\n")
-            .expect("seed whole note object");
+        crate::sidecar::write_object(
+            &test_store(&note),
+            &note_hash,
+            "---\nmica-id: fixture-note\n---\n\nplain note\n",
+        )
+        .expect("seed whole note object");
         let journal = sidecar::SectionNormalizationJournal {
             format: 1,
             status: "complete".to_string(),
@@ -2375,23 +2431,34 @@ mod tests {
             vault: _directory.path().to_path_buf(),
             store: None,
         };
-        let store = engine::require_store(&note_ref, &engine::read_doc(&note_ref.abs).expect("fixture source"))
-            .expect("fixture store");
+        let store = engine::require_store(
+            &note_ref,
+            &engine::read_doc(&note_ref.abs).expect("fixture source"),
+        )
+        .expect("fixture store");
         // Historical completion is retained on disk before later replacements.
         // Scoped reads must not grant access merely because an in-memory value names an object.
-        let journal_bytes = serde_json::to_vec_pretty(&journal).expect("retained historical journal");
+        let journal_bytes =
+            serde_json::to_vec_pretty(&journal).expect("retained historical journal");
         let journal_path = sidecar::section_normalization_journal_path(&store);
         std::fs::write(&journal_path, &journal_bytes).expect("seed retained completion evidence");
         let ledger_path = sidecar::ledger_path(&store);
         let ledger_bytes = std::fs::read(&ledger_path).expect("historical ledger");
-        let inspection = inspect_normalization_journal(&store, None, &journal).expect("inspect journal");
+        let inspection =
+            inspect_normalization_journal(&store, None, &journal).expect("inspect journal");
 
         assert!(
             inspection.conflicts.is_empty(),
             "{:?}",
             inspection.conflicts
         );
-        assert_eq!(std::fs::read(journal_path).expect("unchanged journal"), journal_bytes);
-        assert_eq!(std::fs::read(ledger_path).expect("unchanged ledger"), ledger_bytes);
+        assert_eq!(
+            std::fs::read(journal_path).expect("unchanged journal"),
+            journal_bytes
+        );
+        assert_eq!(
+            std::fs::read(ledger_path).expect("unchanged ledger"),
+            ledger_bytes
+        );
     }
 }

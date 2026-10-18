@@ -154,8 +154,7 @@ fn validate_store_folder(folder: &str) -> Result<(), StoreError> {
     if folder.is_empty()
         || folder.len() > MAX_STORE_FOLDER_BYTES
         || folder.chars().any(|ch| {
-            ch.is_control()
-                || matches!(ch, '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*')
+            ch.is_control() || matches!(ch, '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*')
         })
         || folder.split('/').any(|component| {
             component.is_empty()
@@ -212,10 +211,7 @@ pub fn note_paths_impl(note_id: &str) -> Result<NotePaths, StoreError> {
 }
 
 /// Derive identity-bound paths below a validated optional managed directory.
-pub fn note_paths_at_impl(
-    note_id: &str,
-    folder: Option<&str>,
-) -> Result<NotePaths, StoreError> {
+pub fn note_paths_at_impl(note_id: &str, folder: Option<&str>) -> Result<NotePaths, StoreError> {
     let folder = selected_folder(folder)?;
     validate_note_id(note_id)?;
     let mut hash = blake3::Hasher::new();
@@ -342,7 +338,8 @@ fn is_hash(hash: &str, digits: usize) -> bool {
 }
 
 fn validate_note_id(id: &str) -> Result<(), StoreError> {
-    if id.is_empty() || id.len() > 4096 || id.trim().is_empty() || id.chars().any(char::is_control) {
+    if id.is_empty() || id.len() > 4096 || id.trim().is_empty() || id.chars().any(char::is_control)
+    {
         return Err(StoreError::InvalidNoteId);
     }
     Ok(())
@@ -504,9 +501,7 @@ fn mapping_entry(line: &str) -> Result<(String, usize), StoreError> {
     } else {
         let colon = line
             .char_indices()
-            .find_map(|(index, ch)| {
-                (ch == ':' && separated(&line[index + 1..])).then_some(index)
-            })
+            .find_map(|(index, ch)| (ch == ':' && separated(&line[index + 1..])).then_some(index))
             .ok_or(StoreError::InvalidFrontmatter)?;
         let key = line[..colon].trim_end_matches([' ', '\t']);
         if key.is_empty()
@@ -556,7 +551,9 @@ fn identity_scalar(value: &str) -> Result<(String, usize), StoreError> {
     }
     let scalar = value[..end].trim_end_matches([' ', '\t']);
     if scalar.is_empty()
-        || scalar.starts_with(['[', '{', ']', '}', '|', '>', '&', '*', '!', '%', '@', '`', '#'])
+        || scalar.starts_with([
+            '[', '{', ']', '}', '|', '>', '&', '*', '!', '%', '@', '`', '#',
+        ])
         || (scalar.starts_with(['-', '?', ':']) && separated(&scalar[1..]))
         || scalar
             .char_indices()
@@ -572,8 +569,19 @@ fn non_string_plain(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "~" | "null" | "true" | "false" | "yes" | "no" | "on" | "off" | "y" | "n"
-            | ".inf" | "+.inf" | "-.inf" | ".nan"
+        "~" | "null"
+            | "true"
+            | "false"
+            | "yes"
+            | "no"
+            | "on"
+            | "off"
+            | "y"
+            | "n"
+            | ".inf"
+            | "+.inf"
+            | "-.inf"
+            | ".nan"
     ) {
         return true;
     }
@@ -753,7 +761,10 @@ mod tests {
         assert!(paths.key.starts_with("n-"));
         assert!(!paths.dir.contains(".."));
         assert_eq!(paths.dir, format!("mica-data/notes/{}", paths.key));
-        assert_ne!(paths.key, note_paths_impl("../../opaque note ").unwrap().key);
+        assert_ne!(
+            paths.key,
+            note_paths_impl("../../opaque note ").unwrap().key
+        );
         assert!(note_paths_impl("\nunsafe").is_err());
         assert!(note_paths_impl(&"é".repeat(2049)).is_err());
     }
@@ -762,7 +773,10 @@ mod tests {
     fn object_pool_requires_full_addresses_and_note_scoped_aliases() {
         let full = crate::hash_content_impl("body");
         let short = &full[..19];
-        assert!(object_paths_impl(&full).unwrap().plain.ends_with(".mica.md"));
+        assert!(object_paths_impl(&full)
+            .unwrap()
+            .plain
+            .ends_with(".mica.md"));
         assert!(object_paths_impl(short).is_err());
         assert_eq!(
             resolve_object_hash_impl(short, &BTreeMap::new()),
@@ -829,7 +843,10 @@ mod tests {
         ] {
             let source = format!("---\n{properties}---\nbody");
             assert!(note_id_impl(&source).is_err(), "{properties}");
-            assert!(set_note_id_impl(&source, None, "new").is_err(), "{properties}");
+            assert!(
+                set_note_id_impl(&source, None, "new").is_err(),
+                "{properties}"
+            );
         }
         assert!(note_id_impl("---\nmica-id: id\n").is_err());
         assert_eq!(note_id_impl("body\nmica-id: ignored\n").unwrap(), None);

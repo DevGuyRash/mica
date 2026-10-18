@@ -2424,8 +2424,33 @@ body.mica-dnd-active .mica .mica-row-resizer {
 	visibility: hidden;
 }
 /* Drag previews are cloned under body, outside their owning .mica block. */
-body.mica-dnd-active .mica-drag-ghost:is(.mica-insert-zone, .mica-region-tools, .mica-cell-bar, .mica-grid-tools, .mica-group-grip, .mica-col-resizer, .mica-row-resizer, .mica-col-handle, .mica-row-handle, .mica-edge-add),
-body.mica-dnd-active .mica-drag-ghost :is(.mica-insert-zone, .mica-region-tools, .mica-cell-bar, .mica-grid-tools, .mica-group-grip, .mica-col-resizer, .mica-row-resizer, .mica-col-handle, .mica-row-handle, .mica-edge-add) {
+body.mica-dnd-active
+	.mica-drag-ghost:is(
+		.mica-insert-zone,
+		.mica-region-tools,
+		.mica-cell-bar,
+		.mica-grid-tools,
+		.mica-group-grip,
+		.mica-col-resizer,
+		.mica-row-resizer,
+		.mica-col-handle,
+		.mica-row-handle,
+		.mica-edge-add
+	),
+body.mica-dnd-active
+	.mica-drag-ghost
+	:is(
+		.mica-insert-zone,
+		.mica-region-tools,
+		.mica-cell-bar,
+		.mica-grid-tools,
+		.mica-group-grip,
+		.mica-col-resizer,
+		.mica-row-resizer,
+		.mica-col-handle,
+		.mica-row-handle,
+		.mica-edge-add
+	) {
 	opacity: 0;
 	pointer-events: none;
 	visibility: hidden;

@@ -567,8 +567,8 @@ fn doctor_reports_missing_raw_objects_and_pending_normalization() {
 fn doctor_reports_missing_and_corrupt_pending_tab_consolidation_objects() {
     let original = "```mica id=demo\nalpha\n```\n";
     let consolidated = "```mica id=demo\n:::tabs\n:::tab Alpha\nalpha\n:::\n:::\n```\n";
-    let original = mica_core::set_note_id_impl(original, None, "fixture-note")
-        .expect("original anchor");
+    let original =
+        mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
     let consolidated = mica_core::set_note_id_impl(consolidated, None, "fixture-note")
         .expect("consolidated anchor");
     let f = fixture(&original);
@@ -702,10 +702,10 @@ fn doctor_reports_corrupt_typed_ledger_and_continues_the_sweep() {
 fn doctor_reports_pending_normalization_note_divergence() {
     let original = "```mica id=demo\nalpha\n```\n";
     let normalized = "```mica id=demo\n:::section\nalpha\n:::\n```\n";
-    let original = mica_core::set_note_id_impl(original, None, "fixture-note")
-        .expect("original anchor");
-    let normalized = mica_core::set_note_id_impl(normalized, None, "fixture-note")
-        .expect("normalized anchor");
+    let original =
+        mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
+    let normalized =
+        mica_core::set_note_id_impl(normalized, None, "fixture-note").expect("normalized anchor");
     let later = mica_core::set_note_id_impl("later unrelated edit\n", None, "fixture-note")
         .expect("later anchor");
     let f = fixture(&later);
@@ -745,8 +745,10 @@ fn doctor_reports_pending_normalization_note_divergence() {
 fn doctor_allows_later_live_edits_after_completed_normalization() {
     let original = "```mica id=demo\nalpha\n```\n";
     let normalized = "```mica id=demo\n:::section\nalpha\n:::\n```\n";
-    let original = mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
-    let normalized = mica_core::set_note_id_impl(normalized, None, "fixture-note").expect("normalized anchor");
+    let original =
+        mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
+    let normalized =
+        mica_core::set_note_id_impl(normalized, None, "fixture-note").expect("normalized anchor");
     let f = fixture(&normalized);
     let store = mica_cli::sidecar::NoteStore::for_id(&f.vault, &f.note, "fixture-note")
         .expect("fixture store");
@@ -793,7 +795,8 @@ fn doctor_allows_later_live_edits_after_completed_normalization() {
 fn doctor_reports_forged_completed_normalization_postimage() {
     let original = "```mica id=demo\nalpha\n```\n";
     let forged = "```mica id=demo\n:::section\nforged\n:::\n```\n";
-    let original = mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
+    let original =
+        mica_core::set_note_id_impl(original, None, "fixture-note").expect("original anchor");
     let forged = mica_core::set_note_id_impl(forged, None, "fixture-note").expect("forged anchor");
     let f = fixture(&forged);
     let store = mica_cli::sidecar::NoteStore::for_id(&f.vault, &f.note, "fixture-note")
@@ -868,7 +871,8 @@ fn repair_updates_renamed_note_hint_without_moving_history() {
     let record = mica_cli::sidecar::sidecar_dir(&store);
     let manifest = record.join("manifest.json");
     let before_manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&manifest).expect("original manifest")).expect("manifest JSON");
+        serde_json::from_slice(&fs::read(&manifest).expect("original manifest"))
+            .expect("manifest JSON");
     let ledger = mica_cli::sidecar::ledger_path(&store);
     let before_ledger = fs::read(&ledger).expect("original ledger");
     let renamed = f.vault.join("Renamed.md");
@@ -885,7 +889,8 @@ fn repair_updates_renamed_note_hint_without_moving_history() {
     let mut expected_manifest = before_manifest;
     expected_manifest["path"] = serde_json::Value::String("Renamed.md".to_string());
     let after_manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&manifest).expect("updated manifest")).expect("manifest JSON");
+        serde_json::from_slice(&fs::read(&manifest).expect("updated manifest"))
+            .expect("manifest JSON");
     assert_eq!(
         after_manifest, expected_manifest,
         "only the path hint changes: {report}"
@@ -912,7 +917,8 @@ fn repair_preserves_history_for_an_ambiguous_duplicate_id() {
         .output()
         .expect("spawn repair");
     assert_eq!(
-        out.status.code(), Some(2),
+        out.status.code(),
+        Some(2),
         "duplicate identity is an argument conflict"
     );
     let error = String::from_utf8_lossy(&out.stderr);
@@ -924,7 +930,10 @@ fn repair_preserves_history_for_an_ambiguous_duplicate_id() {
         record.is_dir(),
         "history stays at its identity-addressed source"
     );
-    assert_eq!(fs::read(&manifest).expect("retained manifest"), before_manifest);
+    assert_eq!(
+        fs::read(&manifest).expect("retained manifest"),
+        before_manifest
+    );
     assert_eq!(fs::read(&ledger).expect("retained ledger"), before_ledger);
 }
 

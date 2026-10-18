@@ -46,9 +46,6 @@ declare module "*/pkg/mica_core.js" {
 
 	export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 	export default function __wbg_init(
-		module_or_path?:
-			| { module_or_path: InitInput | Promise<InitInput> }
-			| InitInput
-			| Promise<InitInput>,
+		module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>,
 	): Promise<unknown>;
 }

@@ -2142,11 +2142,7 @@ export class VersionsModal extends Modal {
 			};
 			if (pending) status.setText(pending);
 			else {
-				const preview = this.focusedPair(
-					createDiv(),
-					baseKey,
-					plan.targets[0]?.key ?? baseKey,
-				);
+				const preview = this.focusedPair(createDiv(), baseKey, plan.targets[0]?.key ?? baseKey);
 				status.setText(preview ? preview.status : "needs matching");
 			}
 

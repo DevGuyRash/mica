@@ -1,7 +1,18 @@
 import { TFile, type Vault } from "obsidian";
 import { Gunzip, gzip, strFromU8, strToU8 } from "fflate";
 import { hashContent, objectPaths, resolveObjectHash, type LedgerEvent } from "../wasm/bridge";
-import { assertNoteStoreCurrent, assertStoreRootCurrent, ensureStoreFolder, MAX_ALIASES, MAX_ALIAS_BYTES, parseAliases, readAliases, validateStoreRoot, type NoteStore, type StoreRoot } from "./store";
+import {
+	assertNoteStoreCurrent,
+	assertStoreRootCurrent,
+	ensureStoreFolder,
+	MAX_ALIASES,
+	MAX_ALIAS_BYTES,
+	parseAliases,
+	readAliases,
+	validateStoreRoot,
+	type NoteStore,
+	type StoreRoot,
+} from "./store";
 import {
 	classifyEventBatch,
 	MAX_LEDGER_BYTES,
@@ -13,12 +24,26 @@ import {
 } from "./ledger";
 
 // Ledgers belong to stable note identities; immutable full-hash objects belong to the vault.
-export function sidecarDir(note: NoteStore): string { return note.paths.dir; }
-export function objectsDir(root: StoreRoot): string { return root.paths.objects; }
-export function ledgerPath(note: NoteStore): string { return note.paths.ledger; }
-export function objectPath(root: StoreRoot, hash: string): string { assertStoreRootCurrent(root); return objectPaths(hash, root.paths.root).plain; }
-export function objectPathGz(root: StoreRoot, hash: string): string { assertStoreRootCurrent(root); return objectPaths(hash, root.paths.root).gzip; }
-function rootOf(store: StoreRoot | NoteStore): StoreRoot { return "root" in store ? store.root : store; }
+export function sidecarDir(note: NoteStore): string {
+	return note.paths.dir;
+}
+export function objectsDir(root: StoreRoot): string {
+	return root.paths.objects;
+}
+export function ledgerPath(note: NoteStore): string {
+	return note.paths.ledger;
+}
+export function objectPath(root: StoreRoot, hash: string): string {
+	assertStoreRootCurrent(root);
+	return objectPaths(hash, root.paths.root).plain;
+}
+export function objectPathGz(root: StoreRoot, hash: string): string {
+	assertStoreRootCurrent(root);
+	return objectPaths(hash, root.paths.root).gzip;
+}
+function rootOf(store: StoreRoot | NoteStore): StoreRoot {
+	return "root" in store ? store.root : store;
+}
 function fullHash(store: StoreRoot | NoteStore, hash: string): string {
 	const alias = "aliases" in store ? store.aliases[hash] : undefined;
 	return resolveObjectHash(hash, alias === undefined ? {} : { [hash]: alias });
@@ -73,12 +98,17 @@ function gzipText(text: string, bytes: number): Promise<ArrayBuffer> {
 function startCompression(job: CompressionJob): void {
 	compressionActive = true;
 	void (async () => {
-		try { job.resolve(await runGzip(job.text)); }
-		catch (error) { job.reject(error); }
-		finally {
+		try {
+			job.resolve(await runGzip(job.text));
+		} catch (error) {
+			job.reject(error);
+		} finally {
 			compressionActive = false;
 			const next = compressionQueue.shift();
-			if (next) { compressionQueuedBytes -= next.bytes; startCompression(next); }
+			if (next) {
+				compressionQueuedBytes -= next.bytes;
+				startCompression(next);
+			}
 		}
 	})();
 }
@@ -128,14 +158,16 @@ function joinChunks(chunks: readonly Uint8Array[], size: number): Uint8Array {
 
 export async function ensureSidecar(note: NoteStore): Promise<void> {
 	await assertNoteStoreCurrent(note, true);
-	for (const dir of [note.root.paths.objects, note.root.paths.notes, note.paths.dir]) await ensureStoreFolder(note.root, dir);
+	for (const dir of [note.root.paths.objects, note.root.paths.notes, note.paths.dir])
+		await ensureStoreFolder(note.root, dir);
 }
 
 const objectWrites = new WeakMap<Vault, Map<string, Promise<string>>>();
 
 async function assertObjectWriteCurrent(store: StoreRoot | NoteStore, storeId: string): Promise<void> {
 	if ("aliases" in store) await assertNoteStoreCurrent(store);
-	if (await validateStoreRoot(rootOf(store)) !== storeId) throw new Error("Mica: central store identity changed during object write; retry");
+	if ((await validateStoreRoot(rootOf(store))) !== storeId)
+		throw new Error("Mica: central store identity changed during object write; retry");
 }
 
 /** Fixed representation and per-hash serialization prevent cross-note compression races. */
@@ -146,7 +178,8 @@ export async function writeObject(store: StoreRoot | NoteStore, hash: string, co
 		throw new Error(`Mica: object hash mismatch (expected ${hash}, got ${actual})`);
 	if (hash.length === 19 && !("aliases" in store)) throw new Error("Mica: legacy hash requires a note store");
 	const byteLength = utf8ByteLength(content);
-	if (byteLength > MAX_OBJECT_BYTES) throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
+	if (byteLength > MAX_OBJECT_BYTES)
+		throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
 	if ("aliases" in store) await assertNoteStoreCurrent(store);
 	const storeId = await validateStoreRoot(root, true);
 	if (storeId === null) throw new Error("Mica: central store could not be initialized");
@@ -172,17 +205,22 @@ export async function writeObject(store: StoreRoot | NoteStore, hash: string, co
 						assertStoreRootCurrent(root);
 						if (compressed === null) await root.vault.create(paths.plain, content);
 						else await root.vault.createBinary(paths.gzip, compressed);
-					} catch (error) { if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) throw error; }
+					} catch (error) {
+						if (!resolveObjectFile(root.vault, paths.plain, paths.gzip)) throw error;
+					}
 				}
 			}
 			await requireObject(root, actual);
 			await assertObjectWriteCurrent(operationStore, storeId);
 			return storeId;
-		})().finally(() => { if (writes.get(actual) === write) writes.delete(actual); });
+		})().finally(() => {
+			if (writes.get(actual) === write) writes.delete(actual);
+		});
 		writes.set(actual, write);
 		task = write;
 	}
-	if (await task !== storeId) throw new Error("Mica: shared object write belonged to a different central store; retry");
+	if ((await task) !== storeId)
+		throw new Error("Mica: shared object write belonged to a different central store; retry");
 	await assertObjectWriteCurrent(operationStore, storeId);
 	if (hash.length === 19 && "aliases" in operationStore) {
 		await publishAlias(operationStore, hash, actual);
@@ -194,7 +232,8 @@ async function publishAlias(note: NoteStore, short: string, full: string): Promi
 	await ensureSidecar(note);
 	const merge = (text: string): string => {
 		const aliases = text ? parseAliases(text) : {};
-		if (aliases[short] !== undefined && aliases[short] !== full) throw new Error(`Mica: conflicting object alias ${short}`);
+		if (aliases[short] !== undefined && aliases[short] !== full)
+			throw new Error(`Mica: conflicting object alias ${short}`);
 		aliases[short] = full;
 		if (Object.keys(aliases).length > MAX_ALIASES) throw new Error("Mica: too many object aliases");
 		const body = JSON.stringify(aliases, null, "\t") + "\n";
@@ -203,15 +242,24 @@ async function publishAlias(note: NoteStore, short: string, full: string): Promi
 	};
 	await assertNoteStoreCurrent(note, true);
 	const file = note.root.vault.getAbstractFileByPath(note.paths.aliases);
-	if (file instanceof TFile) await note.root.vault.process(file, (current) => { assertStoreRootCurrent(note.root); return merge(current); });
+	if (file instanceof TFile)
+		await note.root.vault.process(file, (current) => {
+			assertStoreRootCurrent(note.root);
+			return merge(current);
+		});
 	else {
 		if (file) throw new Error("Mica: alias path is not a file");
-		try { assertStoreRootCurrent(note.root); await note.root.vault.create(note.paths.aliases, merge("")); }
-		catch (error) {
+		try {
+			assertStoreRootCurrent(note.root);
+			await note.root.vault.create(note.paths.aliases, merge(""));
+		} catch (error) {
 			const raced = note.root.vault.getAbstractFileByPath(note.paths.aliases);
 			if (!(raced instanceof TFile)) throw error;
 			await assertNoteStoreCurrent(note, true);
-			await note.root.vault.process(raced, (current) => { assertStoreRootCurrent(note.root); return merge(current); });
+			await note.root.vault.process(raced, (current) => {
+				assertStoreRootCurrent(note.root);
+				return merge(current);
+			});
 		}
 	}
 	Object.assign(note.aliases, await readAliases(note.root, note.paths.aliases));
@@ -243,7 +291,8 @@ export async function readObject(store: StoreRoot | NoteStore, hash: string): Pr
 			throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
 		}
 		content = await vault.read(object);
-		if (utf8ByteLength(content) > MAX_OBJECT_BYTES) throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
+		if (utf8ByteLength(content) > MAX_OBJECT_BYTES)
+			throw new Error(`Mica: history object ${hash} exceeds ${MAX_OBJECT_BYTES} bytes`);
 		verifyObject(resolvedHash, content);
 		return content;
 	}
@@ -406,7 +455,13 @@ export async function writeManifest(note: NoteStore, manifest: SidecarManifest):
 function assertManifestOwner(text: string, id: string): void {
 	if (utf8ByteLength(text) > MAX_LEDGER_BYTES) throw new Error("Mica: note manifest is too large");
 	const value: unknown = JSON.parse(text);
-	if (typeof value !== "object" || value === null || Array.isArray(value) || !("noteId" in value) || value.noteId !== id)
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		Array.isArray(value) ||
+		!("noteId" in value) ||
+		value.noteId !== id
+	)
 		throw new Error("Mica: existing manifest has a conflicting note identity");
 	if (Object.keys(value).some((key) => !["noteId", "path", "blocks", "updated"].includes(key)))
 		throw new Error("Mica: existing manifest has unknown fields; history was left unchanged");

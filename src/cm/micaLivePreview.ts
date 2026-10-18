@@ -239,7 +239,9 @@ class MicaWidget extends WidgetType {
 	/** Retained editors must recheck the live file after moves and view changes. */
 	private canMutate(view: EditorView): boolean {
 		const file = view.state.field(editorInfoField, false)?.file;
-		return file instanceof TFile && isLiveNote(file) && this.plugin.app.vault.getAbstractFileByPath(file.path) === file;
+		return (
+			file instanceof TFile && isLiveNote(file) && this.plugin.app.vault.getAbstractFileByPath(file.path) === file
+		);
 	}
 
 	/** Reduce a source deletion and target insertion from one fresh document,
@@ -376,7 +378,11 @@ export function scanCached(state: EditorState): ScanCache {
  * accepts block-level decorations when they are provided directly.
  */
 function build(plugin: MicaPlugin, state: EditorState, sel: RevealSel): DecorationSet {
-	if (!state.field(editorLivePreviewField, false) || isManagedPath(state.field(editorInfoField, false)?.file?.path ?? "", storeRoot(plugin.app.vault).paths.root)) return Decoration.none;
+	if (
+		!state.field(editorLivePreviewField, false) ||
+		isManagedPath(state.field(editorInfoField, false)?.file?.path ?? "", storeRoot(plugin.app.vault).paths.root)
+	)
+		return Decoration.none;
 	const ranges = [];
 	const { blocks, attrs, tos, contents, unnamedOrdinals } = scanCached(state);
 	for (let i = 0; i < blocks.length; i++) {
