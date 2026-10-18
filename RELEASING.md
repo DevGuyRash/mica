@@ -6,12 +6,31 @@ qualification evidence.
 
 ## Update delivery
 
-This is a manual release process. Source pushes, local builds and CI artifact
-uploads do not publish a plugin update. A published GitHub Release with the
-matching version tag and runtime attachments is what Obsidian distributes.
-The existing workflow files contain verification/artifact jobs, not a GitHub
-Release publisher. Use local verification within the user's authorized scope;
-this procedure does not require enabling hosted Actions.
+The shared [release contract](docs/RELEASE-CONTRACT.md) automates qualification,
+draft publication and verification after a manual release dispatch. It defaults
+to a dry run. Main pushes, PRs, tags and schedules start no hosted jobs. The old
+CI/weekly Compatibility workflows are replaced by this release-only workflow;
+their checks remain in the product scripts. Source changes alone do not enable
+Actions or publish a plugin update. A published GitHub Release with the exact
+manifest version tag and runtime attachments is what Obsidian distributes.
+
+Viewgram is the canonical release bundle; this repository carries an identical
+hash-checked snapshot pinned to a full Viewgram commit. Run `pnpm run test:release`
+for protocol tests and `pnpm run release:parity` for local/upstream drift checks.
+`pnpm run release:qualify` composes production audits, build, aggregate checks,
+Obsidian preflight, protocol tests, stress corpus, Rust format/Clippy/CLI build,
+asset/smoke checks, and required native default/minimum/mobile profiles.
+`pnpm run release:advisory` runs the existing moving desktop-latest canary; the
+workflow records it as advisory, never as a required pass. The required profile
+must actually run; an unavailable authenticated Obsidian download is a blocker,
+not permission to skip it or copy owner credentials into hosted jobs.
+
+Follow the contract's first-run settings checks and exact-SHA evidence inputs.
+The qualification-report URL must record the existing device, Sync and storage
+gates below; a supplied link is not automated verification of its contents.
+No workflow result claims existing-vault cutover. The pending 0.3 qualification,
+publication and Kingdom staging remain separate until their actual evidence
+passes. Existing releases are preserved, including 0.2.2.
 
 Only the initial Community directory submission is needed. Subsequent versions
 are delivered through new GitHub Releases. Installed community plugins do not

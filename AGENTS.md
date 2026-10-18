@@ -88,6 +88,18 @@ SHALL update the human release procedure and this command inventory in the same
 change. Keep authorized automation consistent; hosted CI is not required. You
 SHALL NOT call a subset release-ready.
 
+The shared `docs/RELEASE-CONTRACT.md` is canonical in Viewgram and vendored here
+with exact file hashes plus a full upstream commit pin. Release tooling changes
+SHALL run `pnpm run test:release`, `pnpm run release:parity` and
+`pnpm run check:release`. `pnpm run release:qualify` composes all required
+automatable commands above plus the protocol tests and Obsidian preflight;
+`pnpm run release:advisory` owns the moving desktop-latest canary. Device, Sync,
+storage and exact-SHA Community evidence remain external required gates.
+The single hosted workflow SHALL remain manual `workflow_dispatch` with
+publication false by default. Main/PR/tag/scheduled general CI stays disabled.
+Committing the workflow does not authorize enabling hosted runs, expanding
+credentials/permissions or changing published immutable assets.
+
 WHEN a change is documentation-only and does not alter a command, contract, or
 generated artifact THEN you MAY limit verification to formatting, link/path
 inspection, and `git diff --check`. You SHALL NOT call a partial gate evidence

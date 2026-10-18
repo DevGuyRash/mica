@@ -60,7 +60,11 @@
 		"test:icon-packs": "tsx tests/icon-packs.mts",
 		"test:combine-kind": "tsx tests/combine-kind.mts",
 		"lint:obsidian": "eslint --config eslint.obsidian.config.mjs src && pnpm run lint:review-css",
-		"lint:review-css": "node scripts/check-review-css.mjs"
+		"lint:review-css": "node scripts/check-review-css.mjs",
+		"test:release": "node --test tests/release-contract.test.mjs",
+		"release:parity": "node scripts/release.mjs parity --upstream",
+		"release:qualify": "pnpm run audit:prod && cargo deny check advisories && pnpm run build && pnpm run check && pnpm run lint:obsidian && pnpm run test:release && pnpm run test:version-stress && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --release -p mica-cli --locked && pnpm run check:release:assets && pnpm run smoke && pnpm run e2e && pnpm run e2e:minimum && pnpm run e2e:mobile",
+		"release:advisory": "pnpm run e2e:latest"
 	},
 	"keywords": [
 		"obsidian",

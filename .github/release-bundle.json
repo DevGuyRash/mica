@@ -1,0 +1,9 @@
+{
+	"canonical": "DevGuyRash/viewgram",
+	"files": {
+		".github/workflows/release.yml": "292dbe7142e19c5139f219dd86fe8bbbe9f9bd6be0b60ed6c9acde54b9f08839",
+		"docs/RELEASE-CONTRACT.md": "c2b6e12288e56efc351a42214654c6e75830a6bd5e8d8b29e06782c5f9454a30",
+		"scripts/release.mjs": "d5cf78458ddad315addfa3efe0a263dd5c2731a70b84c7d3f24258d9b75261fe",
+		"tests/release-contract.test.mjs": "71fffbac92cf77f36d8eea0fe3b6f788422002604bdfbb399d09128626413c72"
+	}
+}

@@ -1,0 +1,166 @@
+name: Obsidian release
+
+# Deliberately manual. Source pushes, PRs, tags and schedules start no jobs.
+on:
+    workflow_dispatch:
+        inputs:
+            source_sha:
+                description: Merged main commit (full 40-character SHA)
+                required: true
+                type: string
+            preview_sha:
+                description: Passing Community preview SHA (same tree as source)
+                required: true
+                type: string
+            preview_report:
+                description: HTTPS evidence of zero errors and reviewed warnings
+                required: true
+                type: string
+            qualification_report:
+                description: HTTPS qualification evidence (required for Mica)
+                required: false
+                type: string
+            publish:
+                description: Publish a new immutable release after qualification
+                required: true
+                default: false
+                type: boolean
+
+permissions:
+    contents: read
+
+concurrency:
+    group: obsidian-release-${{ github.repository }}
+    cancel-in-progress: false
+
+env:
+    SOURCE_SHA: ${{ inputs.source_sha }}
+    PREVIEW_SHA: ${{ inputs.preview_sha }}
+    PREVIEW_REPORT: ${{ inputs.preview_report }}
+    QUALIFICATION_REPORT: ${{ inputs.qualification_report }}
+
+jobs:
+    qualify:
+        if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
+        runs-on: ubuntu-24.04
+        timeout-minutes: 90
+        outputs:
+            artifact_id: ${{ steps.assets.outputs.artifact-id }}
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+              with:
+                  ref: ${{ inputs.source_sha }}
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+              with:
+                  node-version: 22.12.0
+
+            - name: Read product metadata
+              id: product
+              run: node scripts/release.mjs inspect
+
+            - name: Validate merged candidate and external-evidence bindings
+              run: node scripts/release.mjs candidate
+
+            - name: Check pinned release bundle
+              run: node scripts/release.mjs parity --upstream
+
+            - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+              if: steps.product.outputs.manager == 'pnpm'
+              with:
+                  version: ${{ steps.product.outputs.pnpm }}
+                  run_install: false
+
+            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+              if: steps.product.outputs.rust == 'true'
+              with:
+                  toolchain: ${{ steps.product.outputs.toolchain }}
+                  components: clippy, rustfmt
+                  targets: wasm32-unknown-unknown
+
+            - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+              if: steps.product.outputs.rust == 'true'
+              with:
+                  tool: wasm-pack@0.15.0,cargo-deny@0.20.2
+
+            - name: Install npm dependencies
+              if: steps.product.outputs.manager == 'npm'
+              run: npm ci --ignore-scripts
+
+            - name: Install pnpm dependencies
+              if: steps.product.outputs.manager == 'pnpm'
+              run: pnpm install --frozen-lockfile
+
+            - name: Install browser for Viewgram qualification
+              if: steps.product.outputs.manager == 'npm'
+              run: |
+                  npx --no-install playwright install --with-deps chromium
+                  echo "CHROMIUM_PATH=$(node --input-type=module -e 'import {chromium} from "playwright"; console.log(chromium.executablePath())')" >> "$GITHUB_ENV"
+
+            # Product scripts are the only authority for required test commands.
+            # Native Obsidian access must already be available; never inject an
+            # owner credential or skip an unavailable required profile.
+            - name: Qualify npm product
+              if: steps.product.outputs.manager == 'npm'
+              run: npm run release:qualify
+
+            - name: Qualify pnpm product
+              if: steps.product.outputs.manager == 'pnpm'
+              run: pnpm run release:qualify
+
+            - name: Advisory product compatibility
+              if: steps.product.outputs.advisory == 'true'
+              continue-on-error: true
+              run: node scripts/release.mjs advisory
+
+            - name: Stage exact assets and bound receipt
+              run: node scripts/release.mjs stage
+
+            - name: Upload qualified candidate
+              id: assets
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: obsidian-${{ github.run_id }}-${{ github.run_attempt }}
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 7
+                  path: release/
+
+    publish:
+        if: inputs.publish && github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
+        needs: qualify
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+              with:
+                  ref: ${{ inputs.source_sha }}
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+              with:
+                  node-version: 22.12.0
+
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              with:
+                  artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
+                  path: release
+                  merge-multiple: true
+
+            - name: Verify pinned release bundle
+              run: node scripts/release.mjs parity --upstream
+
+            - name: Install checksum-pinned official GitHub CLI
+              run: node scripts/release.mjs install-gh
+
+            # No product build or dependency lifecycle runs with this token.
+            - name: Publish and verify immutable assets
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  IMMUTABLE_RELEASES_CONFIRMED: ${{ vars.OBSIDIAN_IMMUTABLE_RELEASES_CONFIRMED }}
+              run: node scripts/release.mjs publish
