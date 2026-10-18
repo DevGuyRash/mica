@@ -294,7 +294,9 @@ function entityMenu(
 	const source = entityWidthSource(parent);
 	const pinnedSiblings = Array.from(parent.children).filter(
 		(child): child is HTMLElement =>
-			child.instanceOf(HTMLElement) && !child.hasClass("mica-footer-spacer") && !child.hasClass("mica-nav-spacer"),
+			child.instanceOf(HTMLElement) &&
+			!child.hasClass("mica-footer-spacer") &&
+			!child.hasClass("mica-nav-spacer"),
 	);
 	const tabBudget = parent.hasClass("mica-tab-chip") ? Math.max(0, parent.clientWidth - 48) : null;
 	const mounted = mountResponsiveActionStrip(parent, presented, {
@@ -434,8 +436,7 @@ function mountNestedHoverState(root: HTMLElement, component: Component): () => v
 		let grids = 0;
 		while (element) {
 			if (nested && element.hasClass("mica-region")) next.get("has-nested-hover")?.add(element);
-			if (callout && element.hasClass("mica-nested-callout"))
-				next.get("has-nested-callout-hover")?.add(element);
+			if (callout && element.hasClass("mica-nested-callout")) next.get("has-nested-callout-hover")?.add(element);
 			if (layout && element.hasClass("mica-cell")) next.get("has-nested-layout-hover")?.add(element);
 			if (element.hasClass("mica-grid-wrap")) {
 				if (grids >= 2) next.get("has-deep-grid-hover")?.add(element);
@@ -466,10 +467,15 @@ function mountNestedHoverState(root: HTMLElement, component: Component): () => v
 		update(hovered.item(hovered.length - 1) ?? (root.matches(":hover") ? root : null));
 	};
 	component.registerDomEvent(root, "pointerover", (event) => update(event.targetNode), true);
-	component.registerDomEvent(root, "pointerout", (event) => {
-		const related = event.relatedTarget;
-		update(related && "nodeType" in related ? (related as Node) : null);
-	}, true);
+	component.registerDomEvent(
+		root,
+		"pointerout",
+		(event) => {
+			const related = event.relatedTarget;
+			update(related && "nodeType" in related ? (related as Node) : null);
+		},
+		true,
+	);
 	component.registerDomEvent(root, "pointerleave", () => update(null));
 	const ownerWindow = root.win;
 	let frame: number | null = ownerWindow.requestAnimationFrame(() => {
@@ -1577,9 +1583,7 @@ function resolveAccentHex(el: HTMLElement): string {
 }
 
 function openAppearance(el: HTMLElement, ctx: RenderCtx, resume = false, trackComponent = true): void {
-	const existing = el.querySelector<HTMLElement & { micaClose?: (endSession?: boolean) => void }>(
-		".mica-appearance",
-	);
+	const existing = el.querySelector<HTMLElement & { micaClose?: (endSession?: boolean) => void }>(".mica-appearance");
 	if (existing) {
 		existing.micaClose?.();
 		if (!existing.micaClose) existing.remove();

@@ -368,33 +368,37 @@ export class MicaSettingTab extends PluginSettingTab {
 				setting
 					.addText((text) => {
 						input = text;
-						text
-							.setPlaceholder(DEFAULT_SETTINGS.storageFolder)
+						text.setPlaceholder(DEFAULT_SETTINGS.storageFolder)
 							.setValue(draft)
 							.onChange((value) => {
 								draft = value;
 							});
 					})
 					.addButton((button) => {
-						button.setButtonText("Apply after restart").setCta().onClick(() => {
-							if (moving) return;
-							moving = true;
-							input?.setDisabled(true);
-							button.setDisabled(true);
-							void (async () => {
-								try {
-									await this.micaPlugin.changeStorageFolder(draft);
-									draft = this.micaPlugin.settings.pendingStorageFolder ?? this.micaPlugin.settings.storageFolder;
-									input?.setValue(draft);
-								} catch (error) {
-									console.error("Mica: storage folder request failed", error);
-								} finally {
-									moving = false;
-									input?.setDisabled(false);
-									button.setDisabled(false);
-								}
-							})();
-						});
+						button
+							.setButtonText("Apply after restart")
+							.setCta()
+							.onClick(() => {
+								if (moving) return;
+								moving = true;
+								input?.setDisabled(true);
+								button.setDisabled(true);
+								void (async () => {
+									try {
+										await this.micaPlugin.changeStorageFolder(draft);
+										draft =
+											this.micaPlugin.settings.pendingStorageFolder ??
+											this.micaPlugin.settings.storageFolder;
+										input?.setValue(draft);
+									} catch (error) {
+										console.error("Mica: storage folder request failed", error);
+									} finally {
+										moving = false;
+										input?.setDisabled(false);
+										button.setDisabled(false);
+									}
+								})();
+							});
 					});
 			},
 		);
@@ -590,11 +594,13 @@ export class MicaSettingTab extends PluginSettingTab {
 							card.createDiv({ cls: "mica-theme-card-name", text: t.name });
 							card.addEventListener("click", () => {
 								s.theme = t.id;
-								void commit("theme").then(paintGallery).catch((error: unknown) => {
-									const detail = error instanceof Error ? error.message : String(error);
-									console.error("Mica: could not update theme", error);
-									new Notice(`Mica: could not update theme — ${detail}`);
-								});
+								void commit("theme")
+									.then(paintGallery)
+									.catch((error: unknown) => {
+										const detail = error instanceof Error ? error.message : String(error);
+										console.error("Mica: could not update theme", error);
+										new Notice(`Mica: could not update theme — ${detail}`);
+									});
 							});
 						}
 					};

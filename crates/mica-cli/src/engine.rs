@@ -10,11 +10,12 @@
 use crate::error::{io_ctx, CliError, Result};
 use crate::fsutil;
 use crate::sidecar;
-use crate::vault::{self, NoteRef};
 use crate::sidecar::NoteStore;
+use crate::vault::{self, NoteRef};
 use mica_core::{
-    ensure_ids_impl, fold_ledger_impl, hash_content_impl, new_id_impl, replace_block_content_impl,
-    scan_impl, should_snapshot_impl, note_id_impl, set_note_id_impl, BlockState, Event, HeadRef,
+    ensure_ids_impl, fold_ledger_impl, hash_content_impl, new_id_impl, note_id_impl,
+    replace_block_content_impl, scan_impl, set_note_id_impl, should_snapshot_impl, BlockState,
+    Event, HeadRef,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -56,7 +57,10 @@ pub fn state(note: &NoteRef) -> Result<BTreeMap<String, BlockState>> {
 }
 
 /// Resolve history against the caller's authoritative source generation.
-pub(crate) fn state_from_document(note: &NoteRef, doc: &str) -> Result<BTreeMap<String, BlockState>> {
+pub(crate) fn state_from_document(
+    note: &NoteRef,
+    doc: &str,
+) -> Result<BTreeMap<String, BlockState>> {
     let Some(store) = NoteStore::from_document(note, doc)? else {
         return Ok(BTreeMap::new());
     };
@@ -70,10 +74,12 @@ pub(crate) fn state_from_store(store: &NoteStore) -> Result<BTreeMap<String, Blo
 
 /// Existing history operations must never mint a replacement source identity.
 pub(crate) fn require_store(note: &NoteRef, doc: &str) -> Result<NoteStore> {
-    NoteStore::from_document(note, doc)?.ok_or_else(|| CliError::NotFound(format!(
-        "history is not prepared for {} — run `mica prepare` or `mica snapshot` first",
-        note.vault_rel()
-    )))
+    NoteStore::from_document(note, doc)?.ok_or_else(|| {
+        CliError::NotFound(format!(
+            "history is not prepared for {} — run `mica prepare` or `mica snapshot` first",
+            note.vault_rel()
+        ))
+    })
 }
 
 /// Derive an anchor for an authorized write without publishing it yet.
@@ -91,19 +97,30 @@ pub(crate) fn prepare_history_document(note: &NoteRef, doc: &str) -> Result<Stri
 /// Bulk dry runs keep unprepared source bytes unchanged and use a transient
 /// context only to validate the prospective storage destination. No UUID is
 /// minted and no marker, note, manifest, journal, or object is created.
-pub(crate) fn plan_history_store(note: &NoteRef, source: &str, dry_run: bool) -> Result<(String, NoteStore)> {
-    if dry_run { note.store_root()?.require_ready()?; }
+pub(crate) fn plan_history_store(
+    note: &NoteRef,
+    source: &str,
+    dry_run: bool,
+) -> Result<(String, NoteStore)> {
+    if dry_run {
+        note.store_root()?.require_ready()?;
+    }
     if let Some(store) = NoteStore::from_document(note, source)? {
         validate_note_identity(note, source)?;
         return Ok((source.to_string(), store));
     }
     if dry_run {
-        let prospective = NoteStore::for_id_in(&note.store_root()?, &note.abs, "unprepared-dry-run")?;
+        let prospective =
+            NoteStore::for_id_in(&note.store_root()?, &note.abs, "unprepared-dry-run")?;
         // This transient context may describe only a missing record. It must
         // never interpret some other live note's chosen opaque identity.
-        if sidecar::sidecar_dir(&prospective).try_exists()
-            .map_err(io_ctx("prospective dry-run note record".to_string()))? {
-            return Err(CliError::NotFound("history is not prepared; run `mica prepare` before this dry run".to_string()));
+        if sidecar::sidecar_dir(&prospective)
+            .try_exists()
+            .map_err(io_ctx("prospective dry-run note record".to_string()))?
+        {
+            return Err(CliError::NotFound(
+                "history is not prepared; run `mica prepare` before this dry run".to_string(),
+            ));
         }
         return Ok((source.to_string(), prospective));
     }
@@ -117,15 +134,21 @@ pub(crate) fn preflight_history_write(store: &NoteStore, doc: &str) -> Result<()
     sidecar::preflight_note_record(store)?;
     let ledger = sidecar::read_ledger_report(store)?;
     if ledger.bad_lines != 0 {
-        return Err(CliError::Corrupt("history contains invalid ledger lines; run `mica doctor` before writing".to_string()));
+        return Err(CliError::Corrupt(
+            "history contains invalid ledger lines; run `mica doctor` before writing".to_string(),
+        ));
     }
-    let states = fold_ledger_impl(&ledger.events).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    let states =
+        fold_ledger_impl(&ledger.events).map_err(|error| CliError::Corrupt(error.to_string()))?;
     for state in states.values() {
         if let Some(head) = state.raw_head.as_deref().or(state.head.as_deref()) {
             sidecar::read_object(store, head)?;
         }
     }
-    for span in scan_impl(doc).into_iter().filter(|span| span.closed && span.id().is_some()) {
+    for span in scan_impl(doc)
+        .into_iter()
+        .filter(|span| span.closed && span.id().is_some())
+    {
         let body = &doc[span.content_start..span.content_end];
         sidecar::preflight_object_write(store, &hash_content_impl(body), body)?;
     }
@@ -150,13 +173,17 @@ type IdentityIndexes = BTreeMap<PathBuf, IdentityIndex>;
 static IDENTITY_INDEXES: OnceLock<Mutex<IdentityIndexes>> = OnceLock::new();
 
 fn identity_indexes() -> Result<std::sync::MutexGuard<'static, IdentityIndexes>> {
-    IDENTITY_INDEXES.get_or_init(|| Mutex::new(BTreeMap::new())).lock()
+    IDENTITY_INDEXES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
         .map_err(|_| CliError::Corrupt("note identity index is unavailable".to_string()))
 }
 
 fn identity_index_for<'a>(indexes: &'a mut IdentityIndexes, vault: &Path) -> &'a mut IdentityIndex {
     if !indexes.contains_key(vault) && indexes.len() >= 4 {
-        if let Some(oldest) = indexes.keys().next().cloned() { indexes.remove(&oldest); }
+        if let Some(oldest) = indexes.keys().next().cloned() {
+            indexes.remove(&oldest);
+        }
     }
     indexes.entry(vault.to_path_buf()).or_default()
 }
@@ -166,19 +193,41 @@ fn refresh_identities(index: &mut IdentityIndex, paths: &[PathBuf]) -> Result<()
     index.entries.retain(|path, _| live.contains(path));
     for path in paths {
         let metadata = std::fs::metadata(path).map_err(io_ctx(path.display().to_string()))?;
-        let modified = metadata.modified().map_err(io_ctx(path.display().to_string()))?;
+        let modified = metadata
+            .modified()
+            .map_err(io_ctx(path.display().to_string()))?;
         let bytes = metadata.len();
-        if !index.entries.get(path).is_some_and(|entry| entry.modified == modified && entry.bytes == bytes) {
+        if !index
+            .entries
+            .get(path)
+            .is_some_and(|entry| entry.modified == modified && entry.bytes == bytes)
+        {
             let source = read_doc(path)?;
-            let id = note_id_impl(&source).map_err(|error| CliError::Corrupt(format!(
-                "invalid note identity in {}: {error}", path.display()
-            )))?;
-            index.entries.insert(path.clone(), IndexedIdentity { modified, bytes, id });
+            let id = note_id_impl(&source).map_err(|error| {
+                CliError::Corrupt(format!(
+                    "invalid note identity in {}: {error}",
+                    path.display()
+                ))
+            })?;
+            index.entries.insert(
+                path.clone(),
+                IndexedIdentity {
+                    modified,
+                    bytes,
+                    id,
+                },
+            );
         }
     }
     index.by_id.clear();
     for (path, entry) in &index.entries {
-        if let Some(id) = &entry.id { index.by_id.entry(id.clone()).or_default().insert(path.clone()); }
+        if let Some(id) = &entry.id {
+            index
+                .by_id
+                .entry(id.clone())
+                .or_default()
+                .insert(path.clone());
+        }
     }
     Ok(())
 }
@@ -196,12 +245,19 @@ pub(crate) fn refresh_watch_identities(vault: &Path, paths: &[PathBuf]) -> Resul
 /// At most four vault indexes are retained. Outside watch, only metadata-changed
 /// document generations are read when validating the current vault inventory.
 pub(crate) fn validate_note_identity(note: &NoteRef, doc: &str) -> Result<()> {
-    let id = note_id_impl(doc).map_err(|error| CliError::Corrupt(error.to_string()))?
+    let id = note_id_impl(doc)
+        .map_err(|error| CliError::Corrupt(error.to_string()))?
         .ok_or_else(|| CliError::Corrupt("a writable note has no source identity".to_string()))?;
     let mut indexes = identity_indexes()?;
     let index = identity_index_for(&mut indexes, &note.vault);
-    if !index.watching { refresh_identities(index, &vault::vault_notes_in(&note.store_root()?)?)?; }
-    if let Some(other) = index.by_id.get(&id).and_then(|paths| paths.iter().find(|path| *path != &note.abs)) {
+    if !index.watching {
+        refresh_identities(index, &vault::vault_notes_in(&note.store_root()?)?)?;
+    }
+    if let Some(other) = index
+        .by_id
+        .get(&id)
+        .and_then(|paths| paths.iter().find(|path| *path != &note.abs))
+    {
         return Err(CliError::BadArgs(format!(
             "duplicate mica note id {id:?} in {} and {} — repair the copied identity before writing history",
             note.abs.display(), other.display()
@@ -213,7 +269,9 @@ pub(crate) fn validate_note_identity(note: &NoteRef, doc: &str) -> Result<()> {
 pub(crate) fn guard_note_store(note: &NoteRef, store: &NoteStore, expected: &str) -> Result<()> {
     sidecar::preflight_note_record(store)?;
     if read_doc(&note.abs)? != expected
-        || note_id_impl(expected).map_err(|error| CliError::Corrupt(error.to_string()))?.as_deref()
+        || note_id_impl(expected)
+            .map_err(|error| CliError::Corrupt(error.to_string()))?
+            .as_deref()
             != Some(store.note_id.as_str())
     {
         return Err(CliError::Corrupt(format!(
@@ -264,11 +322,28 @@ pub fn snapshot_note(note: &NoteRef, force: bool, stamp_ids: bool) -> Result<Vec
     validate_unique_block_ids(&blocks)?;
     let note_id = note_id_impl(&prepared).map_err(|error| CliError::Corrupt(error.to_string()))?;
     if note_id.is_none()
-        && !blocks.iter().filter(|block| block.closed && block.id().is_some())
-            .any(|block| should_snapshot_impl(&prepared[block.content_start..block.content_end], HeadRef::None, force)) {
-        return Ok(blocks.iter().filter(|block| block.closed).filter_map(|block| block.id().map(|id| SnapshotAction {
-            block: id.to_string(), hash: None, skipped: Some("no content yet".to_string()),
-        })).collect());
+        && !blocks
+            .iter()
+            .filter(|block| block.closed && block.id().is_some())
+            .any(|block| {
+                should_snapshot_impl(
+                    &prepared[block.content_start..block.content_end],
+                    HeadRef::None,
+                    force,
+                )
+            })
+    {
+        return Ok(blocks
+            .iter()
+            .filter(|block| block.closed)
+            .filter_map(|block| {
+                block.id().map(|id| SnapshotAction {
+                    block: id.to_string(),
+                    hash: None,
+                    skipped: Some("no content yet".to_string()),
+                })
+            })
+            .collect());
     }
     if note_id.is_none() {
         prepared = Cow::Owned(prepare_history_document(note, &prepared)?);
@@ -345,7 +420,9 @@ fn snapshot_exact_classified_in(
                     .as_deref()
                     .or(s.head_version_id.as_deref())
             });
-            let head_hash = head.map(|value| sidecar::resolve_note_hash(store, value)).transpose()?;
+            let head_hash = head
+                .map(|value| sidecar::resolve_note_hash(store, value))
+                .transpose()?;
             if head_hash.as_deref() == Some(hash.as_str()) {
                 actions.push(SnapshotAction {
                     block: id.to_string(),
@@ -364,7 +441,15 @@ fn snapshot_exact_classified_in(
                 (Some(_), Some(c)) => HeadRef::Content(c),
             };
             if should_snapshot_impl(content, head_ref, force) {
-                write_version(store, id, &hash, content, head_version_id, None, &mut events)?;
+                write_version(
+                    store,
+                    id,
+                    &hash,
+                    content,
+                    head_version_id,
+                    None,
+                    &mut events,
+                )?;
                 actions.push(SnapshotAction {
                     block: id.to_string(),
                     hash: Some(hash),
@@ -480,9 +565,14 @@ fn mutate_exact_prepared(
     }
     let prepared_blocks = scan_impl(&prepared);
     validate_unique_block_ids(&prepared_blocks)?;
-    if note_id_impl(&prepared).map_err(|error| CliError::Corrupt(error.to_string()))?.as_deref()
-        != Some(store.note_id.as_str()) {
-        return Err(CliError::Corrupt("prepared source does not match the operation's note identity".to_string()));
+    if note_id_impl(&prepared)
+        .map_err(|error| CliError::Corrupt(error.to_string()))?
+        .as_deref()
+        != Some(store.note_id.as_str())
+    {
+        return Err(CliError::Corrupt(
+            "prepared source does not match the operation's note identity".to_string(),
+        ));
     }
 
     // Derive and validate the complete requested result before any persistent
@@ -490,12 +580,20 @@ fn mutate_exact_prepared(
     let next = derive(&prepared)?;
     let next_blocks = scan_impl(&next);
     validate_unique_block_ids(&next_blocks)?;
-    if note_id_impl(&next).map_err(|error| CliError::Corrupt(error.to_string()))?.as_deref()
-        != Some(store.note_id.as_str()) {
-        return Err(CliError::Corrupt("a structural edit changed the source note identity".to_string()));
+    if note_id_impl(&next)
+        .map_err(|error| CliError::Corrupt(error.to_string()))?
+        .as_deref()
+        != Some(store.note_id.as_str())
+    {
+        return Err(CliError::Corrupt(
+            "a structural edit changed the source note identity".to_string(),
+        ));
     }
     preflight_history_write(&store, &prepared)?;
-    for span in next_blocks.iter().filter(|span| span.closed && span.id().is_some()) {
+    for span in next_blocks
+        .iter()
+        .filter(|span| span.closed && span.id().is_some())
+    {
         let body = &next[span.content_start..span.content_end];
         sidecar::preflight_object_write(&store, &hash_content_impl(body), body)?;
     }
@@ -520,9 +618,17 @@ fn mutate_exact_prepared(
 
 /// The exact original may precede staged identity publication. A present
 /// original ID must match this record; the postimage must carry its fixed ID.
-pub(crate) fn validate_journal_generations(store: &NoteStore, original: &str, next: &str) -> Result<()> {
-    let original_id = note_id_impl(original).map_err(|error| CliError::Corrupt(error.to_string()))?;
-    if original_id.as_deref().is_some_and(|id| id != store.note_id.as_str()) {
+pub(crate) fn validate_journal_generations(
+    store: &NoteStore,
+    original: &str,
+    next: &str,
+) -> Result<()> {
+    let original_id =
+        note_id_impl(original).map_err(|error| CliError::Corrupt(error.to_string()))?;
+    if original_id
+        .as_deref()
+        .is_some_and(|id| id != store.note_id.as_str())
+    {
         return Err(CliError::Corrupt("journal original source identity conflicts with its retained note record; the note and journal were preserved".to_string()));
     }
     let next_id = note_id_impl(next).map_err(|error| CliError::Corrupt(error.to_string()))?;
@@ -559,7 +665,13 @@ pub(crate) fn snapshot_published(
     published: &PublishedMutation,
     force: bool,
 ) -> Result<()> {
-    match snapshot_exact_classified_in(note, &published.store, &published.doc, &published.blocks, force) {
+    match snapshot_exact_classified_in(
+        note,
+        &published.store,
+        &published.doc,
+        &published.blocks,
+        force,
+    ) {
         Ok(_) => Ok(()),
         Err(failure) if failure.rollback_safe => {
             guard_note_store(note, &published.store, &published.doc)?;
@@ -682,7 +794,11 @@ fn write_version(
 }
 
 /// Rewrite the manifest from an already-scanned current doc.
-pub(crate) fn refresh_manifest(note: &NoteRef, store: &NoteStore, spans: &[mica_core::BlockSpan]) -> Result<()> {
+pub(crate) fn refresh_manifest(
+    note: &NoteRef,
+    store: &NoteStore,
+    spans: &[mica_core::BlockSpan],
+) -> Result<()> {
     let blocks = manifest_blocks(spans);
     sidecar::write_manifest(
         store,
@@ -714,17 +830,18 @@ pub(crate) fn verify_migration_completion(
     migrated: &str,
     ledger: &sidecar::LedgerRead,
 ) -> Result<()> {
-    let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
-        CliError::Corrupt("migration completion preimage is missing".to_string())
-    })?;
+    let original = sidecar::read_object(store, &journal.original)?
+        .ok_or_else(|| CliError::Corrupt("migration completion preimage is missing".to_string()))?;
     validate_journal_generations(store, &original, migrated)?;
     let blocks = scan_impl(migrated);
-    let states = fold_ledger_impl(&ledger.events)
-        .map_err(|error| CliError::Corrupt(error.to_string()))?;
+    let states =
+        fold_ledger_impl(&ledger.events).map_err(|error| CliError::Corrupt(error.to_string()))?;
     for block in blocks.iter().filter(|block| block.closed) {
         let Some(id) = block.id() else { continue };
         let content = &migrated[block.content_start..block.content_end];
-        let head = states.get(id).and_then(|state| state.raw_head.as_deref().or(state.head.as_deref()));
+        let head = states
+            .get(id)
+            .and_then(|state| state.raw_head.as_deref().or(state.head.as_deref()));
         let head_content = match head {
             Some(hash) => Some(sidecar::read_object(store, hash)?.ok_or_else(|| {
                 CliError::Corrupt("migration completion head object is missing".to_string())
@@ -737,7 +854,8 @@ pub(crate) fn verify_migration_completion(
         };
         if should_snapshot_impl(content, head_ref, false) {
             return Err(CliError::Corrupt(
-                "migration head snapshot is incomplete; the pending journal was preserved".to_string(),
+                "migration head snapshot is incomplete; the pending journal was preserved"
+                    .to_string(),
             ));
         }
     }
@@ -792,9 +910,16 @@ pub fn restore_as_checkpoint(
         return Ok(false);
     }
     let before = state_from_store(&store)?;
-    if !before.get(block_id).is_some_and(|block| block.versions.iter().chain(&block.removed_versions)
-        .any(|version| version.version_id == source_version_id && version.hash == hash)) {
-        return Err(CliError::Corrupt("restore selection no longer belongs to the current note history".to_string()));
+    if !before.get(block_id).is_some_and(|block| {
+        block
+            .versions
+            .iter()
+            .chain(&block.removed_versions)
+            .any(|version| version.version_id == source_version_id && version.hash == hash)
+    }) {
+        return Err(CliError::Corrupt(
+            "restore selection no longer belongs to the current note history".to_string(),
+        ));
     }
     let previous_head = before.get(block_id).and_then(|block| {
         block
@@ -844,9 +969,16 @@ pub fn reset_head(
         .ok_or_else(|| CliError::NotFound(format!("block {block_id} not found in the note")))?;
     let same_content = current[current_block.content_start..current_block.content_end] == content;
     let before = state_from_store(&store)?;
-    if !before.get(block_id).is_some_and(|block| block.versions.iter().chain(&block.removed_versions)
-        .any(|version| version.version_id == target_version_id && version.hash == hash)) {
-        return Err(CliError::Corrupt("reset selection no longer belongs to the current note history".to_string()));
+    if !before.get(block_id).is_some_and(|block| {
+        block
+            .versions
+            .iter()
+            .chain(&block.removed_versions)
+            .any(|version| version.version_id == target_version_id && version.hash == hash)
+    }) {
+        return Err(CliError::Corrupt(
+            "reset selection no longer belongs to the current note history".to_string(),
+        ));
     }
     let same_head = before.get(block_id).and_then(|block| {
         block
@@ -896,10 +1028,18 @@ pub fn set_versions_visible(
     let doc = read_doc(&note.abs)?;
     let store = require_store(note, &doc)?;
     let history = state_from_store(&store)?;
-    if !version_ids.iter().all(|target| history.get(block_id).is_some_and(|block| {
-        block.versions.iter().chain(&block.removed_versions).any(|version| &version.version_id == target)
-    })) {
-        return Err(CliError::Corrupt("version selection no longer belongs to the current note history".to_string()));
+    if !version_ids.iter().all(|target| {
+        history.get(block_id).is_some_and(|block| {
+            block
+                .versions
+                .iter()
+                .chain(&block.removed_versions)
+                .any(|version| &version.version_id == target)
+        })
+    }) {
+        return Err(CliError::Corrupt(
+            "version selection no longer belongs to the current note history".to_string(),
+        ));
     }
     guard_note_store(note, &store, &doc)?;
     sidecar::append_events(&store, &events)
@@ -962,9 +1102,16 @@ pub fn label(note: &NoteRef, block_id: &str, version_id: &str, label: &str) -> R
     let doc = read_doc(&note.abs)?;
     let store = require_store(note, &doc)?;
     let history = state_from_store(&store)?;
-    if !history.get(block_id).is_some_and(|block| block.versions.iter().chain(&block.removed_versions)
-        .any(|version| version.version_id == version_id)) {
-        return Err(CliError::Corrupt("label selection no longer belongs to the current note history".to_string()));
+    if !history.get(block_id).is_some_and(|block| {
+        block
+            .versions
+            .iter()
+            .chain(&block.removed_versions)
+            .any(|version| version.version_id == version_id)
+    }) {
+        return Err(CliError::Corrupt(
+            "label selection no longer belongs to the current note history".to_string(),
+        ));
     }
     guard_note_store(note, &store, &doc)?;
     sidecar::append_events(
@@ -1025,8 +1172,12 @@ mod tests {
 
     fn test_store(note: &NoteRef) -> NoteStore {
         let doc = read_doc(&note.abs).expect("read fixture");
-        NoteStore::from_document(note, &doc).expect("fixture binding")
-            .unwrap_or_else(|| NoteStore::for_id(&note.vault, &note.abs, "fixture-unprepared").expect("fixture handle"))
+        NoteStore::from_document(note, &doc)
+            .expect("fixture binding")
+            .unwrap_or_else(|| {
+                NoteStore::for_id(&note.vault, &note.abs, "fixture-unprepared")
+                    .expect("fixture handle")
+            })
     }
 
     fn fixture_source(source: &str) -> String {
@@ -1206,7 +1357,8 @@ mod tests {
             "hiding the current checkpoint must not manufacture a dirty working copy"
         );
 
-        std::fs::write(&note.abs, fixture_source("```mica id=a\nnewer\n```\n")).expect("edit live note");
+        std::fs::write(&note.abs, fixture_source("```mica id=a\nnewer\n```\n"))
+            .expect("edit live note");
         snapshot_note(&note, false, false).expect("snapshot next edit");
         let next = state(&note).expect("next state")["a"].clone();
         let newest = next.versions.last().expect("new visible checkpoint");
@@ -1221,14 +1373,15 @@ mod tests {
     fn failed_post_publish_snapshot_rolls_back_exact_note_generation() {
         let (_dir, note) = note_fixture("```mica id=a\nnew\n```\n");
         let previous = fixture_source("```mica id=a\nold\n```\n");
+        let store = test_store(&note);
+        sidecar::ensure_note_record(&store).expect("initialize the operation's fixed store");
         let published = PublishedMutation {
-            store: test_store(&note),
+            store: store.clone(),
             doc: read_doc(&note.abs).expect("published note"),
             blocks: scan_impl(&read_doc(&note.abs).expect("fixture source")),
             previous: previous.clone(),
         };
-        sidecar::ensure_note_record(&test_store(&note)).expect("initialize fixture record");
-        std::fs::create_dir_all(sidecar::ledger_path(&test_store(&note))).expect("invalid ledger directory");
+        std::fs::create_dir_all(sidecar::ledger_path(&store)).expect("invalid ledger directory");
 
         assert!(snapshot_published(&note, &published, false).is_err());
         assert_eq!(read_doc(&note.abs).expect("rolled back note"), previous);
@@ -1237,7 +1390,11 @@ mod tests {
     #[test]
     fn unprepared_history_read_preserves_source_and_storage() {
         let dir = tempfile::tempdir().expect("temporary vault");
-        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf(), store: None };
+        let note = NoteRef {
+            abs: dir.path().join("Note.md"),
+            vault: dir.path().to_path_buf(),
+            store: None,
+        };
         let source = "```mica id=a\nbody\n```\n";
         std::fs::write(&note.abs, source).expect("seed unprepared note");
         assert!(state(&note).expect("empty history").is_empty());
@@ -1248,26 +1405,41 @@ mod tests {
     #[test]
     fn first_snapshot_binds_source_identity_to_central_history() {
         let dir = tempfile::tempdir().expect("temporary vault");
-        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf(), store: None };
+        let note = NoteRef {
+            abs: dir.path().join("Note.md"),
+            vault: dir.path().to_path_buf(),
+            store: None,
+        };
         std::fs::write(&note.abs, "```mica id=a\nbody\n```\n").expect("seed unprepared note");
         snapshot_note(&note, false, true).expect("first history write");
         let source = read_doc(&note.abs).expect("prepared source");
-        let id = mica_core::note_id_impl(&source).expect("valid identity").expect("source identity");
+        let id = mica_core::note_id_impl(&source)
+            .expect("valid identity")
+            .expect("source identity");
         let paths = mica_core::note_paths_impl(&id).expect("central paths");
         assert!(dir.path().join(paths.ledger).is_file());
         assert!(dir.path().join("mica-data/objects").is_dir());
         assert!(!note.abs.with_extension("mica").exists());
-        assert_eq!(state(&note).expect("central history")["a"].versions.len(), 1);
+        assert_eq!(
+            state(&note).expect("central history")["a"].versions.len(),
+            1
+        );
     }
 
     #[test]
     fn copied_source_identity_fails_before_history_writes() {
         let dir = tempfile::tempdir().expect("temporary vault");
-        let note = NoteRef { abs: dir.path().join("Note.md"), vault: dir.path().to_path_buf(), store: None };
+        let note = NoteRef {
+            abs: dir.path().join("Note.md"),
+            vault: dir.path().to_path_buf(),
+            store: None,
+        };
         let source = fixture_source("```mica id=a\nbody\n```\n");
         std::fs::write(&note.abs, &source).expect("seed note");
         std::fs::write(dir.path().join("Copy.md"), &source).expect("seed duplicate");
-        assert!(matches!(snapshot_note(&note, false, true), Err(CliError::BadArgs(message)) if message.contains("duplicate mica note id")));
+        assert!(
+            matches!(snapshot_note(&note, false, true), Err(CliError::BadArgs(message)) if message.contains("duplicate mica note id"))
+        );
         assert_eq!(read_doc(&note.abs).expect("unchanged source"), source);
         assert!(!dir.path().join("mica-data").exists());
     }

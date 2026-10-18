@@ -19,6 +19,7 @@ const bundle = await build({
 	bundle: true,
 	format: "esm",
 	platform: "node",
+	target: "node22.12",
 	loader: { ".wasm": "binary" },
 	write: false,
 	plugins: [

@@ -29,8 +29,7 @@ function assertWasmDeclarations() {
 			.match(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[A-Za-z_$][\w$]*|[^\s]/g)
 			?.filter(
 				(token, index, tokens) =>
-					!(token === "|" && tokens[index - 1] === ":") &&
-					!(token === "," && tokens[index + 1] === ")"),
+					!(token === "|" && tokens[index - 1] === ":") && !(token === "," && tokens[index + 1] === ")"),
 			)
 			.map((token) => (token === "any" ? "unknown" : token))
 			.join("");
@@ -43,10 +42,14 @@ function assertWasmDeclarations() {
 	const generated = readFileSync(generatedUrl, "utf8");
 	const declarations = stripComments(generated);
 	const bridge = readFileSync(new URL("./src/wasm/bridge.ts", import.meta.url), "utf8");
-	const imports =
-		/^import\s+[A-Za-z_$][\w$]*\s*,\s*\{([^}]+)\}\s*from\s*["']\.\/pkg\/mica_core\.js["'];/m.exec(bridge);
+	const imports = /^import\s+[A-Za-z_$][\w$]*\s*,\s*\{([^}]+)\}\s*from\s*["']\.\/pkg\/mica_core\.js["'];/m.exec(
+		bridge,
+	);
 	if (!imports) throw new Error("Cannot identify the bridge's WASM import contract");
-	const names = imports[1].split(",").map((name) => name.trim()).filter(Boolean);
+	const names = imports[1]
+		.split(",")
+		.map((name) => name.trim())
+		.filter(Boolean);
 	if (new Set(names).size !== names.length || names.some((name) => !/^[A-Za-z_$][\w$]*$/.test(name))) {
 		throw new Error("Review the bridge's WASM imports before checking declarations");
 	}

@@ -58,7 +58,11 @@ pub fn resolve_note_scope(path: &str, vault: Option<&Path>) -> Result<NoteScope>
 }
 
 /// Resolve a scope while retaining an optional first-use store selection.
-pub fn resolve_note_scope_at(path: &str, vault: Option<&Path>, folder: Option<&str>) -> Result<NoteScope> {
+pub fn resolve_note_scope_at(
+    path: &str,
+    vault: Option<&Path>,
+    folder: Option<&str>,
+) -> Result<NoteScope> {
     let typed = PathBuf::from(path);
     let typed_md = with_markdown_extension(&typed);
 
@@ -126,7 +130,11 @@ pub fn resolve_note_scope_at(path: &str, vault: Option<&Path>, folder: Option<&s
             store: Some(store.clone()),
         })
         .collect();
-    Ok(NoteScope { vault: root, notes, store })
+    Ok(NoteScope {
+        vault: root,
+        notes,
+        store,
+    })
 }
 
 fn with_markdown_extension(path: &Path) -> PathBuf {
@@ -177,7 +185,8 @@ fn validate_visible_scope(target: &Path, store: &StoreRoot) -> Result<()> {
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
     if mica_core::is_managed_path_at_impl(&relative_text, Some(&store.layout.root))
-        .map_err(|error| CliError::Corrupt(error.to_string()))? {
+        .map_err(|error| CliError::Corrupt(error.to_string()))?
+    {
         return Err(CliError::BadArgs(
             "Mica managed storage is not a live note scope".to_string(),
         ));
@@ -259,7 +268,8 @@ pub fn find_vault(explicit: Option<&Path>, start: &Path) -> Result<PathBuf> {
             return Ok(selected.vault);
         }
         if cur.join(".obsidian").is_dir() {
-            let selected = std::fs::canonicalize(&cur).map_err(io_ctx(cur.display().to_string()))?;
+            let selected =
+                std::fs::canonicalize(&cur).map_err(io_ctx(cur.display().to_string()))?;
             validate_root_selection(&selected)?;
             return Ok(selected);
         }
@@ -275,15 +285,23 @@ pub fn find_vault(explicit: Option<&Path>, start: &Path) -> Result<PathBuf> {
 fn validate_root_selection(selected: &Path) -> Result<()> {
     let layout = mica_core::storage_layout_impl();
     for ancestor in selected.ancestors() {
-        if ancestor.file_name().is_some_and(|name| name == std::ffi::OsStr::new(&layout.root)) {
+        if ancestor
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(&layout.root))
+        {
             return Err(CliError::BadArgs("Mica managed storage cannot be selected as a live root — select the containing root instead".to_string()));
         }
         if path_exists(&ancestor.join(&layout.location))? {
             let store = StoreRoot::open(ancestor)?;
-            let relative = selected.strip_prefix(ancestor).map_err(|_| CliError::BadArgs("invalid root ancestry".to_string()))?;
-            let text = relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            let relative = selected
+                .strip_prefix(ancestor)
+                .map_err(|_| CliError::BadArgs("invalid root ancestry".to_string()))?;
+            let text = relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if mica_core::is_managed_path_at_impl(&text, Some(&store.layout.root))
-                .map_err(|error| CliError::Corrupt(error.to_string()))? {
+                .map_err(|error| CliError::Corrupt(error.to_string()))?
+            {
                 return Err(CliError::BadArgs("Mica configured storage cannot be selected as a live root — select the containing root instead".to_string()));
             }
         }
@@ -370,8 +388,14 @@ pub fn vault_notes(vault: &Path) -> Result<Vec<PathBuf>> {
 /// Enumerate live notes without rerouting a retained command context.
 pub fn vault_notes_in(store: &StoreRoot) -> Result<Vec<PathBuf>> {
     store.revalidate()?;
-    walk_vault_from(&store.vault, &store.vault, Some(&store.layout.root), true, false)
-        .map(|inventory| inventory.notes)
+    walk_vault_from(
+        &store.vault,
+        &store.vault,
+        Some(&store.layout.root),
+        true,
+        false,
+    )
+    .map(|inventory| inventory.notes)
 }
 
 pub(crate) struct VaultInventory {
@@ -492,7 +516,11 @@ fn contained_note(abs: PathBuf, store: StoreRoot) -> Result<NoteRef> {
         )));
     }
     validate_visible_scope(&abs, &store)?;
-    Ok(NoteRef { abs, vault, store: Some(store) })
+    Ok(NoteRef {
+        abs,
+        vault,
+        store: Some(store),
+    })
 }
 
 /// Make `p` absolute without requiring it to exist (unlike `canonicalize`).
@@ -560,7 +588,8 @@ mod tests {
         std::fs::write(
             vault.join("mica-data/root.json"),
             r#"{"format":1,"storeId":"00000000-0000-4000-8000-000000000001"}"#,
-        ).expect("central store marker");
+        )
+        .expect("central store marker");
         std::fs::create_dir_all(scope_dir.join(".hidden")).expect("hidden directory");
         std::fs::write(vault.join("Prompts.md"), "same-name note").expect("fallback note");
         std::fs::write(scope_dir.join("B.md"), "b").expect("B note");

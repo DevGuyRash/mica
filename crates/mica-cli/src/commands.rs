@@ -995,12 +995,16 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
     let notes: Vec<NoteRef> = match note {
         Some(n) => {
             let note = ctx.note(n)?;
-            if dry_run { note.store_root()?.require_ready()?; }
+            if dry_run {
+                note.store_root()?.require_ready()?;
+            }
             vec![note]
         }
         None => {
             let selected_store = ctx.store_root()?;
-            if dry_run { selected_store.require_ready()?; }
+            if dry_run {
+                selected_store.require_ready()?;
+            }
             let root = selected_store.vault.clone();
             vault::vault_notes_in(&selected_store)?
                 .into_iter()
@@ -1139,11 +1143,7 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
                 sidecar::write_object(&store, hash, content)?;
                 sidecar::verify_written_object(&store, hash, content)?;
             }
-            sidecar::claim_migration_journal(
-                &store,
-                &journal,
-                journal_preimage.as_deref(),
-            )?;
+            sidecar::claim_migration_journal(&store, &journal, journal_preimage.as_deref())?;
             engine::guard_note_store(&n, &store, &doc)?;
             fsutil::atomic_write_if_unchanged(&n.abs, doc.as_bytes(), migrated.as_bytes())?;
             finish_migration(&n, &store, &migrated, &mut journal)?;
@@ -1181,16 +1181,27 @@ pub fn migrate(ctx: &Ctx, note: Option<&str>, dry_run: bool, callouts: Option<&s
 /// Discover only an already-staged central conversion whose exact original is
 /// this unanchored source. Enumeration validates the manifest's hashed key and
 /// contained current path; this never imports sidecars or creates an identity.
-fn find_pending_migration_store(note: &NoteRef, source: &str) -> Result<Option<(NoteStore, sidecar::MigrationJournal)>> {
+fn find_pending_migration_store(
+    note: &NoteRef,
+    source: &str,
+) -> Result<Option<(NoteStore, sidecar::MigrationJournal)>> {
     let mut selected = None;
     for store in sidecar::enumerate_note_stores_in(&note.store_root()?)? {
-        if store.note != note.abs { continue; }
-        let Some(journal) = sidecar::read_migration_journal(&store)? else { continue; };
-        if journal.status != "pending" { continue; }
+        if store.note != note.abs {
+            continue;
+        }
+        let Some(journal) = sidecar::read_migration_journal(&store)? else {
+            continue;
+        };
+        if journal.status != "pending" {
+            continue;
+        }
         let original = sidecar::read_object(&store, &journal.original)?.ok_or_else(|| CliError::Corrupt(
             "pending central conversion is missing its exact original object; no new note identity was created".to_string()
         ))?;
-        if original != source { continue; }
+        if original != source {
+            continue;
+        }
         if selected.replace((store, journal)).is_some() {
             return Err(CliError::Corrupt("multiple pending central conversions match this unanchored source; no history was changed".to_string()));
         }
@@ -1198,7 +1209,12 @@ fn find_pending_migration_store(note: &NoteRef, source: &str) -> Result<Option<(
     Ok(selected)
 }
 
-fn guard_pending_migration_source(note: &NoteRef, store: &NoteStore, expected: &str, migrated: &str) -> Result<()> {
+fn guard_pending_migration_source(
+    note: &NoteRef,
+    store: &NoteStore,
+    expected: &str,
+    migrated: &str,
+) -> Result<()> {
     engine::validate_journal_generations(store, expected, migrated)?;
     engine::validate_note_identity(note, migrated)?;
     sidecar::preflight_note_record(store)?;
@@ -1209,7 +1225,11 @@ fn guard_pending_migration_source(note: &NoteRef, store: &NoteStore, expected: &
 }
 
 /// Resume a pending migration from either exact journaled generation.
-fn resume_migration(note: &NoteRef, store: &NoteStore, journal: &mut sidecar::MigrationJournal) -> Result<()> {
+fn resume_migration(
+    note: &NoteRef,
+    store: &NoteStore,
+    journal: &mut sidecar::MigrationJournal,
+) -> Result<()> {
     let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
         CliError::Corrupt(format!(
             "migration pre-image object {} is missing — restore it before retrying",
@@ -1249,8 +1269,14 @@ fn finish_migration(
     engine::preflight_journal_events(store, &journal.events)?;
     let status = sidecar::classify_event_batch(store, &journal.events)?;
     sidecar::append_events(store, &status.missing)?;
-    if !sidecar::classify_event_batch(store, &journal.events)?.missing.is_empty() {
-        return Err(CliError::Corrupt("migration ledger append could not be verified; the pending journal was preserved".to_string()));
+    if !sidecar::classify_event_batch(store, &journal.events)?
+        .missing
+        .is_empty()
+    {
+        return Err(CliError::Corrupt(
+            "migration ledger append could not be verified; the pending journal was preserved"
+                .to_string(),
+        ));
     }
     let blocks = scan_impl(migrated);
     engine::snapshot_exact(note, store, migrated, &blocks, false)?;
@@ -1286,11 +1312,19 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     let mut content = Vec::new();
     let mut by_identity = BTreeMap::new();
     for abs in vault::vault_notes_in(&selected_store)? {
-        let note = NoteRef { abs, vault: root.clone(), store: Some(selected_store.clone()) };
+        let note = NoteRef {
+            abs,
+            vault: root.clone(),
+            store: Some(selected_store.clone()),
+        };
         let doc = engine::read_doc(&note.abs)?;
-        if let Some(id) = mica_core::note_id_impl(&doc)
-            .map_err(|error| CliError::Corrupt(error.to_string()))? {
-            if by_identity.insert(id.clone(), (note.clone(), doc.clone())).is_some() {
+        if let Some(id) =
+            mica_core::note_id_impl(&doc).map_err(|error| CliError::Corrupt(error.to_string()))?
+        {
+            if by_identity
+                .insert(id.clone(), (note.clone(), doc.clone()))
+                .is_some()
+            {
                 return Err(CliError::BadArgs(format!(
                     "duplicate mica note id {id:?} — repair the copied identity before updating history hints"
                 )));
@@ -1298,7 +1332,10 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
         }
         for block in scan_impl(&doc) {
             if let Some(id) = block.id() {
-                content.push(ContentRef { block: id.to_string(), note: note.vault_rel() });
+                content.push(ContentRef {
+                    block: id.to_string(),
+                    note: note.vault_rel(),
+                });
             }
         }
     }
@@ -1307,19 +1344,28 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     let mut updated_hints = Vec::new();
     for store in &stores {
         let events = sidecar::read_ledger(store)?;
-        let record = sidecar::sidecar_dir(store).strip_prefix(&root)
+        let record = sidecar::sidecar_dir(store)
+            .strip_prefix(&root)
             .map_err(|_| CliError::Corrupt("central note record escaped its vault".to_string()))?
-            .to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
         let mut seen = BTreeSet::new();
         for event in &events {
             let block = match event {
-                Event::AddVersion { block, .. } | Event::ReplaceVersion { block, .. }
-                | Event::SetHead { block, .. } | Event::Label { block, .. }
-                | Event::Checkpoint { block, .. } | Event::MoveHead { block, .. }
-                | Event::VersionLabel { block, .. } | Event::VersionVisibility { block, .. } => block,
+                Event::AddVersion { block, .. }
+                | Event::ReplaceVersion { block, .. }
+                | Event::SetHead { block, .. }
+                | Event::Label { block, .. }
+                | Event::Checkpoint { block, .. }
+                | Event::MoveHead { block, .. }
+                | Event::VersionLabel { block, .. }
+                | Event::VersionVisibility { block, .. } => block,
             };
             if seen.insert(block) {
-                screfs.push(SidecarRef { block: block.clone(), sidecar: record.clone() });
+                screfs.push(SidecarRef {
+                    block: block.clone(),
+                    sidecar: record.clone(),
+                });
             }
         }
         if let Some((note, doc)) = by_identity.get(&store.note_id) {
@@ -1333,14 +1379,26 @@ pub fn repair(ctx: &Ctx) -> Result<()> {
     }
     let actions = reconcile_impl(&content, &screfs);
     if ctx.json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "updatedHints": updated_hints, "actions": actions.len()
-        })).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "updatedHints": updated_hints, "actions": actions.len()
+            }))
+            .unwrap_or_default()
+        );
         return Ok(());
     }
-    for path in &updated_hints { println!("{} updated history path hint: {path}", s.green("✓")); }
-    println!("{} issue(s) found, {} path hint(s) updated", actions.len(), updated_hints.len());
-    for action in &actions { println!("  {}", s.yellow(&format!("{action:?}"))); }
+    for path in &updated_hints {
+        println!("{} updated history path hint: {path}", s.green("✓"));
+    }
+    println!(
+        "{} issue(s) found, {} path hint(s) updated",
+        actions.len(),
+        updated_hints.len()
+    );
+    for action in &actions {
+        println!("  {}", s.yellow(&format!("{action:?}")));
+    }
     Ok(())
 }
 
@@ -1377,8 +1435,10 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
         // Note gone but sidecar remains?
         let note = store.note.clone();
         if note.is_file() {
-            match engine::read_doc(&note).and_then(|source| mica_core::note_id_impl(&source)
-                .map_err(|error| CliError::Corrupt(error.to_string()))) {
+            match engine::read_doc(&note).and_then(|source| {
+                mica_core::note_id_impl(&source)
+                    .map_err(|error| CliError::Corrupt(error.to_string()))
+            }) {
                 Ok(id) if id.as_deref() == Some(store.note_id.as_str()) => {}
                 Ok(_) => {
                     problems += 1;
@@ -1539,8 +1599,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 }
             }
             Ok(Some(journal)) => {
-                if let Err(error) =
-                    crate::consolidate::inspect_completed_journal(&store, &journal)
+                if let Err(error) = crate::consolidate::inspect_completed_journal(&store, &journal)
                 {
                     problems += 1;
                     findings.push(serde_json::json!({
@@ -1985,7 +2044,8 @@ mod tests {
     }
 
     fn test_store(note: &NoteRef) -> NoteStore {
-        engine::require_store(note, &engine::read_doc(&note.abs).expect("fixture source")).expect("fixture store")
+        engine::require_store(note, &engine::read_doc(&note.abs).expect("fixture source"))
+            .expect("fixture store")
     }
 
     fn with_note_frontmatter_id(doc: &str) -> String {
@@ -2005,14 +2065,16 @@ mod tests {
             store: None,
         };
         std::fs::write(&note.abs, with_note_frontmatter_id(current)).expect("seed note");
-        let original = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nold\n```\n";
-        let migrated = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nnew\n```\n";
+        let original = with_note_frontmatter_id("```mica id=block\nold\n```\n");
+        let migrated = with_note_frontmatter_id("```mica id=block\nnew\n```\n");
         let archive = "archived\n";
-        let original_hash = hash_content_impl(original);
-        let migrated_hash = hash_content_impl(migrated);
+        let original_hash = hash_content_impl(&original);
+        let migrated_hash = hash_content_impl(&migrated);
         let archive_hash = hash_content_impl(archive);
-        sidecar::write_object(&test_store(&note), &original_hash, original).expect("original object");
-        sidecar::write_object(&test_store(&note), &migrated_hash, migrated).expect("migrated object");
+        sidecar::write_object(&test_store(&note), &original_hash, &original)
+            .expect("original object");
+        sidecar::write_object(&test_store(&note), &migrated_hash, &migrated)
+            .expect("migrated object");
         sidecar::write_object(&test_store(&note), &archive_hash, archive).expect("archive object");
         let journal = sidecar::MigrationJournal {
             format: 1,
@@ -2066,7 +2128,10 @@ mod tests {
             resume_migration(&note, &test_store(&note), &mut journal),
             Err(CliError::Corrupt(message)) if message.contains("diverged")
         ));
-        assert_eq!(engine::read_doc(&note.abs).expect("read note"), with_note_frontmatter_id(divergent));
+        assert_eq!(
+            engine::read_doc(&note.abs).expect("read note"),
+            with_note_frontmatter_id(divergent)
+        );
         assert_eq!(
             sidecar::read_migration_journal(&test_store(&note))
                 .expect("read journal")
@@ -2078,8 +2143,8 @@ mod tests {
 
     #[test]
     fn migration_dry_run_does_not_resume_pending_journal() {
-        let original = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nold\n```\n";
-        let (_dir, note, _journal) = pending_migration_fixture(original);
+        let original = with_note_frontmatter_id("```mica id=block\nold\n```\n");
+        let (_dir, note, _journal) = pending_migration_fixture(&original);
         let ctx = Ctx {
             vault: Some(note.vault.clone()),
             store_dir: None,
@@ -2102,10 +2167,13 @@ mod tests {
     fn failed_migration_ledger_append_remains_recoverable() {
         use std::os::unix::fs::symlink;
 
-        let original = "---\nmica-id: fixture-note\n---\n\n```mica id=block\nold\n```\n";
-        let (_dir, note, mut journal) = pending_migration_fixture(original);
+        let original = with_note_frontmatter_id("```mica id=block\nold\n```\n");
+        let (_dir, note, mut journal) = pending_migration_fixture(&original);
         let outside = note.vault.join("outside-ledger");
         std::fs::write(&outside, b"outside").expect("outside file");
+        let ledger = sidecar::ledger_path(&test_store(&note));
+        assert_eq!(std::fs::read(&ledger).expect("journal-owned ledger"), b"");
+        std::fs::remove_file(ledger).expect("replace the empty fixture ledger with a fault");
         symlink(&outside, sidecar::ledger_path(&test_store(&note))).expect("ledger symlink");
 
         assert!(matches!(
@@ -2116,12 +2184,25 @@ mod tests {
             .expect("read journal")
             .expect("journal");
         assert_eq!(pending.status, "pending");
-        assert!(sidecar::read_object(&test_store(&note), &pending.original)
-            .expect("read original")
-            .is_some());
+        assert!(matches!(
+            sidecar::read_object(&test_store(&note), &pending.original),
+            Err(CliError::Corrupt(_))
+        ));
+        sidecar::verify_written_object(&test_store(&note), &pending.original, &original)
+            .expect("original recovery bytes remain intact behind the rejected ledger");
+        assert_eq!(
+            engine::read_doc(&note.abs).expect("preserved note"),
+            original
+        );
         assert_eq!(std::fs::read(&outside).expect("outside"), b"outside");
 
         std::fs::remove_file(sidecar::ledger_path(&test_store(&note))).expect("remove bad ledger");
+        assert_eq!(
+            sidecar::read_object(&test_store(&note), &pending.original)
+                .expect("read retained original after removing the fixture fault")
+                .as_deref(),
+            Some(original.as_str())
+        );
         resume_migration(&note, &test_store(&note), &mut journal).expect("retry migration");
         assert_eq!(
             sidecar::read_migration_journal(&test_store(&note))

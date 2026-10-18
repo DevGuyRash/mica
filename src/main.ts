@@ -40,14 +40,17 @@ export default class MicaPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await initCore();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
-		try { await initializeStorageLocation(this); }
-		catch (error) {
+		try {
+			await initializeStorageLocation(this);
+		} catch (error) {
 			new Notice(error instanceof Error ? error.message : "Mica: storage startup failed");
 			throw error;
 		}
-		this.register(installStoreLifecycle(this.app.vault, async () => {
-			await Promise.all([this.engine?.settled(), this.api?.settled()]);
-		}));
+		this.register(
+			installStoreLifecycle(this.app.vault, async () => {
+				await Promise.all([this.engine?.settled(), this.api?.settled()]);
+			}),
+		);
 		const customConfig = normalizeCustomToolConfig(this.settings.customTools ?? [], this.settings.toolbarLayout);
 		const sectionActionConfig = normalizeHiddenSectionActions(this.settings.hiddenSectionActions);
 		const dockActionLayout = normalizeDockActionLayout(this.settings.dockActionLayout);
@@ -119,7 +122,10 @@ export default class MicaPlugin extends Plugin {
 			id: "insert-block",
 			name: "Insert block (tabs) here",
 			editorCallback: (editor, context) => {
-				if (context.file && !isLiveNote(context.file)) { new Notice("Mica: choose a live note outside history storage"); return; }
+				if (context.file && !isLiveNote(context.file)) {
+					new Notice("Mica: choose a live note outside history storage");
+					return;
+				}
 				const cur = editor.getCursor();
 				editor.replaceRange(`\n${createBlockSource({ body: "tab: New tab\n\n" })}`, cur);
 				editor.setCursor({ line: cur.line + 3, ch: 0 });
@@ -129,7 +135,10 @@ export default class MicaPlugin extends Plugin {
 			id: "wrap-selection",
 			name: "Wrap selection in a block",
 			editorCallback: (editor, context) => {
-				if (context.file && !isLiveNote(context.file)) { new Notice("Mica: choose a live note outside history storage"); return; }
+				if (context.file && !isLiveNote(context.file)) {
+					new Notice("Mica: choose a live note outside history storage");
+					return;
+				}
 				const sel = editor.getSelection();
 				if (!sel.trim()) {
 					new Notice("Select the Markdown to wrap first.");

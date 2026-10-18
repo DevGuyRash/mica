@@ -1,6 +1,18 @@
 import { TFile, TFolder } from "obsidian";
 import type MicaPlugin from "../main";
-import { foldLedger, hasContent, hashContent, migrateTabs, newId, noteId, notePaths, resolveObjectHash, scanBlocksView, setNoteId, type LedgerEvent } from "../wasm/bridge";
+import {
+	foldLedger,
+	hasContent,
+	hashContent,
+	migrateTabs,
+	newId,
+	noteId,
+	notePaths,
+	resolveObjectHash,
+	scanBlocksView,
+	setNoteId,
+	type LedgerEvent,
+} from "../wasm/bridge";
 import {
 	appendEvents,
 	ensureSidecar,
@@ -10,7 +22,18 @@ import {
 	writeManifest,
 	writeObject,
 } from "../storage/sidecar";
-import { assertLiveNoteCurrent, assertNoteStoreCurrent, assertStoreRootCurrent, bindNoteStore, isLiveNote, stageNoteStore, storeRoot, validateStoreRoot, type NoteStore, type StoreRoot } from "../storage/store";
+import {
+	assertLiveNoteCurrent,
+	assertNoteStoreCurrent,
+	assertStoreRootCurrent,
+	bindNoteStore,
+	isLiveNote,
+	stageNoteStore,
+	storeRoot,
+	validateStoreRoot,
+	type NoteStore,
+	type StoreRoot,
+} from "../storage/store";
 import {
 	classifyEventBatch,
 	isLedgerEvent,
@@ -63,7 +86,7 @@ export async function migrateFile(plugin: MicaPlugin, file: TFile, dryRun: boole
 		await validateStoreRoot(root);
 		const initial = await vault.read(file);
 		const existingStore = await bindNoteStore(root, file, initial);
-		const recoveryStore = existingStore ?? await findPendingMigrationStore(plugin, file, initial);
+		const recoveryStore = existingStore ?? (await findPendingMigrationStore(plugin, file, initial));
 		const resumed = recoveryStore ? await resumePendingMigration(plugin, file, recoveryStore) : null;
 		if (resumed) return resumed;
 
@@ -224,7 +247,8 @@ async function ensureHeadEventsInJournal(
 ): Promise<MigrationJournal> {
 	const existingHeads = new Set<string>();
 	for (const event of journal.events) {
-		if (event.type === "set-head") existingHeads.add(`${event.block}\0${resolveObjectHash(event.hash, store.aliases)}`);
+		if (event.type === "set-head")
+			existingHeads.add(`${event.block}\0${resolveObjectHash(event.hash, store.aliases)}`);
 	}
 	const staged = await stageHeadEvents(store, migrated);
 	const missing: MigrationLedgerEvent[] = [];
@@ -232,7 +256,8 @@ async function ensureHeadEventsInJournal(
 		const add = staged[index];
 		const head = staged[index + 1];
 		if (!add || !head || head.type !== "set-head") continue;
-		if (!existingHeads.has(`${head.block}\0${resolveObjectHash(head.hash, store.aliases)}`)) missing.push(add, head);
+		if (!existingHeads.has(`${head.block}\0${resolveObjectHash(head.hash, store.aliases)}`))
+			missing.push(add, head);
 	}
 	if (missing.length === 0) return journal;
 	const updated: MigrationJournal = { ...journal, events: [...journal.events, ...missing] };
@@ -321,7 +346,11 @@ function validateJournalEvents(events: readonly MigrationLedgerEvent[]): void {
 	}
 }
 
-async function completeMigrationJournal(plugin: MicaPlugin, store: NoteStore, pending: MigrationJournal): Promise<void> {
+async function completeMigrationJournal(
+	plugin: MicaPlugin,
+	store: NoteStore,
+	pending: MigrationJournal,
+): Promise<void> {
 	const complete: MigrationJournal = { ...pending, status: "complete" };
 	await replaceMigrationJournal(plugin, store, pending, complete);
 }
@@ -434,7 +463,7 @@ function ensureMicaId(doc: string): { doc: string; id: string } {
  * never published. This inspects central journals only; it imports no old layout. */
 async function findPendingMigrationStore(plugin: MicaPlugin, file: TFile, source: string): Promise<NoteStore | null> {
 	const root = storeRoot(plugin.app.vault);
-	if (await validateStoreRoot(root) === null) return null;
+	if ((await validateStoreRoot(root)) === null) return null;
 	const notes = root.vault.getAbstractFileByPath(root.paths.notes);
 	if (!notes) return null;
 	if (!(notes instanceof TFolder)) throw new Error("Mica: central note records are not a folder");
@@ -447,13 +476,17 @@ async function findPendingMigrationStore(plugin: MicaPlugin, file: TFile, source
 			throw new Error("Mica: invalid central note manifest during conversion recovery");
 		const value: unknown = JSON.parse(await root.vault.read(manifest));
 		if (typeof value !== "object" || value === null || !("path" in value) || value.path !== file.path) continue;
-		if (!("noteId" in value) || typeof value.noteId !== "string" || notePaths(value.noteId, root.paths.root).dir !== folder.path)
+		if (
+			!("noteId" in value) ||
+			typeof value.noteId !== "string" ||
+			notePaths(value.noteId, root.paths.root).dir !== folder.path
+		)
 			throw new Error("Mica: central note identity does not match its directory");
 		const candidate = await stageNoteStore(root, file, source, value.noteId);
 		await assertNoteStoreCurrent(candidate);
 		const journal = await readMigrationJournal(plugin, candidate);
 		if (!journal || journal.status !== "pending") continue;
-		if (await requireObject(candidate, journal.original) !== source) continue;
+		if ((await requireObject(candidate, journal.original)) !== source) continue;
 		if (match) throw new Error("Mica: multiple pending conversions match this note; no history was changed");
 		match = candidate;
 	}
