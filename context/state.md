@@ -1,5 +1,11 @@
 # Mica — Active State
 
+- Native completed tab-consolidation inspection is corrected in source to
+  validate historical evidence independently of later note edits. Focused
+  regression/rebuild qualification and the rejected private captured stage's
+  doctor/history/show/restore acceptance remain unrun. Live cutover is not ready;
+  retain all original ledgers, journals, captured copies and rejected stages.
+
 - WHEN preparing the next public release THEN you SHALL complete the physical Android/iOS, real two-device Obsidian Sync and clean-vault artifact-install gates in `RELEASING.md`. The public repository and initial Community submission are established.
 - The v0.2 rebuild still needs daily-driver use in a real vault; focus on editor feel, pointer drag/drop, folds, the versions timeline, and grid boundary controls.
 - The external 46-file legacy migration corpus and sustained 13k-line/60-fps performance claim still need recorded evidence; the PRD marks both as unverified.

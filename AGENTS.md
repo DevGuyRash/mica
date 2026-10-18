@@ -251,6 +251,11 @@ recoverable:
 - you SHALL roll back a published note if a required post-publication effect
   fails.
 
+WHEN inspecting a completed transaction THEN you SHALL validate its immutable
+evidence without requiring later mutable notes, HEADs or metadata to remain at
+the old result. Pending completion and restore SHALL retain exact-generation
+guards.
+
 WHEN reading content-addressed or compressed data THEN you SHALL verify its
 address and enforce compressed and decompressed size bounds before returning
 it. You SHALL NOT follow symlinks through vault or sidecar trust boundaries.
