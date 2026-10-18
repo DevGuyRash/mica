@@ -905,7 +905,6 @@ fn plan_note(
         &objects,
         &journal,
         manifest_source_preimage.as_deref(),
-        &manifest_consolidated,
     )?;
     let planned_writes = objects
         .iter()
@@ -1068,7 +1067,6 @@ fn preflight_plan(
     objects: &BTreeMap<String, String>,
     journal: &sidecar::TabConsolidationJournal,
     manifest_original: Option<&[u8]>,
-    manifest_consolidated: &[u8],
 ) -> Result<()> {
     sidecar::preflight_note_record(store)?;
     if engine::read_doc(&note.abs)? != original {
@@ -1095,7 +1093,7 @@ fn preflight_plan(
             note.vault_rel()
         )));
     }
-    if manifest_consolidated.len() > sidecar::MAX_LEDGER_BYTES {
+    if journal.manifest_consolidated.len() > sidecar::MAX_LEDGER_BYTES {
         return Err(CliError::Corrupt(
             "planned manifest exceeds the sidecar size limit".to_string(),
         ));
