@@ -1,10 +1,9 @@
 # Mica — Active State
 
-- Native completed tab-consolidation inspection is corrected in source to
-  validate historical evidence independently of later note edits. Focused
-  regression/rebuild qualification and the rejected private captured stage's
-  doctor/history/show/restore acceptance remain unrun. Live cutover is not ready;
-  retain all original ledgers, journals, captured copies and rejected stages.
+- Live central-storage cutover still needs supported real-Obsidian staging
+  verification, a fresh writer/Sync barrier and an independent current backup.
+  Preserve original ledgers, journals, captured copies and accepted/rejected
+  private stages until guarded cutover and rollback acceptance are complete.
 
 - WHEN preparing the next public release THEN you SHALL complete the physical Android/iOS, real two-device Obsidian Sync and clean-vault artifact-install gates in `RELEASING.md`. The public repository and initial Community submission are established.
 - The v0.2 rebuild still needs daily-driver use in a real vault; focus on editor feel, pointer drag/drop, folds, the versions timeline, and grid boundary controls.
