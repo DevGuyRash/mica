@@ -387,6 +387,17 @@ fn store_error(error: mica_core::StoreError) -> CliError {
 }
 
 fn validate_note_hint(root: &StoreRoot, path: &str) -> Result<()> {
+    validate_relative_note_hint(path)?;
+    if mica_core::is_managed_path_at_impl(path, Some(&root.layout.root)).map_err(store_error)? {
+        return Err(CliError::Corrupt(
+            "note path hint must be vault-relative with forward separators".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Historical hints are metadata, not paths to open in today's storage layout.
+fn validate_relative_note_hint(path: &str) -> Result<()> {
     let bytes = path.as_bytes();
     let drive =
         bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
@@ -395,7 +406,6 @@ fn validate_note_hint(root: &StoreRoot, path: &str) -> Result<()> {
         || Path::new(path)
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        || mica_core::is_managed_path_at_impl(path, Some(&root.layout.root)).map_err(store_error)?
         || path.contains('\\')
         || drive
     {
@@ -574,6 +584,42 @@ pub(crate) fn validate_manifest_bytes(note: &NoteStore, bytes: &[u8]) -> Result<
 enum HistoricalNoteId {
     Present(String),
     Absent(()),
+}
+
+/// Validate retained metadata without requiring it to describe the current note.
+pub(crate) fn validate_historical_manifest(note: &NoteStore, bytes: &[u8]) -> Result<()> {
+    historical_manifest(note, bytes).map(|_| ())
+}
+
+/// Compare immutable summaries without applying today's managed-folder namespace.
+pub(crate) fn historical_manifests_match(
+    note: &NoteStore,
+    left: &[u8],
+    right: &[u8],
+) -> Result<bool> {
+    let left = historical_manifest(note, left)?;
+    let right = historical_manifest(note, right)?;
+    Ok(left.blocks == right.blocks && left.updated == right.updated)
+}
+
+fn historical_manifest(note: &NoteStore, bytes: &[u8]) -> Result<StoredManifest<HistoricalNoteId>> {
+    if bytes.len() > MAX_LEDGER_BYTES {
+        return Err(CliError::Corrupt(
+            "historical note manifest exceeds its safety limit".to_string(),
+        ));
+    }
+    let manifest: StoredManifest<HistoricalNoteId> = serde_json::from_slice(bytes)
+        .map_err(|error| CliError::Corrupt(format!("invalid historical note manifest: {error}")))?;
+    if let HistoricalNoteId::Present(id) = &manifest.note_id {
+        mica_core::note_paths_impl(id).map_err(store_error)?;
+        if id != &note.note_id {
+            return Err(CliError::Corrupt(
+                "historical manifest identity conflicts with its note record".to_string(),
+            ));
+        }
+    }
+    validate_relative_note_hint(&manifest.path)?;
+    Ok(manifest)
 }
 
 /// Check the current summary after migration's final snapshot/manifest work.
@@ -2321,7 +2367,7 @@ fn invalid_typed_event(kind: &str, detail: &str) -> CliError {
     ))
 }
 
-fn event_eid(event: &Event) -> &str {
+pub(crate) fn event_eid(event: &Event) -> &str {
     match event {
         Event::AddVersion { eid, .. }
         | Event::ReplaceVersion { eid, .. }

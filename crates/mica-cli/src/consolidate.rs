@@ -10,7 +10,7 @@ use mica_core::{
     resolve_ledger_impl, scan_impl, serialize_impl, BlockSpan, Cst, Event, Node,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
 const PROMPTS_HEADING: &str = "## 🤖 Prompts";
@@ -1600,11 +1600,165 @@ fn verify_pending_result(
     Ok(())
 }
 
-fn verify_completed(
-    store: &NoteStore,
-    journal: &sidecar::TabConsolidationJournal,
-) -> Result<()> {
-    verify_pending_result(store, journal)
+fn verify_completed(store: &NoteStore, journal: &sidecar::TabConsolidationJournal) -> Result<()> {
+    if journal.status != "complete" {
+        return Err(CliError::Corrupt(
+            "historical inspection requires a completed tab-consolidation journal".to_string(),
+        ));
+    }
+    sidecar::preflight_tab_consolidation_journal(store, journal)?;
+    let original = sidecar::read_object(store, &journal.original)?.ok_or_else(|| {
+        CliError::Corrupt("tab-consolidation original object is missing".to_string())
+    })?;
+    let consolidated = sidecar::read_object(store, &journal.consolidated)?.ok_or_else(|| {
+        CliError::Corrupt("tab-consolidation result object is missing".to_string())
+    })?;
+    // Offline identity binding may add this anchor to the live note while the
+    // immutable historical object and its address retain their original bytes.
+    let bound_result = match mica_core::note_id_impl(&consolidated)
+        .map_err(|error| CliError::Corrupt(error.to_string()))?
+    {
+        Some(id) if id == store.note_id => consolidated.clone(),
+        None => mica_core::set_note_id_impl(&consolidated, None, &store.note_id)
+            .map_err(|error| CliError::Corrupt(error.to_string()))?,
+        _ => {
+            return Err(CliError::Corrupt(
+                "consolidated source identity conflicts with its note record".to_string(),
+            ));
+        }
+    };
+    engine::validate_journal_generations(store, &original, &bound_result)?;
+    if let Some(manifest) = &journal.manifest_original {
+        sidecar::validate_historical_manifest(store, manifest.as_bytes())?;
+    }
+
+    let ledger = sidecar::read_ledger_report(store)?;
+    if ledger.bad_lines != 0 {
+        return Err(CliError::Corrupt(
+            "completed tab-consolidation history contains invalid ledger lines".to_string(),
+        ));
+    }
+    resolve_ledger_impl(&ledger.events).map_err(|error| {
+        CliError::Corrupt(format!(
+            "tab-consolidation ledger verification failed: {error}"
+        ))
+    })?;
+    if !sidecar::classify_event_batch_in(&ledger.events, &journal.events)?
+        .missing
+        .is_empty()
+    {
+        return Err(CliError::Corrupt(
+            "one or more journaled tab-consolidation events are missing".to_string(),
+        ));
+    }
+    let mut remaining: HashSet<_> = journal.events.iter().map(sidecar::event_eid).collect();
+    if remaining.is_empty() {
+        return Err(CliError::Corrupt(
+            "completed tab-consolidation journal has no completion events".to_string(),
+        ));
+    }
+    // The first prefix containing every exact journal event describes its
+    // completed transaction. Later checkpoints, metadata and identical replays
+    // cannot move that historical boundary forward.
+    let end = ledger
+        .events
+        .iter()
+        .position(|event| {
+            remaining.remove(sidecar::event_eid(event));
+            remaining.is_empty()
+        })
+        .ok_or_else(|| CliError::Corrupt("journal completion prefix is missing".to_string()))?;
+    let prefix = &ledger.events[..=end];
+    let historical = resolve_ledger_impl(prefix).map_err(|error| {
+        CliError::Corrupt(format!(
+            "tab-consolidation completion graph is invalid: {error}"
+        ))
+    })?;
+    let state = historical
+        .blocks
+        .get(&journal.target_block)
+        .ok_or_else(|| {
+            CliError::Corrupt(
+                "tab-consolidation target is absent from its completion graph".to_string(),
+            )
+        })?;
+    let spans = scan_impl(&consolidated);
+    let target = spans
+        .iter()
+        .find(|span| span.id() == Some(journal.target_block.as_str()))
+        .ok_or_else(|| {
+            CliError::Corrupt(
+                "tab-consolidation target is absent from its result object".to_string(),
+            )
+        })?;
+    let result_hash = hash_content_impl(block_body(&consolidated, target));
+    let recorded_head = state
+        .head
+        .as_deref()
+        .map(|hash| sidecar::resolve_note_hash(store, hash))
+        .transpose()?;
+    if recorded_head.as_deref() != Some(result_hash.as_str()) {
+        return Err(CliError::Corrupt(
+            "journaled target head does not match the historical consolidated body".to_string(),
+        ));
+    }
+    let blocks: Vec<_> = spans
+        .iter()
+        .filter_map(|span| {
+            span.id().map(|id| {
+                (
+                    id.to_string(),
+                    span.get("name").unwrap_or_default().to_string(),
+                )
+            })
+        })
+        .collect();
+    let completed_at = journal
+        .events
+        .iter()
+        .map(event_timestamp)
+        .max()
+        .ok_or_else(|| {
+            CliError::Corrupt("tab-consolidation completion timestamp is missing".to_string())
+        })?;
+    let expected_manifest = sidecar::manifest_bytes(
+        Some(store.note_id.as_str()),
+        &journal.note,
+        &blocks,
+        completed_at,
+    );
+    if !sidecar::historical_manifests_match(
+        store,
+        &expected_manifest,
+        journal.manifest_consolidated.as_bytes(),
+    )? {
+        return Err(CliError::Corrupt(
+            "journaled manifest does not describe the historical consolidation result".to_string(),
+        ));
+    }
+    let by_eid: HashMap<_, _> = prefix
+        .iter()
+        .map(|event| (sidecar::event_eid(event), event))
+        .collect();
+    for mapping in &journal.versions {
+        match by_eid.get(mapping.source_event.as_str()).copied() {
+            Some(Event::AddVersion { block, hash, .. } | Event::Checkpoint { block, hash, .. })
+                if block == &mapping.source_block && hash == &mapping.source_hash => {}
+            _ => {
+                return Err(CliError::Corrupt(
+                    "journaled source checkpoint disagrees with its historical mapping".to_string(),
+                ));
+            }
+        }
+        if sidecar::read_object(store, &mapping.source_hash)?.is_none()
+            || sidecar::read_object(store, &mapping.target_hash)?.is_none()
+        {
+            return Err(CliError::Corrupt(
+                "journaled source or target version object is missing".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn inspect_completed_journal(
@@ -1804,6 +1958,302 @@ mod tests {
             .expect("journal exists");
         assert_eq!(journal.status, "complete");
         assert_eq!(journal.tabs.len(), 2);
+    }
+
+    fn completed_consolidation_fixture(
+        relative: &str,
+    ) -> (
+        tempfile::TempDir,
+        vault::NoteRef,
+        NoteStore,
+        sidecar::TabConsolidationJournal,
+    ) {
+        let doc = concat!(
+            "---\nmica-id: fixture-note\n---\n",
+            "# Note\n\n## 🤖 Prompts\n",
+            "```mica id=a name=\"First\"\n:::section\none\n:::\n```\n\n",
+            "```mica id=b name=\"Second\"\n:::section\ntwo\n:::\n```\n",
+        );
+        let (directory, ctx, initial) = fixture(doc);
+        let path = directory.path().join(relative);
+        if path != initial {
+            fs::create_dir_all(path.parent().expect("fixture note parent"))
+                .expect("fixture note directory");
+            fs::rename(initial, &path).expect("move unconsolidated fixture note");
+        }
+        let note = vault::NoteRef {
+            abs: path.clone(),
+            vault: directory.path().to_path_buf(),
+            store: None,
+        };
+        engine::snapshot_note(&note, false, false).expect("seed source checkpoints");
+        consolidate_tabs(&ctx, relative, true, false).expect("complete consolidation");
+        let store = test_store(&path);
+        let journal = sidecar::read_tab_consolidation_journal(&store)
+            .expect("read completed journal")
+            .expect("completed journal exists");
+        (directory, note, store, journal)
+    }
+
+    /// Synthetic evidence must be retained on disk so scoped object reads test
+    /// its integrity rather than rejecting an unreferenced pool object first.
+    fn retain_fixture_journal(
+        store: &NoteStore,
+        journal: &sidecar::TabConsolidationJournal,
+    ) -> NoteStore {
+        fs::write(
+            sidecar::tab_consolidation_journal_path(store),
+            serde_json::to_vec_pretty(journal).expect("synthetic retained journal"),
+        )
+        .expect("retain owned fixture evidence");
+        test_store(&store.note)
+    }
+
+    #[test]
+    fn completed_consolidation_allows_later_edits_heads_manifests_and_restore() {
+        let (_directory, note, store, journal) = completed_consolidation_fixture("Note.md");
+        let journal_path = sidecar::tab_consolidation_journal_path(&store);
+        let journal_bytes = fs::read(&journal_path).expect("journal preimage");
+        let ledger_path = sidecar::ledger_path(&store);
+        let ledger_before = fs::read(&ledger_path).expect("ledger preimage");
+        let completed = engine::read_doc(&note.abs).expect("completed source");
+        let original_state = engine::state_from_store(&store).expect("completed history");
+        let restore_version = original_state[&journal.target_block].versions[0].clone();
+
+        fs::write(&note.abs, format!("{completed}\nLater prose.\n")).expect("later authored prose");
+        verify_completed(&store, &journal).expect("completed evidence survives later prose");
+        assert!(engine::guard_note_store(&note, &store, &completed).is_err());
+        let mut pending = journal.clone();
+        pending.status = "pending".to_string();
+        assert!(verify_pending_result(&store, &pending).is_err());
+        assert!(verify_completed(&store, &pending).is_err());
+
+        engine::set_content(&note, &journal.target_block, "Later edited body.\n")
+            .expect("new checkpoint and refreshed manifest");
+        verify_completed(&store, &journal).expect("completed evidence survives a later head");
+        engine::restore_as_checkpoint(
+            &note,
+            &journal.target_block,
+            &restore_version.version_id,
+            &restore_version.hash,
+        )
+        .expect("restore as a new forward checkpoint");
+        verify_completed(&store, &journal).expect("completed evidence survives restore");
+        assert_eq!(
+            fs::read(&journal_path).expect("retained journal"),
+            journal_bytes
+        );
+        assert!(fs::read(&ledger_path)
+            .expect("append-only history")
+            .starts_with(&ledger_before));
+
+        // Replayed identical event IDs do not move the historical completion
+        // boundary past later checkpoints.
+        let mut replayed = sidecar::read_ledger(&store).expect("current history");
+        replayed.extend(journal.events.clone());
+        let encoded = replayed
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("fixture event"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&ledger_path, format!("{encoded}\n")).expect("identical replay fixture");
+        verify_completed(&store, &journal).expect("identical replays retain first completion");
+    }
+
+    #[test]
+    fn completed_consolidation_rejects_missing_or_corrupt_historical_objects() {
+        for original in [true, false] {
+            for missing in [true, false] {
+                let (_directory, _note, store, journal) =
+                    completed_consolidation_fixture("Note.md");
+                let hash = if original {
+                    &journal.original
+                } else {
+                    &journal.consolidated
+                };
+                let path = sidecar::object_path(&store, hash).expect("small fixture object");
+                if missing {
+                    fs::remove_file(path).expect("remove owned fixture object");
+                } else {
+                    fs::write(path, "corrupt fixture bytes").expect("corrupt owned fixture object");
+                }
+                assert!(verify_completed(&store, &journal).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn completed_consolidation_rejects_forged_result_manifest_and_missing_events() {
+        let (_directory, _note, store, journal) = completed_consolidation_fixture("Note.md");
+        let result = sidecar::read_object(&store, &journal.consolidated)
+            .expect("historical result")
+            .expect("result object");
+        let forged = result.replace("one", "forged body");
+        assert_ne!(forged, result);
+        let forged_hash = hash_content_impl(&forged);
+        sidecar::write_object(&store, &forged_hash, &forged).expect("address-valid forged object");
+        let mut wrong_result = journal.clone();
+        wrong_result.consolidated = forged_hash;
+        let forged_store = retain_fixture_journal(&store, &wrong_result);
+        let error = verify_completed(&forged_store, &wrong_result)
+            .expect_err("an address-valid forged result must disagree with its historical head");
+        assert!(error.to_string().contains("historical consolidated body"));
+
+        let mut wrong_manifest = journal.clone();
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&wrong_manifest.manifest_consolidated).expect("journal manifest");
+        manifest["blocks"] = serde_json::json!({"forged": "wrong block"});
+        wrong_manifest.manifest_consolidated =
+            serde_json::to_string(&manifest).expect("fixture JSON");
+        let manifest_store = retain_fixture_journal(&store, &wrong_manifest);
+        let error = verify_completed(&manifest_store, &wrong_manifest)
+            .expect_err("forged historical manifest");
+        assert!(error
+            .to_string()
+            .contains("historical consolidation result"));
+
+        let mut wrong_mapping = journal.clone();
+        wrong_mapping.versions[0].source_event = "missing-source-checkpoint".to_string();
+        let mapping_store = retain_fixture_journal(&store, &wrong_mapping);
+        let error = verify_completed(&mapping_store, &wrong_mapping)
+            .expect_err("forged source event mapping");
+        assert!(error.to_string().contains("historical mapping"));
+
+        let store = retain_fixture_journal(&store, &journal);
+        let mut ledger = sidecar::read_ledger(&store).expect("fixture history");
+        let last = journal.events.last().expect("journaled completion event");
+        ledger.retain(|event| event != last);
+        let encoded = ledger
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("fixture event"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(sidecar::ledger_path(&store), format!("{encoded}\n"))
+            .expect("missing journaled event fixture");
+        let error = verify_completed(&store, &journal).expect_err("missing completion event");
+        assert!(error
+            .to_string()
+            .contains("journaled tab-consolidation events are missing"));
+    }
+
+    #[test]
+    fn completed_consolidation_allows_historical_unanchored_result() {
+        let (_directory, _note, store, mut journal) = completed_consolidation_fixture("Note.md");
+        let result = sidecar::read_object(&store, &journal.consolidated)
+            .expect("historical result")
+            .expect("result object");
+        let unanchored = result
+            .strip_prefix("---\nmica-id: fixture-note\n---\n")
+            .expect("known fixture frontmatter");
+        let hash = hash_content_impl(unanchored);
+        sidecar::write_object(&store, &hash, unanchored).expect("unanchored historical object");
+        journal.consolidated = hash;
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&journal.manifest_consolidated).expect("historical manifest");
+        manifest["noteId"] = serde_json::Value::Null;
+        journal.manifest_consolidated = serde_json::to_string(&manifest).expect("fixture JSON");
+        let store = retain_fixture_journal(&store, &journal);
+        verify_completed(&store, &journal)
+            .expect("offline identity binding preserves old evidence");
+    }
+
+    #[test]
+    fn completed_consolidation_survives_store_relocation_into_old_note_folder() {
+        let (directory, note, store, journal) = completed_consolidation_fixture("Archive/Note.md");
+        let journal_bytes = fs::read(sidecar::tab_consolidation_journal_path(&store))
+            .expect("retained journal preimage");
+        let ledger_bytes =
+            fs::read(sidecar::ledger_path(&store)).expect("retained ledger preimage");
+        let moved = directory.path().join("Moved.md");
+        fs::rename(&note.abs, &moved).expect("legitimate note move");
+        fs::remove_dir(directory.path().join("Archive")).expect("vacated note directory");
+        let moved_store = test_store(&moved);
+        sidecar::write_manifest(
+            &moved_store,
+            Some(&moved_store.note_id),
+            "Moved.md",
+            &[(journal.target_block.clone(), "Prompts".to_string())],
+            journal
+                .events
+                .iter()
+                .map(event_timestamp)
+                .max()
+                .expect("completion timestamp")
+                + 1,
+        )
+        .expect("refresh current note hint before relocating storage");
+
+        // Model the supported whole-store move in this isolated fixture. Its
+        // locator and current hint change, while historical records keep bytes.
+        let locator_path = directory.path().join("mica.json");
+        let mut locator: serde_json::Value =
+            serde_json::from_slice(&fs::read(&locator_path).expect("fixture locator"))
+                .expect("locator JSON");
+        locator["folder"] = serde_json::json!("Archive");
+        fs::rename(
+            directory.path().join("mica-data"),
+            directory.path().join("Archive"),
+        )
+        .expect("move owned store");
+        fs::write(
+            &locator_path,
+            serde_json::to_vec(&locator).expect("moved locator"),
+        )
+        .expect("publish owned fixture route");
+        let moved_store = test_store(&moved);
+        verify_completed(&moved_store, &journal).expect("old path is immutable metadata");
+        assert_eq!(
+            fs::read(sidecar::tab_consolidation_journal_path(&moved_store))
+                .expect("unchanged moved journal"),
+            journal_bytes
+        );
+        assert_eq!(
+            fs::read(sidecar::ledger_path(&moved_store)).expect("unchanged ledger"),
+            ledger_bytes
+        );
+        assert!(
+            sidecar::validate_manifest_bytes(
+                &moved_store,
+                journal.manifest_consolidated.as_bytes(),
+            )
+            .is_err(),
+            "current writable metadata must still reject managed paths"
+        );
+
+        let mut unsafe_hint = journal.clone();
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&unsafe_hint.manifest_consolidated).expect("historical manifest");
+        manifest["path"] = serde_json::json!("../outside.md");
+        unsafe_hint.manifest_consolidated = serde_json::to_string(&manifest).expect("fixture JSON");
+        assert!(verify_completed(&moved_store, &unsafe_hint).is_err());
+    }
+
+    #[test]
+    fn completed_consolidation_fix_keeps_pending_publication_conflicts_read_only() {
+        let (_directory, note, store, journal) = completed_consolidation_fixture("Note.md");
+        let mut pending = journal.clone();
+        pending.status = "pending".to_string();
+        let journal_path = sidecar::tab_consolidation_journal_path(&store);
+        let pending_bytes = serde_json::to_vec_pretty(&pending).expect("pending fixture JSON");
+        fs::write(&journal_path, &pending_bytes).expect("interrupted publication fixture");
+        let current = format!(
+            "{}\nLater user edit.\n",
+            engine::read_doc(&note.abs).expect("source")
+        );
+        fs::write(&note.abs, &current).expect("diverged live generation");
+        let ledger_path = sidecar::ledger_path(&store);
+        let ledger = fs::read(&ledger_path).expect("history preimage");
+
+        assert!(sidecar::write_tab_consolidation_journal(&store, &journal).is_err());
+        assert_eq!(
+            engine::read_doc(&note.abs).expect("preserved note"),
+            current
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("preserved pending journal"),
+            pending_bytes
+        );
+        assert_eq!(fs::read(&ledger_path).expect("preserved history"), ledger);
     }
 
     #[test]

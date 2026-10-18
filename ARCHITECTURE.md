@@ -172,6 +172,13 @@ separate from the durable version ledger.
   and fenced code remain native leaves; only
   contiguous ordinary Markdown runs receive reversible `:::section` wrappers.
   Exact note and manifest generations make interrupted publication resumable.
+  Completed-journal inspection validates the immutable original/result objects,
+  recorded manifest and first ledger prefix containing its exact events. Later
+  note edits, HEAD moves, metadata refreshes and identical event replays do not
+  change that historical boundary. Retained path hints remain contained relative
+  metadata independently of later storage-folder moves. Pending publication
+  still requires the exact current note and manifest generations before
+  completing a transaction.
 - Native journal publishers share the existing append-only ledger lock with
   appenders and revalidate their retained route after acquiring it. New pending
   transactions claim the exact bytes observed during planning or absence.
