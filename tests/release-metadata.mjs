@@ -13,7 +13,7 @@ async function readJson(relativePath) {
 	return JSON.parse(await readText(relativePath));
 }
 
-const [pkg, manifest, versions, cargo, license, rustToolchain, workspace, ci, compatibility, wdio, buildConfig] =
+const [pkg, manifest, versions, cargo, license, rustToolchain, workspace, release, releaseConfig, wdio, buildConfig] =
 	await Promise.all([
 		readJson("package.json"),
 		readJson("manifest.json"),
@@ -22,8 +22,8 @@ const [pkg, manifest, versions, cargo, license, rustToolchain, workspace, ci, co
 		readText("LICENSE"),
 		readText("rust-toolchain.toml"),
 		readText("pnpm-workspace.yaml"),
-		readText(".github/workflows/ci.yml"),
-		readText(".github/workflows/compatibility.yml"),
+		readText(".github/workflows/release.yml"),
+		readJson(".github/obsidian-release.json"),
 		readText("wdio.conf.mts"),
 		readText("esbuild.config.mjs"),
 	]);
@@ -50,11 +50,50 @@ assert.match(
 	"pnpm workspace must force the audited serialize-javascript version",
 );
 assert.match(workspace, /^\s*diff:\s*8\.0\.4$/m, "pnpm workspace must force the audited diff version");
-assert.match(ci, /tool:\s*wasm-pack@0\.15\.0/, "CI must pin the verified wasm-pack version");
-assert.match(ci, /tool:\s*cargo-deny@0\.20\.2/, "CI must pin the Rust advisory scanner");
-assert.match(ci, /^\s*tags:\s*\["\*"\]$/m, "CI must validate release tags");
-assert.match(ci, /cargo clippy --workspace --all-targets --locked -- -D warnings/, "Clippy must use Cargo.lock");
-assert.match(ci, /cargo build --release -p mica-cli --locked/, "CLI release build must use Cargo.lock");
+assert.match(release, /tool:\s*wasm-pack@0\.15\.0,cargo-deny@0\.20\.2/, "release tools must remain pinned");
+assert.match(release, /\n\s+workflow_dispatch:/, "release must remain explicitly started");
+assert.doesNotMatch(
+	release,
+	/^\s+(?:push|pull_request|schedule):/m,
+	"source pushes, PRs and schedules must not run hosted CI",
+);
+assert.match(
+	pkg.scripts["release:qualify"],
+	/cargo clippy --workspace --all-targets --locked -- -D warnings/,
+	"Clippy must use Cargo.lock",
+);
+assert.match(
+	pkg.scripts["release:qualify"],
+	/cargo build --release -p mica-cli --locked/,
+	"CLI release build must use Cargo.lock",
+);
+for (const gate of [
+	"audit:prod",
+	"build",
+	"check",
+	"lint:obsidian",
+	"test:release",
+	"test:version-stress",
+	"check:release:assets",
+	"smoke",
+	"e2e",
+	"e2e:minimum",
+	"e2e:mobile",
+]) {
+	assert.ok(
+		pkg.scripts["release:qualify"].split(" && ").includes(`pnpm run ${gate}`),
+		`release qualification must run ${gate}`,
+	);
+}
+assert.match(pkg.scripts["release:qualify"], /cargo deny check advisories/, "release must audit Rust dependencies");
+assert.match(pkg.scripts["release:qualify"], /cargo fmt --all -- --check/, "release must check Rust formatting");
+assert.equal(releaseConfig.repository, "DevGuyRash/mica");
+assert.equal(releaseConfig.assetDirectory, ".");
+assert.equal(
+	releaseConfig.qualificationEvidenceRequired,
+	true,
+	"Mica's external device, Sync and cutover evidence must remain required",
+);
 assert.match(
 	pkg.scripts.wasm,
 	/^node esbuild\.config\.mjs wasm(?:\s|$)/,
@@ -64,26 +103,28 @@ assert.match(buildConfig, /"--",\s*"--locked"/, "wasm-pack must pass --locked to
 assert.match(pkg.scripts["test:rust"], /--locked/, "Rust tests must use Cargo.lock");
 assert.equal(pkg.scripts["test:sidecar-fallback"], "node tests/sidecar-fallback.mjs");
 
-for (const workflow of [ci, compatibility]) {
+for (const workflow of [release]) {
 	for (const [, action, revision] of workflow.matchAll(/^\s*- uses:\s*([^\s@]+)@([^\s#]+)/gm)) {
 		assert.match(revision, /^[0-9a-f]{40}$/, `${action} must be pinned to a full commit SHA`);
 	}
 }
 
-const releasePaths = ci.match(/name: Upload plugin release assets[\s\S]*?path: \|\n((?:\s+\S+\n?)+)/)?.[1];
-assert.ok(releasePaths, "tag builds must upload plugin release assets");
-assert.deepEqual(
-	releasePaths.trim().split(/\s+/).sort(),
-	["main.js", "manifest.json", "styles.css"],
-	"tag artifact must contain exactly the three Obsidian plugin files",
-);
+// Shared protocol tests cover the exact three public assets, source/evidence
+// bindings and immutable draft-before-publish behavior with a fake host.
+assert.equal(pkg.scripts["test:release"], "node --test tests/release-contract.test.mjs");
+assert.match(release, /node scripts\/release\.mjs stage/);
+assert.match(release, /node scripts\/release\.mjs publish/);
 
 const escapedMinVersion = manifest.minAppVersion.replaceAll(".", "\\.");
 assert.match(wdio, new RegExp(`MINIMUM_APP_VERSION = "${escapedMinVersion}"`));
-assert.match(wdio, /VERIFIED_INSTALLER_VERSION = "1\.5\.8"/);
+assert.equal(pkg.scripts["test:e2e-config"], "node --import tsx --test tests/e2e-config.test.mjs");
+assert.ok(
+	pkg.scripts.check.split(" && ").includes("pnpm run test:e2e-config"),
+	"aggregate checks must exercise real capabilities against pinned compatibility evidence",
+);
 assert.match(wdio, /selected === "desktop-latest"/);
-assert.match(compatibility, /profile: desktop-latest/);
-assert.match(compatibility, /advisory: true/);
+assert.equal(pkg.scripts["release:advisory"], "pnpm run e2e:latest");
+assert.match(release, /Advisory product compatibility[\s\S]*?continue-on-error: true/);
 assert.match(license, /^MIT License$/m, "LICENSE must contain the MIT license text");
 assert.match(license, /Permission is hereby granted, free of charge/, "LICENSE must contain the MIT permission grant");
 

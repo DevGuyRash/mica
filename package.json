@@ -54,13 +54,18 @@
 		"test:markdown-literal": "tsx tests/markdown-literal.mts",
 		"check:release": "node tests/release-metadata.mjs",
 		"check:release:assets": "node tests/release-metadata.mjs --artifacts",
-		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:hide-syntax && pnpm run test:combine-kind && pnpm run test:icon-packs && pnpm run test:version-window && pnpm run test:version-timeline && pnpm run test:version-base && pnpm run test:version-lineage && pnpm run test:copy-payload && pnpm run test:dock-config && pnpm run test:text-stats && pnpm run test:version-scope && pnpm run test:version-transition && pnpm run test:scope-selection && pnpm run test:scope-display && pnpm run test:comparison-plan && pnpm run test:version-generated && pnpm run test:upgrade-performance && pnpm run test:search-worker && pnpm run test:responsive-actions && pnpm run test:section-action-prefs && pnpm run test:toolbar-layout && pnpm run test:custom-tool-config && pnpm run test:block-label && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:markdown-literal && pnpm run test:rust && pnpm run check:release",
+		"check": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run test:sidecar-fallback && pnpm run test:ledger-contracts && pnpm run test:diff-budget && pnpm run test:hide-syntax && pnpm run test:combine-kind && pnpm run test:icon-packs && pnpm run test:version-window && pnpm run test:version-timeline && pnpm run test:version-base && pnpm run test:version-lineage && pnpm run test:copy-payload && pnpm run test:dock-config && pnpm run test:text-stats && pnpm run test:version-scope && pnpm run test:version-transition && pnpm run test:scope-selection && pnpm run test:scope-display && pnpm run test:comparison-plan && pnpm run test:version-generated && pnpm run test:upgrade-performance && pnpm run test:search-worker && pnpm run test:responsive-actions && pnpm run test:section-action-prefs && pnpm run test:toolbar-layout && pnpm run test:custom-tool-config && pnpm run test:block-label && pnpm run test:code-fence && pnpm run test:nested-sections && pnpm run test:section-format && pnpm run test:markdown-literal && pnpm run test:rust && pnpm run test:e2e-config && pnpm run check:release",
 		"test:version-timeline": "tsx tests/version-timeline.mts",
 		"test:hide-syntax": "tsx tests/hide-syntax.mts",
 		"test:icon-packs": "tsx tests/icon-packs.mts",
 		"test:combine-kind": "tsx tests/combine-kind.mts",
 		"lint:obsidian": "eslint --config eslint.obsidian.config.mjs src && pnpm run lint:review-css",
-		"lint:review-css": "node scripts/check-review-css.mjs"
+		"lint:review-css": "node scripts/check-review-css.mjs",
+		"test:e2e-config": "node --import tsx --test tests/e2e-config.test.mjs",
+		"test:release": "node --test tests/release-contract.test.mjs",
+		"release:parity": "node scripts/release.mjs parity --upstream",
+		"release:qualify": "pnpm run audit:prod && cargo deny check advisories && pnpm run build && pnpm run check && pnpm run lint:obsidian && pnpm run test:release && pnpm run test:version-stress && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --release -p mica-cli --locked && pnpm run check:release:assets && pnpm run smoke && pnpm run e2e && pnpm run e2e:minimum && pnpm run e2e:mobile",
+		"release:advisory": "pnpm run e2e:latest"
 	},
 	"keywords": [
 		"obsidian",

@@ -32,3 +32,6 @@ node_modules/
 
 # Plugin runtime settings (written by saveData)
 /data.json
+
+# Qualified release staging and workflow receipt.
+/release/

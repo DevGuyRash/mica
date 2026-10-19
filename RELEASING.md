@@ -6,12 +6,31 @@ qualification evidence.
 
 ## Update delivery
 
-This is a manual release process. Source pushes, local builds and CI artifact
-uploads do not publish a plugin update. A published GitHub Release with the
-matching version tag and runtime attachments is what Obsidian distributes.
-The existing workflow files contain verification/artifact jobs, not a GitHub
-Release publisher. Use local verification within the user's authorized scope;
-this procedure does not require enabling hosted Actions.
+The shared [release contract](docs/RELEASE-CONTRACT.md) automates qualification,
+draft publication and verification after a manual release dispatch. It defaults
+to a dry run. Main pushes, PRs, tags and schedules start no hosted jobs. The old
+CI/weekly Compatibility workflows are replaced by this release-only workflow;
+their checks remain in the product scripts. Source changes alone do not enable
+Actions or publish a plugin update. A published GitHub Release with the exact
+manifest version tag and runtime attachments is what Obsidian distributes.
+
+Viewgram is the canonical release bundle; this repository carries an identical
+hash-checked snapshot pinned to a full Viewgram commit. Run `pnpm run test:release`
+for protocol tests and `pnpm run release:parity` for local/upstream drift checks.
+`pnpm run release:qualify` composes production audits, build, aggregate checks,
+Obsidian preflight, protocol tests, stress corpus, Rust format/Clippy/CLI build,
+asset/smoke checks, and required native default/minimum/mobile profiles.
+`pnpm run release:advisory` runs the existing moving desktop-latest canary; the
+workflow records it as advisory, never as a required pass. The required profile
+must actually run; an unavailable authenticated Obsidian download is a blocker,
+not permission to skip it or copy owner credentials into hosted jobs.
+
+Follow the contract's first-run settings checks and exact-SHA evidence inputs.
+The qualification-report URL must record the existing device, Sync and storage
+gates below; a supplied link is not automated verification of its contents.
+No workflow result claims existing-vault cutover. The pending 0.3 qualification,
+publication and Kingdom staging remain separate until their actual evidence
+passes. Existing releases are preserved, including 0.2.2.
 
 Only the initial Community directory submission is needed. Subsequent versions
 are delivered through new GitHub Releases. Installed community plugins do not
@@ -193,6 +212,34 @@ WHEN the default gate passes THEN you SHALL run the existing local
 `pnpm run e2e:minimum` and `pnpm run e2e:mobile` profiles on the same commit.
 `pnpm run e2e:latest` is the existing advisory moving-latest canary. A hosted
 workflow definition does not establish that any of these checks ran.
+
+### Exact app and installer matrix
+
+The default, minimum and mobile-emulation profiles retain app **1.13.0**, the
+manifest's intentional minimum. The 0.2.2 review migration raised that minimum
+and removed the pre-1.13 settings fallback together; an unavailable old binary
+is not evidence that a newer app can replace this acceptance target.
+
+Their installer pin is **1.6.5**, the oldest compatible installer for that exact
+app in the [launcher-maintainer index at b3d917e](https://github.com/jesse-r-s-hines/wdio-obsidian-service/blob/b3d917e33eef09ac65c9550beee8b6f8a85ba6bc/obsidian-versions.json).
+This is WDIO-maintained compatibility data, not an Obsidian-owned index. The
+recorded range is 1.6.5 through 1.12.7. The former installer 1.5.8 pin belonged
+to the previous app 1.12.7 target and is incompatible with app 1.13.0. A cached
+1.12.7 installer can supply a separately recorded valid pair, but does not
+replace the oldest-installer profile. `pnpm run test:e2e-config` exercises the
+actual WDIO capabilities against a small commit-pinned evidence snapshot; it
+does not launch Obsidian or establish an E2E pass.
+
+Obsidian's [1.13.0 changelog](https://obsidian.md/changelog/2026-05-28-desktop-v1.13.0/)
+labels that release Catalyst early access. Native inspection on 2026-10-19
+found no exact local 1.13.0 ASAR and received anonymous HEAD/GET 404 responses
+from the listed app download. No installer HTTP result was established. Keep
+the exact-app native gates pending until the real artifact is available. The
+service supports `appPath` for a verified, legitimately predownloaded exact
+ASAR; never substitute another app's bytes under that version. Community
+directory sign-in and launcher early-access download authorization are separate.
+A current-app run, including an installed 1.14.4 run, is separate QA and cannot
+clear minimum-version qualification. Keep the moving latest profile advisory.
 
 IF the minimum-app profile fails THEN you SHALL fix compatibility or raise
 `minAppVersion` before release.
