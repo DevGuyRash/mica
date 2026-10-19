@@ -680,3 +680,9 @@ WHEN work becomes complete THEN you SHALL remove it from `state.md`. You SHALL
 keep active state limited to unresolved work, future plans, and current risks;
 durable system knowledge belongs in code, architecture documents, tests, or
 this file.
+
+Future releases also require the shared [build-provenance gate](docs/RELEASE-CONTRACT.md):
+attest the three exact qualified assets and verify repository, source commit,
+signing workflow and hashes before publication. Preserve immutable-release
+verification afterward as a separate gate. Workflow preparation does not prove
+provenance exists; keep activation approval and actual verification explicit.

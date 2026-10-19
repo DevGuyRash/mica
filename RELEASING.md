@@ -220,6 +220,21 @@ manifest's intentional minimum. The 0.2.2 review migration raised that minimum
 and removed the pre-1.13 settings fallback together; an unavailable old binary
 is not evidence that a newer app can replace this acceptance target.
 
+The minimum is an API requirement, not an arbitrary fixture: commit `523cf6e`
+removed the legacy `display()` renderer and made `PluginSettingTab.update()`
+unconditional alongside `getSettingDefinitions()`. The official
+[declarative settings migration guide](https://docs.obsidian.md/plugins/guides/migrate-declarative-settings)
+requires 1.13.0 for that API. Keep the manifest and minimum profile unchanged
+unless deliberately changing the supported API contract.
+
+The oldest **public stable desktop** release in this supported series is
+[1.13.4, published July 30, 2026](https://obsidian.md/changelog/2026-07-30-desktop-v1.13.4/).
+Earlier 1.13.0–1.13.3 entries were Catalyst releases. Testing 1.13.4 is a useful
+public-release compatibility check, but does not prove the still-declared
+1.13.0 lower bound. The launcher index can retain stale beta metadata for a
+version later promoted to public; resolve the official release and record the
+actual app bytes instead of inferring access from a stale cache.
+
 Their installer pin is **1.6.5**, the oldest compatible installer for that exact
 app in the [launcher-maintainer index at b3d917e](https://github.com/jesse-r-s-hines/wdio-obsidian-service/blob/b3d917e33eef09ac65c9550beee8b6f8a85ba6bc/obsidian-versions.json).
 This is WDIO-maintained compatibility data, not an Obsidian-owned index. The
@@ -367,3 +382,9 @@ you SHALL NOT replace assets under an existing tag.
 - [Manifest](https://docs.obsidian.md/Reference/Manifest)
 - [Official sample: release metadata and versions.json](https://github.com/obsidianmd/obsidian-sample-plugin#releasing-new-releases)
 - [Community plugin updates](https://obsidian.md/help/Extending%2BObsidian/Community%2Bplugins)
+
+Future releases also require the shared [build-provenance gate](docs/RELEASE-CONTRACT.md):
+attest the three exact qualified assets and verify repository, source commit,
+signing workflow and hashes before publication. Preserve immutable-release
+verification afterward as a separate gate. Workflow preparation does not prove
+provenance exists; keep activation approval and actual verification explicit.

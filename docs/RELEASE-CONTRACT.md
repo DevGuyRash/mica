@@ -27,6 +27,8 @@ separate plugin source in the release setup.
 The only workflow trigger is `workflow_dispatch`, from `main`. Pushes to main,
 PRs, tag pushes and schedules start no hosted job. The default is a dry run:
 build, qualify and stage an artifact; it creates no tag or GitHub Release.
+Once attestation permission is approved, a dry run also creates build-provenance
+attestations in GitHub. They are retained evidence, not release publication.
 Publication is automated after an explicit dispatch with `publish=true`. This
 is an automated release procedure with a manual start, not an automatic release
 cadence. Enabling qualified-tag publication later requires an explicit trigger
@@ -48,8 +50,15 @@ delivery and requires diagnosis without rewriting the published assets.
 An optional GitHub protected environment can add a reviewer before the
 write-capable job, if the owner wants that additional safeguard. It is not part
 of this default contract and does not create a new per-release approval gate.
-No new environment, credential, permission grant or Actions setting is created
-by committing these files.
+Committing these files does not activate hosted execution or change repository
+settings. The new attestation job requests security-sensitive permissions; the
+owner must approve their activation before anyone sets the non-secret repository
+variable `OBSIDIAN_BUILD_PROVENANCE_APPROVED=true`. Until then this job is skipped
+and its dependent publication job cannot run. Approval covers repository-scoped
+`attestations: write` (upload signed claims) and `id-token: write` (request
+short-lived GitHub OIDC identity tokens) in that job only. No cloud trust binding,
+PAT, saved credential, or new secret is configured. Keep the variable unset
+until that specific approval; Actions availability alone is not approval.
 
 ## Candidate and evidence
 
@@ -74,8 +83,25 @@ and all three SHA-256 hashes. It is a workflow artifact, not a public plugin
 asset. The write-capable job downloads that same run's artifact by ID and
 revalidates the bindings and bytes. It installs no product dependencies and
 runs no product build with a write token. Default permissions are contents-read;
-only this job receives repository-scoped contents-write. Actions are pinned to
-full commits. No PAT, signing key, OIDC or inherited secret is required.
+only publication receives repository-scoped contents-write. A separate
+approval-gated attestation job receives contents-read, id-token-write and
+attestations-write. It downloads the same run's qualified artifact by ID,
+rechecks its receipt and hashes, and uses the official commit-pinned
+`actions/attest` action over exactly `main.js`, `manifest.json` and `styles.css`.
+It runs no product build or dependency lifecycle with these permissions.
+Actions are pinned to full commits; no PAT, long-lived signing key or inherited
+secret is required. This is standard workflow build provenance, not a claim of
+a stronger reusable trusted-builder/SLSA assurance level.
+
+The original Sigstore bundle and verification report travel in a separate
+workflow artifact, never as extra Obsidian runtime attachments. Before the
+first tag/release mutation, the publisher independently runs `gh attestation
+verify` on every staged file with that bundle, SLSA provenance-v1 predicate,
+exact repository, source commit/ref, signing workflow path and commit, GitHub
+Actions OIDC issuer, and GitHub-hosted runner policy. It also requires the
+verified statement to name exactly the three assets and their receipt SHA-256
+hashes. A decoded bundle or an earlier success receipt cannot replace this
+cryptographic check. Failure stops publication before any mutation.
 
 The publisher refuses every existing release, including ambiguous leftover
 drafts. It never overwrites assets, deletes releases, retags, or uses `--clobber`.
@@ -90,8 +116,11 @@ retains the draft or published result for inspection; do not blindly rerun
 mutations. Published corrections need a new version and qualified candidate.
 
 GitHub's immutable-release attestation is distinct from SLSA build provenance.
-No SLSA claim is made. Successful publication is still separate from Obsidian's
-full release review, installation and activation. Require that completed full
+Both checks are required: build provenance before publication, immutable release
+and asset verification afterward. Existing immutable releases are never rewritten
+or retroactively claimed to have been built by a new workflow. A prepared
+workflow is not evidence of generated or accepted provenance. Successful
+publication is still separate from Obsidian's full release review, installation and activation. Require that completed full
 review before installing or activating. Preserve disagreements between GitHub
 verification and Obsidian; never weaken checks to force agreement. Users fetch
 approved updates through Community plugins' **Check for updates** and **Update**.
@@ -103,3 +132,7 @@ approved updates through Community plugins' **Check for updates** and **Update**
 - [GitHub immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
 - [GitHub release verification](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity)
 - [Immutable-setting API and admin-only read permission](https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository)
+
+- [Official GitHub build-provenance action](https://github.com/actions/attest)
+- [GitHub build-provenance permissions and verification](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+- [Exact identity and source verification flags](https://cli.github.com/manual/gh_attestation_verify)

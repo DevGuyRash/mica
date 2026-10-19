@@ -65,6 +65,60 @@ export function validateReceipt(receipt, expected = {}) {
 	}
 }
 
+// These results must come from successful gh cryptographic verification, never
+// from decoding an unverified bundle. Certificate policy is enforced by gh;
+// the signed subject set must additionally match our exact staging receipt.
+export function validateProvenanceSubjects(receipt, results) {
+	assert.ok(Array.isArray(results) && results.length > 0, "no verified build provenance");
+	const expected = ASSETS.map((name) => ({ name, digest: { sha256: receipt.assets[name].sha256 } })).sort((a, b) =>
+		a.name.localeCompare(b.name),
+	);
+	for (const result of results) {
+		const statement = result.verificationResult?.statement;
+		assert.equal(statement?.predicateType, "https://slsa.dev/provenance/v1", "build provenance predicate required");
+		assert.ok(Array.isArray(statement.subject), "verified provenance subjects are missing");
+		assert.deepEqual(
+			[...statement.subject].sort((a, b) => a.name.localeCompare(b.name)),
+			expected,
+			"verified provenance must bind exactly the three staged asset names and SHA-256 hashes",
+		);
+	}
+}
+
+export async function verifyBuildProvenance(receipt, verify) {
+	validateReceipt(receipt);
+	const reports = {};
+	for (const name of ASSETS) {
+		const result = await verify([
+			"attestation",
+			"verify",
+			`release/${name}`,
+			"--bundle",
+			"provenance/bundle.json",
+			"--repo",
+			receipt.repository,
+			"--predicate-type",
+			"https://slsa.dev/provenance/v1",
+			"--cert-oidc-issuer",
+			"https://token.actions.githubusercontent.com",
+			"--signer-workflow",
+			`${receipt.repository}/.github/workflows/release.yml`,
+			"--signer-digest",
+			receipt.source,
+			"--source-digest",
+			receipt.source,
+			"--source-ref",
+			"refs/heads/main",
+			"--deny-self-hosted-runners",
+			"--format",
+			"json",
+		]);
+		validateProvenanceSubjects(receipt, result);
+		reports[name] = result;
+	}
+	return reports;
+}
+
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, { encoding: "utf8", ...options });
 	if (result.error) throw result.error;
@@ -207,6 +261,8 @@ export async function publishRelease(receipt, host, immutableSettingConfirmed) {
 		true,
 		"owner-verified immutable releases setting is required; the declaration may be stale",
 	);
+	// Missing/invalid provenance stops before even creating the version tag.
+	await host.verifyProvenance(receipt);
 	const base = `repos/${receipt.repository}`;
 	const tag = receipt.version;
 	assert.equal(
@@ -361,6 +417,13 @@ async function main() {
 		console.log(JSON.stringify(await checkStaged(config), null, 2));
 		return;
 	}
+	const verifyProvenance = (receipt) => verifyBuildProvenance(receipt, async (args) => JSON.parse(run("gh", args)));
+	if (command === "verify-provenance") {
+		const reports = await verifyProvenance(await checkStaged(config));
+		await writeFile("provenance/verification.json", `${JSON.stringify(reports, null, 2)}\n`);
+		console.log("Exact asset build provenance verified; immutable-release checks remain separate.");
+		return;
+	}
 	if (command === "publish") {
 		assert.equal(process.env.GITHUB_REF, "refs/heads/main", "publication dispatch must run from main");
 		assert.equal(process.env.GITHUB_REPOSITORY, config.repository);
@@ -415,7 +478,7 @@ async function main() {
 		};
 		await publishRelease(
 			receipt,
-			{ api, gh, verifyDownloads },
+			{ api, gh, verifyDownloads, verifyProvenance },
 			process.env.IMMUTABLE_RELEASES_CONFIRMED === "true",
 		);
 		console.log(
@@ -424,7 +487,7 @@ async function main() {
 		return;
 	}
 	throw new Error(
-		"Usage: node scripts/release.mjs inspect|candidate|parity [--canonical DIR|--upstream]|stage|verify-staged|publish|install-gh",
+		"Usage: node scripts/release.mjs inspect|candidate|parity [--canonical DIR|--upstream]|stage|verify-staged|verify-provenance|publish|install-gh",
 	);
 }
 
