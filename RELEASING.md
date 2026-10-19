@@ -395,6 +395,8 @@ provenance exists; keep activation approval and actual verification explicit.
 Enable Actions for this repository and allow these specific external action
 repositories. The workflow itself pins exact commits; `@*` in the repository
 allowlist permits reviewed pin upgrades without allowing unrelated actions.
+After saving, verify each pattern still ends in the literal `@*`; a bare `@`
+does not match the workflow commit pins.
 
 - `actions/attest@*`
 - `actions/checkout@*`
