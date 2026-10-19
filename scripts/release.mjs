@@ -45,8 +45,11 @@ function reportUrl(value, required, label) {
 
 export function validateEvidence(evidence, qualificationRequired) {
 	assert.match(evidence.source, SHA, "source must be a full commit SHA");
-	assert.match(evidence.preview, SHA, "preview must be a full commit SHA");
-	reportUrl(evidence.previewReport, true, "preview report");
+	if (evidence.preview || evidence.previewReport) {
+		assert.match(evidence.preview, SHA, "preview must be a full commit SHA when a report is supplied");
+		reportUrl(evidence.previewReport, true, "preview report");
+	}
+	reportUrl(evidence.workflowRun, false, "workflow run");
 	reportUrl(evidence.qualificationReport, qualificationRequired, "qualification report");
 }
 
@@ -119,6 +122,36 @@ export async function verifyBuildProvenance(receipt, verify) {
 	return reports;
 }
 
+// Safe repeated pushes of the same version validate without replacing releases.
+// A changed asset or lower version needs a deliberate new manifest version.
+export function releaseNeeded(candidate, releases) {
+	assert.ok(Array.isArray(releases), "release listing is missing");
+	const matches = releases.filter((release) => release.tag_name === candidate.version);
+	assert.ok(matches.length <= 1, "ambiguous release state; preserve it for diagnosis");
+	if (matches.length) {
+		assert.equal(
+			matches[0].draft,
+			false,
+			"an existing draft requires inspection before another publication attempt",
+		);
+		assert.equal(matches[0].prerelease, false, "an existing prerelease is not a completed stable publication");
+		checkRemoteAssets(matches[0], candidate);
+		return false;
+	}
+	const next = candidate.version.split(".").map(BigInt);
+	for (const release of releases.filter(
+		(release) => !release.draft && !release.prerelease && SEMVER.test(release.tag_name),
+	)) {
+		const previous = release.tag_name.split(".").map(BigInt);
+		const changed = next.findIndex((value, index) => value !== previous[index]);
+		assert.ok(
+			changed >= 0 && next[changed] > previous[changed],
+			"a new release version must be newer than every published stable version",
+		);
+	}
+	return true;
+}
+
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, { encoding: "utf8", ...options });
 	if (result.error) throw result.error;
@@ -161,9 +194,10 @@ async function metadata() {
 function environmentEvidence() {
 	return {
 		source: process.env.SOURCE_SHA,
-		preview: process.env.PREVIEW_SHA,
-		previewReport: process.env.PREVIEW_REPORT,
+		preview: process.env.PREVIEW_SHA || "",
+		previewReport: process.env.PREVIEW_REPORT || "",
 		qualificationReport: process.env.QUALIFICATION_REPORT || "",
+		workflowRun: process.env.WORKFLOW_RUN || "",
 	};
 }
 
@@ -173,7 +207,8 @@ function checkSource(evidence) {
 	assert.equal(git("rev-parse", "origin/main"), evidence.source, "source must be the fetched main HEAD");
 	assert.equal(git("status", "--porcelain", "--untracked-files=no"), "", "tracked source must be clean");
 	const tree = git("rev-parse", `${evidence.source}^{tree}`);
-	assert.equal(git("rev-parse", `${evidence.preview}^{tree}`), tree, "merged source must equal the preview tree");
+	if (evidence.preview)
+		assert.equal(git("rev-parse", `${evidence.preview}^{tree}`), tree, "merged source must equal the preview tree");
 	return tree;
 }
 
@@ -292,7 +327,7 @@ export async function publishRelease(receipt, host, immutableSettingConfirmed) {
 		]);
 	}
 	const scope = ["--repo", receipt.repository];
-	const notes = `Source: ${receipt.source}\nPreview: ${receipt.preview}\nPreview report: ${receipt.previewReport}\nQualification: ${receipt.qualificationReport || "See qualified source PR"}\n\n${ASSETS.map((name) => `${name}: sha256:${receipt.assets[name].sha256}`).join("\n")}\n\nInstallation/activation remains subject to the completed Obsidian full release review.`;
+	const notes = `Source: ${receipt.source}\nWorkflow validation: ${receipt.workflowRun || "See retained validation evidence"}\nCommunity preview: ${receipt.preview ? `${receipt.preview} ${receipt.previewReport}` : "Not supplied; published-release review is pending"}\nAdditional qualification: ${receipt.qualificationReport || "No external qualification report supplied"}\n\n${ASSETS.map((name) => `${name}: sha256:${receipt.assets[name].sha256}`).join("\n")}\n\nInstallation/activation remains subject to the completed Obsidian full release review.`;
 	await host.gh([
 		"release",
 		"create",
@@ -358,6 +393,7 @@ async function parity() {
 		".github/workflows/release.yml",
 		"docs/RELEASE-CONTRACT.md",
 		"scripts/release.mjs",
+		"stylelint.obsidian-scanner.json",
 		"tests/release-contract.test.mjs",
 	]);
 	assert.equal(source.role, config.repository === CANONICAL ? "canonical" : "snapshot");
@@ -393,6 +429,7 @@ async function main() {
 	const command = process.argv[2];
 	if (command === "parity") return parity();
 	if (command === "install-gh") return installGh();
+
 	const config = await metadata();
 	if (command === "inspect") {
 		if (process.env.GITHUB_REPOSITORY) assert.equal(config.repository, process.env.GITHUB_REPOSITORY);
@@ -412,6 +449,25 @@ async function main() {
 		console.log(`Candidate tree: ${checkSource(evidence)}`);
 		return;
 	}
+	if (command === "release-needed") {
+		const evidence = environmentEvidence();
+		validateEvidence(evidence, config.qualificationEvidenceRequired);
+		checkSource(evidence);
+		const pages = JSON.parse(
+			run("gh", ["api", `repos/${config.repository}/releases?per_page=100`, "--paginate", "--slurp"]),
+		);
+		assert.ok(Array.isArray(pages) && pages.every(Array.isArray), "complete release listing is required");
+		const assets = {};
+		for (const name of ASSETS) assets[name] = await regularFile(path.join(config.assetDirectory, name));
+		const needed = releaseNeeded({ version: config.version, assets }, pages.flat());
+		if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `release_needed=${needed}\n`);
+		console.log(
+			needed
+				? "New version: exact qualified assets will be staged."
+				: "This version is already published with identical asset hashes. Validation completed; publication skipped.",
+		);
+		return;
+	}
 	if (command === "stage") return stage(config);
 	if (command === "verify-staged") {
 		console.log(JSON.stringify(await checkStaged(config), null, 2));
@@ -425,7 +481,7 @@ async function main() {
 		return;
 	}
 	if (command === "publish") {
-		assert.equal(process.env.GITHUB_REF, "refs/heads/main", "publication dispatch must run from main");
+		assert.equal(process.env.GITHUB_REF, "refs/heads/main", "publication must run from main");
 		assert.equal(process.env.GITHUB_REPOSITORY, config.repository);
 		const receipt = await checkStaged(config);
 		const gh = async (args) => {
@@ -487,7 +543,7 @@ async function main() {
 		return;
 	}
 	throw new Error(
-		"Usage: node scripts/release.mjs inspect|candidate|parity [--canonical DIR|--upstream]|stage|verify-staged|verify-provenance|publish|install-gh",
+		"Usage: node scripts/release.mjs inspect|candidate|release-needed|parity [--canonical DIR|--upstream]|stage|verify-staged|verify-provenance|publish|install-gh",
 	);
 }
 

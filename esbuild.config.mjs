@@ -80,10 +80,13 @@ function assertWasmDeclarations() {
 	}
 	// Keep postbuild type resolution as honest as the clean-checkout contract.
 	// Preserve generated comments and quoted text while changing only type tokens.
-	const safe = generated.replace(
-		/\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\bany\b/g,
-		(token) => (token === "any" ? "unknown" : token),
-	);
+	const safe = generated
+		// wasm-bindgen emits blanket lint directives; generated declarations must
+		// remain inspectable under the same review rules as authored declarations.
+		.replace(/^\/\* (?:eslint-disable|tslint:disable) \*\/\r?\n/gm, "")
+		.replace(/\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\bany\b/g, (token) =>
+			token === "any" ? "unknown" : token,
+		);
 	if (safe !== generated) writeFileSync(generatedUrl, safe);
 }
 

@@ -1,138 +1,135 @@
 # Shared Obsidian release contract
 
-Viewgram is the canonical home of this small release bundle. Mica vendors the
-same workflow, dependency-free publisher, tests and this contract. No third
-repository, shared credentials or independently versioned release framework is
-needed. `.github/release-bundle.json` records exact file hashes; Mica's
-`.github/release-source.json` pins the full Viewgram commit containing those
-bytes. `node scripts/release.mjs parity --upstream` rejects local drift and
-checks Mica against that immutable upstream snapshot. To update the bundle,
-change and test Viewgram first, copy those files and the hash manifest to Mica,
-pin the resulting Viewgram commit, then review both candidates. Do not follow a
-mutable upstream branch or fix drift by merely regenerating consumer hashes.
+Viewgram is the canonical home of this release bundle. Mica vendors the same
+workflow, dependency-free publisher, tests, scanner CSS configuration and this
+contract. `.github/release-bundle.json` records their exact hashes; Mica's
+`.github/release-source.json` pins the full Viewgram commit containing them.
+Run `node scripts/release.mjs parity --upstream` to reject drift. Update and test
+Viewgram first, copy the bundle and hash manifest to Mica, then pin the resulting
+Viewgram commit. Never follow a mutable upstream branch or regenerate consumer
+hashes to hide drift.
 
-## Product authority
+## Automatic delivery on push
 
-The root manifest owns the unprefixed `x.y.z` version and minimum Obsidian
-version. Package/lock/Cargo metadata and `versions.json` must agree. Existing
-package scripts own the build and qualification commands. The only product
-adapter is `.github/obsidian-release.json`: repository identity, built-asset
-directory and whether additional qualification evidence is required. Toolchain
-versions come from `packageManager` and `rust-toolchain.toml`; common action and
-GitHub CLI pins live in the shared bundle. There is no second version field or
-separate plugin source in the release setup.
+Pushes to `review` and `main` run validation. Only `main` can publish. The root
+manifest owns the version and minimum app version; package/lock/Cargo metadata
+and `versions.json` must agree. For a new version, a passing main run builds,
+validates, stages, attests and publishes the exact three plugin assets. The
+version must be newer than every stable published version. If the version is
+already published with identical asset hashes, validation finishes and
+publication is skipped. Changed assets under an existing version fail and
+require a new version. There are no version-writeback commits, tag triggers or
+scheduled jobs, so the release cannot retrigger itself.
 
-## Invocation and activation
+`workflow_dispatch` remains an optional recovery/dry-run entry point on current
+main. Its default `publish=false` validates, stages and attests a new version
+without creating a tag or release. A supplied `source_sha` must equal current
+main. Optional preview SHA and HTTPS report URL must be supplied together, and
+the preview/source trees must match. Optional external reports are references,
+not authenticated machine evidence. No manual portal report is required for
+every push and no nonexistent Community submission API is called.
 
-The only workflow trigger is `workflow_dispatch`, from `main`. Pushes to main,
-PRs, tag pushes and schedules start no hosted job. The default is a dry run:
-build, qualify and stage an artifact; it creates no tag or GitHub Release.
-Once attestation permission is approved, a dry run also creates build-provenance
-attestations in GitHub. They are retained evidence, not release publication.
-Publication is automated after an explicit dispatch with `publish=true`. This
-is an automated release procedure with a manual start, not an automatic release
-cadence. Enabling qualified-tag publication later requires an explicit trigger
-change plus an authenticated source of exact-SHA preview/qualification evidence;
-a tag alone must never stand in for those reports.
+Obsidian automatically checks new GitHub releases periodically. Its completed
+full release review remains the authority for directory acceptance. The optional
+**Review branch** preview can diagnose source before publication; it cannot
+verify future release attachments. Local checks, GitHub workflow success,
+publication, full Community acceptance, installation and activation are separate
+outcomes. A missing review is pending, never an inferred pass.
 
-Before the first hosted run, the owner must verify repository Actions is
-available and the workflow is on qualified main. Before publication, verify
-immutable releases are enabled in GitHub's repository release settings and set
-the non-secret repository Actions variable
-`OBSIDIAN_IMMUTABLE_RELEASES_CONFIRMED=true`. Reuse current verified setting
-evidence; no repeat approval is required just because this workflow exists.
-This variable is a declaration, not a live settings check: an administrator
-could later change the setting. The normal repository-scoped workflow token
-cannot read that admin-only endpoint. Never add an admin PAT to work around it.
-A published non-immutable result or failed attestation verification stops
-delivery and requires diagnosis without rewriting the published assets.
+## Validation and essential capabilities
 
-An optional GitHub protected environment can add a reviewer before the
-write-capable job, if the owner wants that additional safeguard. It is not part
-of this default contract and does not create a new per-release approval gate.
-Committing these files does not activate hosted execution or change repository
-settings. The new attestation job requests security-sensitive permissions; the
-owner must approve their activation before anyone sets the non-secret repository
-variable `OBSIDIAN_BUILD_PROVENANCE_APPROVED=true`. Until then this job is skipped
-and its dependent publication job cannot run. Approval covers repository-scoped
-`attestations: write` (upload signed claims) and `id-token: write` (request
-short-lived GitHub OIDC identity tokens) in that job only. No cloud trust binding,
-PAT, saved credential, or new secret is configured. Keep the variable unset
-until that specific approval; Actions availability alone is not approval.
+Each product owns `release:validate`, the non-interactive checks available on
+hosted Linux. Viewgram includes type checks, unit tests, taxonomy, production
+build, browser regressions (including real image/source clipboard round trips),
+source/CSS lint and release-contract tests. Mica retains its source/build,
+Rust/WASM, stress, assets and CLI gates there. Mica's `release:qualify` additionally
+covers native profiles; device, Sync and storage-cutover acceptance remain
+explicit separate evidence and are not claimed by Linux CI.
 
-## Candidate and evidence
+The official `obsidianmd/obsidian-workflows` action is pinned to
+`8167caed39664214d82c86fdfa32e06d8d55f61d` (v1.2.3), with `mode=pr`,
+`scanner-lint=true`, `strict=true`, and no second build. It covers public rules,
+not private heuristics or full release verification. Its setup errors can be
+reported as inconclusive without failing the action. Therefore direct official
+ESLint and direct Stylelint are required product gates too; their installation
+or execution failures fail validation. Shipping-source ESLint and scanner CSS
+also reject new warnings; documented browser-only adapter advisories remain
+visible in a separate development check. `stylelint.obsidian-scanner.json` is the
+unchanged `SCANNER_STYLELINT_CONFIG` from that pinned action's `src/lint.ts`, with
+exact dev dependencies `stylelint@17.6.0` and
+`stylelint-no-unsupported-browser-features@8.1.1` in each product lockfile.
 
-Dispatch with the full merged main SHA, full passing Community preview SHA,
-HTTPS preview-report evidence, and any required qualification-report evidence.
-The preview must have zero errors and reviewed warning dispositions. The two
-commits must have identical Git trees. The checkout must be clean and the exact
-current main HEAD; main is checked again immediately before publication.
-Evidence links are recorded, not authenticated or interpreted by this script.
-The repository's existing review-before-merge policy and product qualification
-requirements remain the authority. Do not dispatch publication with missing,
-failed, stale or invented reports. Mica's device, Sync and storage-cutover gates
-are not replaced by a workflow run; private vault content is never an asset.
+Do not hide warnings or weaken functionality to change a count. Fix actionable
+findings and document necessary advisories. Clipboard access is an essential,
+user-initiated feature explicitly allowed by the owner, and Obsidian recommends
+the browser clipboard APIs. A capability recommendation is not an error and
+must not cause clipboard removal. Keep actual findings visible.
 
-## Assets, permissions and failure recovery
+## Assets and permissions
 
-The read-only qualification job builds from the exact source. It stages only
-`main.js`, `manifest.json` and `styles.css`, all nonempty regular files. The built
-manifest must equal the root manifest byte-for-byte. A separate workflow
-receipt binds repository, source/preview SHAs, tree, version, external evidence
-and all three SHA-256 hashes. It is a workflow artifact, not a public plugin
-asset. The write-capable job downloads that same run's artifact by ID and
-revalidates the bindings and bytes. It installs no product dependencies and
-runs no product build with a write token. Default permissions are contents-read;
-only publication receives repository-scoped contents-write. A separate
-approval-gated attestation job receives contents-read, id-token-write and
-attestations-write. It downloads the same run's qualified artifact by ID,
-rechecks its receipt and hashes, and uses the official commit-pinned
-`actions/attest` action over exactly `main.js`, `manifest.json` and `styles.css`.
-It runs no product build or dependency lifecycle with these permissions.
-Actions are pinned to full commits; no PAT, long-lived signing key or inherited
-secret is required. This is standard workflow build provenance, not a claim of
-a stronger reusable trusted-builder/SLSA assurance level.
+`.github/obsidian-release.json` supplies repository identity, asset directory
+and whether an optional additional qualification report is mandatory for a
+specific product. Toolchain pins come from `packageManager` and
+`rust-toolchain.toml`; common action/CLI pins live in the bundle.
 
-The original Sigstore bundle and verification report travel in a separate
-workflow artifact, never as extra Obsidian runtime attachments. Before the
-first tag/release mutation, the publisher independently runs `gh attestation
-verify` on every staged file with that bundle, SLSA provenance-v1 predicate,
-exact repository, source commit/ref, signing workflow path and commit, GitHub
-Actions OIDC issuer, and GitHub-hosted runner policy. It also requires the
-verified statement to name exactly the three assets and their receipt SHA-256
-hashes. A decoded bundle or an earlier success receipt cannot replace this
-cryptographic check. Failure stops publication before any mutation.
+The read-only job stages only nonempty regular `main.js`, `manifest.json`, and
+`styles.css`. Built manifest bytes must match the root manifest. Its private
+workflow receipt binds repository, source/tree/version, workflow run URL,
+optional reports, and every asset's SHA-256 and size. Separate jobs download
+that same run's artifacts by ID and revalidate the receipt and bytes. Source
+must be clean and current main; main is checked again immediately before
+publication. An obsolete run stops rather than publishing a superseded source.
 
-The publisher refuses every existing release, including ambiguous leftover
-drafts. It never overwrites assets, deletes releases, retags, or uses `--clobber`.
-A new exact-version tag points at the qualified source. A new draft receives
-exactly the three assets; their names, sizes and hashes are checked before
-publication. The result must be immutable. The publisher downloads all assets,
-compares their hashes, then runs supported `gh release verify` and
-`gh release verify-asset` with a checksum-pinned official CLI. A partial failure
-in verification gets a three-minute read-only attestation propagation window;
-no create/upload/edit operation is retried automatically. A remaining failure
-retains the draft or published result for inspection; do not blindly rerun
-mutations. Published corrections need a new version and qualified candidate.
+Builds have contents-read only. Previously approved repository-scoped
+`id-token: write` and `attestations: write` are confined to the separate
+attestation job, which installs no product dependencies and executes no product
+build. Only publication has contents-write. No PAT, saved credential, new cloud
+trust or long-lived signing key is introduced. Do not add stronger permissions
+to work around an unavailable setting or report.
 
-GitHub's immutable-release attestation is distinct from SLSA build provenance.
-Both checks are required: build provenance before publication, immutable release
-and asset verification afterward. Existing immutable releases are never rewritten
-or retroactively claimed to have been built by a new workflow. A prepared
-workflow is not evidence of generated or accepted provenance. Successful
-publication is still separate from Obsidian's full release review, installation and activation. Require that completed full
-review before installing or activating. Preserve disagreements between GitHub
-verification and Obsidian; never weaken checks to force agreement. Users fetch
-approved updates through Community plugins' **Check for updates** and **Update**.
+Before first publication, verify that GitHub immutable releases are currently
+enabled and set `OBSIDIAN_IMMUTABLE_RELEASES_CONFIRMED=true`. This non-secret
+variable records an owner-verified setting; it is not a live admin API check.
+An old mutable release does not establish the current setting. The ordinary
+workflow token cannot read the admin-only setting; do not add an admin PAT.
+Publication verifies the actual new result is immutable and stops delivery if
+it is not, preserving its assets for diagnosis.
+
+## Cryptographic verification and recovery
+
+The official pinned `actions/attest` action signs exactly the staged three
+assets. The original Sigstore bundle and verification report travel in a
+separate workflow artifact, never as extra plugin attachments. Before creating
+a tag or release, the publisher independently verifies every asset using the
+checksum-pinned official GitHub CLI, SLSA provenance-v1 predicate, exact
+repository/source/ref, signer workflow/commit, GitHub Actions OIDC issuer and
+GitHub-hosted runner policy. It requires the verified subject set to match all
+three asset names and hashes. Decoding a bundle is not verification.
+
+The publisher refuses existing releases and ambiguous leftover drafts; it never
+overwrites assets, deletes releases or rewrites tags. A new exact unprefixed
+`x.y.z` tag points to the qualified commit. A draft receives the three assets,
+whose names, sizes and digests are checked before publishing. After publication,
+the result must be immutable; all downloaded assets must match the staged bytes;
+`gh release verify` and `gh release verify-asset` must pass. Read-only verification
+can wait up to three minutes for attestation propagation. Mutations are not
+blindly retried. A retained draft or partial failure requires inspection.
+
+Immutable `release/v0.2` attestations and SLSA build provenance are distinct.
+Both are verified. Existing immutable releases are never rewritten or claimed
+to have new workflow provenance. A prepared workflow does not prove a genuine
+attestation exists or that Obsidian accepts it. Preserve conflicting reports,
+inspect the latest applicable run, and diagnose failures without weakening
+checks. Require completed Community release acceptance before installation or
+activation. Users update via Community plugins' **Check for updates**.
 
 ## References
 
 - [Obsidian entry management and previews](https://docs.obsidian.md/community-directory/manage-entry)
 - [Obsidian release requirements](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin)
+- [Official scanner action](https://github.com/obsidianmd/obsidian-workflows/tree/8167caed39664214d82c86fdfa32e06d8d55f61d)
+- [Plugin requirements, including clipboard APIs](https://docs.obsidian.md/community-directory/submission-requirements-for-plugins)
 - [GitHub immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
-- [GitHub release verification](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity)
-- [Immutable-setting API and admin-only read permission](https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository)
-
-- [Official GitHub build-provenance action](https://github.com/actions/attest)
-- [GitHub build-provenance permissions and verification](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
-- [Exact identity and source verification flags](https://cli.github.com/manual/gh_attestation_verify)
+- [Release verification](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity)
+- [Build-provenance action](https://github.com/actions/attest)
+- [Exact identity/source verification flags](https://cli.github.com/manual/gh_attestation_verify)

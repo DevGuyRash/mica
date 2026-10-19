@@ -40,8 +40,17 @@ assert.equal(
 );
 assert.equal(pkg.license, "MIT", "package license must remain MIT");
 assert.equal(pkg.packageManager, "pnpm@11.3.0", "pnpm must remain reproducibly pinned");
-assert.equal(pkg.engines?.node, ">=22.12.0", "Node floor must satisfy the locked Electron downloader");
+assert.equal(pkg.engines?.node, ">=22.13.0", "Node floor must satisfy the locked Electron downloader");
 assert.equal(pkg.dependencies?.fflate, "0.8.3", "mobile gzip read fallback must remain reproducibly pinned");
+assert.equal(pkg.devDependencies?.stylelint, "17.6.0", "official CSS scanner tooling must remain pinned");
+assert.equal(pkg.devDependencies?.["stylelint-no-unsupported-browser-features"], "8.1.1");
+assert.equal(pkg.scripts["lint:scanner-css"], "stylelint styles.css --config stylelint.obsidian-scanner.json");
+assert.ok(pkg.scripts["lint:obsidian"].split(" && ").includes("pnpm run lint:scanner-css"));
+const scannerCss = await readJson("stylelint.obsidian-scanner.json");
+assert.equal(scannerCss.ignoreDisables, true, "CSS scanner rules must not be suppressed inline");
+assert.equal(scannerCss.rules["declaration-no-important"][1].severity, "warning");
+assert.deepEqual(scannerCss.rules["plugin/no-unsupported-browser-features"][1].browsers, ["electron >= 39"]);
+
 assert.equal(versions["0.1.0"], undefined, "unreleased versions must not be advertised");
 assert.match(rustToolchain, /^channel\s*=\s*"1\.97\.1"$/m, "rust-toolchain.toml must pin the CI Rust toolchain");
 assert.match(
@@ -51,19 +60,16 @@ assert.match(
 );
 assert.match(workspace, /^\s*diff:\s*8\.0\.4$/m, "pnpm workspace must force the audited diff version");
 assert.match(release, /tool:\s*wasm-pack@0\.15\.0,cargo-deny@0\.20\.2/, "release tools must remain pinned");
-assert.match(release, /\n\s+workflow_dispatch:/, "release must remain explicitly started");
-assert.doesNotMatch(
-	release,
-	/^\s+(?:push|pull_request|schedule):/m,
-	"source pushes, PRs and schedules must not run hosted CI",
-);
+assert.match(release, /\n\s+workflow_dispatch:/, "manual retry must remain available");
+assert.match(release, /^\s+push:/m, "main pushes must start automated validation and publication");
+assert.doesNotMatch(release, /^\s+schedule:/m, "release validation is event-driven, not scheduled");
 assert.match(
-	pkg.scripts["release:qualify"],
+	pkg.scripts["release:validate"],
 	/cargo clippy --workspace --all-targets --locked -- -D warnings/,
 	"Clippy must use Cargo.lock",
 );
 assert.match(
-	pkg.scripts["release:qualify"],
+	pkg.scripts["release:validate"],
 	/cargo build --release -p mica-cli --locked/,
 	"CLI release build must use Cargo.lock",
 );
@@ -76,23 +82,25 @@ for (const gate of [
 	"test:version-stress",
 	"check:release:assets",
 	"smoke",
-	"e2e",
-	"e2e:minimum",
-	"e2e:mobile",
 ]) {
 	assert.ok(
-		pkg.scripts["release:qualify"].split(" && ").includes(`pnpm run ${gate}`),
-		`release qualification must run ${gate}`,
+		pkg.scripts["release:validate"].split(" && ").includes(`pnpm run ${gate}`),
+		`hosted release validation must run ${gate}`,
 	);
 }
-assert.match(pkg.scripts["release:qualify"], /cargo deny check advisories/, "release must audit Rust dependencies");
-assert.match(pkg.scripts["release:qualify"], /cargo fmt --all -- --check/, "release must check Rust formatting");
+assert.match(pkg.scripts["release:validate"], /cargo deny check advisories/, "release must audit Rust dependencies");
+assert.match(pkg.scripts["release:validate"], /cargo fmt --all -- --check/, "release must check Rust formatting");
 assert.equal(releaseConfig.repository, "DevGuyRash/mica");
 assert.equal(releaseConfig.assetDirectory, ".");
 assert.equal(
+	pkg.scripts["release:qualify"],
+	"pnpm run release:validate && pnpm run e2e && pnpm run e2e:minimum && pnpm run e2e:mobile",
+	"full native qualification must remain available separately from hosted validation",
+);
+assert.equal(
 	releaseConfig.qualificationEvidenceRequired,
-	true,
-	"Mica's external device, Sync and cutover evidence must remain required",
+	false,
+	"GitHub upload must not claim or require external device/Sync/cutover acceptance",
 );
 assert.match(
 	pkg.scripts.wasm,
@@ -137,6 +145,12 @@ if (process.env.GITHUB_REF_TYPE === "tag") {
 }
 
 if (process.argv.includes("--artifacts")) {
+	const declarations = await readText("src/wasm/pkg/mica_core.d.ts");
+	assert.doesNotMatch(
+		declarations,
+		/\/\*\s*(?:eslint-disable|tslint:disable)\s*\*\//,
+		"generated WASM declarations must not disable reviewer lint rules",
+	);
 	for (const relativePath of ["main.js", "manifest.json", "styles.css"]) {
 		await access(path.join(root, relativePath));
 		const artifact = await stat(path.join(root, relativePath));

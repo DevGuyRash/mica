@@ -2,35 +2,22 @@
 
 Describe the problem and resulting behavior.
 
-## Exact Community Review evidence
+## Validation
 
-- Full current `review` HEAD SHA:
-- **Review branch → Run preview scan** report link or retained evidence:
-- Scan completion time and result:
-- Official preview result and error count (required: pass, zero errors):
-- Warning count and disposition for each: fixed, or intentional necessity with
-  reviewed reason (do not suppress review rules):
-- Recommendations and optional capabilities/attestations still unverified:
+- Exact source SHA:
+- Source/build/asset checks actually completed:
+- Official scanner-rule preflight errors and warning dispositions:
+- Actual Community preview or release report, if available (include its SHA):
+- Native/mobile/Sync/storage acceptance still pending:
 
-- [ ] This PR is `review` → `main`, and the report covers its exact current head.
-- [ ] The official preview passed with zero errors. Every warning is fixed or
-      has an explicit reviewed reason for intentional necessity; none is
-      unreviewed. Any new commit requires a fresh preview on its full SHA before
-      merge, tagging or publication.
+Local scanner rules, GitHub checks and official Community review are separate
+results. Record unavailable evidence honestly; do not fabricate a report or
+remove essential capabilities merely to avoid an advisory disclosure.
 
-GitHub PR checks are separate from the Obsidian preview; identify each result
-by its actual source rather than assuming an Obsidian status check exists.
+## Delivery
 
-## Local preflight and qualification
-
-- `pnpm run lint:obsidian` actual source-rule and CSS-tripwire results:
-- Warning dispositions: exact component/rule, fix or reviewed necessity; use
-  the component contracts in `RELEASING.md`, not a numeric baseline:
-- Other checks actually completed, and gates still pending:
-
-## Promotion and delivery
-
-Preserve the scanned candidate's source and root manifest during merge. Content
-changes return through `review` and a fresh preview. After merge, follow
-[RELEASING.md](../RELEASING.md) for the exact `x.y.z` tag, three runtime assets,
-download/hash verification and separate installation/activation outcomes.
+Main pushes validate automatically. A new manifest version is published with
+its exact three runtime assets and verified build provenance. Already-published
+versions are preserved. Publication, official Community acceptance and
+installation/activation are separate outcomes. Follow
+[RELEASING.md](../RELEASING.md) for the full procedure.

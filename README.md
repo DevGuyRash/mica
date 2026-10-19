@@ -16,7 +16,7 @@
 
 For manual installation, use the published [Mica release assets](https://github.com/DevGuyRash/mica/releases):
 
-1. Copy `manifest.json`, `main.js`, and `styles.css` into `<your vault>/.obsidian/plugins/mica/`.
+1. Copy `manifest.json`, `main.js`, and `styles.css` into the `.obsidian/plugins/mica/` folder inside your vault.
    _(Or, if you're developing it, symlink the repo there — see [Development](#development).)_
 2. In Obsidian: **Settings → Community plugins → Reload**, then enable **Mica**.
 
@@ -238,21 +238,20 @@ pnpm smoke       # WASM boundary test in Node (no Obsidian needed)
 just e2e         # contract + UI suite in a REAL sandboxed Obsidian (Xvfb)
 ```
 
-The reproducible toolchain is Node 22.12 or newer, pnpm 11.3.0, Rust 1.97.1,
+The reproducible toolchain is Node 22.13 or newer, pnpm 11.3.0, Rust 1.97.1,
 `wasm-pack` 0.15.0, the `wasm32-unknown-unknown` target, and `just`. The pnpm and
 Rust versions are recorded in `package.json` and `rust-toolchain.toml`; CI pins
 the same `wasm-pack` version.
 
-The checked-in CI and Compatibility workflow definitions describe the normal
-verification suites and tag artifact uploads when hosted Actions is enabled;
-they do not publish GitHub Releases. [RELEASING.md](RELEASING.md) gives the local
-release procedure, version/lockfile synchronization, minimum/mobile checks and
-download verification. Real mobile devices and two-device Obsidian Sync remain
-manual release gates because desktop automation cannot reproduce those runtime
-and concurrency boundaries.
+Main pushes run the automated source/build/asset checks and publish a new
+manifest version as an immutable GitHub Release with the three runtime assets
+and verified build provenance. A push that retains an already-published version
+validates without replacing that release. Manual dispatch remains available for
+retries. [RELEASING.md](RELEASING.md) covers version synchronization and separate
+native/mobile, real-device, two-device Sync and existing-vault cutover checks.
+Hosted success does not establish those checks or official Community acceptance.
 
-Ordinary source pushes do not distribute a plugin update. Publish a new matching
-GitHub Release with the three runtime assets for each version. The initial
+The directory automatically reviews published GitHub Releases. The initial
 Community directory submission is needed only once. Users install updates with
 **Community plugins → Check for updates → Update** or **Update all**; installed
 community plugins do not update automatically.

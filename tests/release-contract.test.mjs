@@ -14,6 +14,9 @@ import {
 	validateProvenanceSubjects,
 } from "../scripts/release.mjs";
 
+import * as release from "../scripts/release.mjs";
+const { releaseNeeded } = release;
+
 const source = "a".repeat(40);
 const preview = "b".repeat(40);
 const digest = "c".repeat(64);
@@ -186,19 +189,22 @@ test("incomplete or mismatching draft uploads stop before publication", async ()
 	assert.ok(!host.calls.some((args) => args[1] === "edit"));
 });
 
-test("release workflow is manual-only, least-privilege and pins every action", async () => {
+test("release workflow validates review/main pushes and isolates automatic main publication", async () => {
 	const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 	assert.match(workflow, /\n\s+workflow_dispatch:/);
-	assert.doesNotMatch(workflow, /^\s+(?:push|pull_request|pull_request_target|schedule|workflow_run|release):/m);
+	assert.match(workflow, /push:\n\s+branches: \[review, main\]/);
+	assert.doesNotMatch(workflow, /^\s+(?:pull_request|pull_request_target|schedule|workflow_run|release):/m);
 	assert.match(workflow, /default: false/);
 	assert.match(workflow, /permissions:\n\s+contents: read/);
 	assert.match(workflow, /publish:[\s\S]*permissions:\n\s+contents: write/);
 	assert.match(workflow, /persist-credentials: false/);
-	assert.equal(
-		(workflow.match(/inputs\.source_sha == github\.sha/g) || []).length,
-		3,
-		"all jobs must reject unmerged input before checking out executable code",
-	);
+	assert.match(workflow, /inputs\.source_sha == github\.sha/);
+	assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
+	assert.match(workflow, /github\.event_name == 'push' \|\| inputs\.publish/);
+	assert.match(workflow, /scanner-lint: true\n\s+strict: true/);
+	assert.doesNotMatch(workflow, /GITHUB_STEP_SUMMARY:/);
+	assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+	assert.match(workflow, /release:validate/);
 	assert.match(workflow, /artifact-ids: \$\{\{ needs\.qualify\.outputs\.artifact_id \}\}/);
 	assert.match(workflow, /Advisory product compatibility[\s\S]*?continue-on-error: true/);
 	for (const [, action, revision] of workflow.matchAll(/uses:\s*([^\s@]+)@([^\s#]+)/g)) {
@@ -413,14 +419,43 @@ test("publisher requires fresh cryptographic build provenance before any externa
 	assert.equal(host.calls.length, 0);
 });
 
-test("attestation privileges are approval-gated and isolated from product execution and publication", async () => {
+test("approved attestation privileges stay isolated from product execution and publication", async () => {
 	const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 	const attest = workflow.split("\n    attest:\n")[1].split("\n    publish:\n")[0];
-	assert.match(attest, /OBSIDIAN_BUILD_PROVENANCE_APPROVED == 'true'/);
+	assert.doesNotMatch(attest, /OBSIDIAN_BUILD_PROVENANCE_APPROVED/);
+	assert.match(attest, /needs\.qualify\.outputs\.release_needed == 'true'/);
 	assert.match(attest, /contents: read\n\s+id-token: write\n\s+attestations: write/);
 	assert.doesNotMatch(attest, /contents: write|run:.*(?:npm|pnpm|cargo) /);
 	assert.match(attest, /subject-path: \|\n\s+release\/main.js\n\s+release\/manifest.json\n\s+release\/styles.css/);
 	assert.ok(attest.indexOf("verify-staged") < attest.indexOf("uses: actions/attest@"));
 	assert.match(workflow, /needs: \[qualify, attest\]/);
 	assert.match(workflow, /artifact-ids: \$\{\{ needs\.attest\.outputs\.artifact_id \}\}/);
+});
+
+test("automated source evidence does not invent a Community preview", () => {
+	const automatic = { source, preview: "", previewReport: "", qualificationReport: "" };
+	assert.doesNotThrow(() => validateEvidence(automatic, false));
+	assert.throws(() => validateEvidence({ ...automatic, preview }, false));
+	assert.throws(() => validateEvidence({ ...automatic, previewReport: evidence.previewReport }, false));
+	assert.throws(() => validateEvidence(automatic, true));
+});
+
+test("on-push release selection is idempotent and never overwrites or downgrades", () => {
+	assert.equal(typeof releaseNeeded, "function");
+	const released = {
+		tag_name: "1.2.3",
+		draft: false,
+		prerelease: false,
+		assets: Object.entries(receipt.assets).map(([name, asset]) => ({
+			name,
+			digest: `sha256:${asset.sha256}`,
+			size: asset.size,
+		})),
+	};
+	assert.equal(releaseNeeded(receipt, []), true);
+	assert.equal(releaseNeeded(receipt, [released]), false);
+	assert.throws(() => releaseNeeded(receipt, [{ ...released, draft: true }]), /draft/);
+	assert.throws(() => releaseNeeded(receipt, [{ ...released, prerelease: true }]), /prerelease/);
+	assert.throws(() => releaseNeeded(receipt, [{ ...released, assets: [] }]), /assets/);
+	assert.throws(() => releaseNeeded(receipt, [{ ...released, tag_name: "1.2.4" }]), /newer/);
 });
