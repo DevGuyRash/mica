@@ -4,7 +4,9 @@ type E2eProfile = "default" | "minimum" | "mobile" | "desktop-latest";
 
 // Minimum-version qualification target; a target is not evidence of a completed run.
 const MINIMUM_APP_VERSION = "1.13.0";
-const VERIFIED_INSTALLER_VERSION = "1.5.8";
+// Oldest compatible installer in the pinned launcher-index evidence documented
+// in RELEASING.md. This pin is a target, not evidence of a native test pass.
+const PINNED_INSTALLER_VERSION = "1.6.5";
 
 const requestedProfile = process.env.MICA_E2E_PROFILE ?? "default";
 if (!(["default", "minimum", "mobile", "desktop-latest"] as const).includes(requestedProfile as E2eProfile)) {
@@ -22,7 +24,7 @@ function capabilityFor(selected: E2eProfile): WebdriverIO.Capabilities {
 		browserVersion: latest ? "latest" : MINIMUM_APP_VERSION,
 		"wdio:obsidianOptions": {
 			...(mobile ? { emulateMobile: true } : {}),
-			installerVersion: latest ? "latest" : VERIFIED_INSTALLER_VERSION,
+			installerVersion: latest ? "latest" : PINNED_INSTALLER_VERSION,
 			plugins: ["."],
 			vault: "tests/e2e/vault",
 		},

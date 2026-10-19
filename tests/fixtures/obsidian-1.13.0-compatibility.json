@@ -1,0 +1,8 @@
+{
+	"source": "https://github.com/jesse-r-s-hines/wdio-obsidian-service/blob/b3d917e33eef09ac65c9550beee8b6f8a85ba6bc/obsidian-versions.json",
+	"changelog": "https://obsidian.md/changelog/2026-05-28-desktop-v1.13.0/",
+	"version": "1.13.0",
+	"isBeta": true,
+	"minInstallerVersion": "1.6.5",
+	"maxInstallerVersion": "1.12.7"
+}

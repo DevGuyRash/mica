@@ -213,6 +213,34 @@ WHEN the default gate passes THEN you SHALL run the existing local
 `pnpm run e2e:latest` is the existing advisory moving-latest canary. A hosted
 workflow definition does not establish that any of these checks ran.
 
+### Exact app and installer matrix
+
+The default, minimum and mobile-emulation profiles retain app **1.13.0**, the
+manifest's intentional minimum. The 0.2.2 review migration raised that minimum
+and removed the pre-1.13 settings fallback together; an unavailable old binary
+is not evidence that a newer app can replace this acceptance target.
+
+Their installer pin is **1.6.5**, the oldest compatible installer for that exact
+app in the [launcher-maintainer index at b3d917e](https://github.com/jesse-r-s-hines/wdio-obsidian-service/blob/b3d917e33eef09ac65c9550beee8b6f8a85ba6bc/obsidian-versions.json).
+This is WDIO-maintained compatibility data, not an Obsidian-owned index. The
+recorded range is 1.6.5 through 1.12.7. The former installer 1.5.8 pin belonged
+to the previous app 1.12.7 target and is incompatible with app 1.13.0. A cached
+1.12.7 installer can supply a separately recorded valid pair, but does not
+replace the oldest-installer profile. `pnpm run test:e2e-config` exercises the
+actual WDIO capabilities against a small commit-pinned evidence snapshot; it
+does not launch Obsidian or establish an E2E pass.
+
+Obsidian's [1.13.0 changelog](https://obsidian.md/changelog/2026-05-28-desktop-v1.13.0/)
+labels that release Catalyst early access. Native inspection on 2026-10-19
+found no exact local 1.13.0 ASAR and received anonymous HEAD/GET 404 responses
+from the listed app download. No installer HTTP result was established. Keep
+the exact-app native gates pending until the real artifact is available. The
+service supports `appPath` for a verified, legitimately predownloaded exact
+ASAR; never substitute another app's bytes under that version. Community
+directory sign-in and launcher early-access download authorization are separate.
+A current-app run, including an installed 1.14.4 run, is separate QA and cannot
+clear minimum-version qualification. Keep the moving latest profile advisory.
+
 IF the minimum-app profile fails THEN you SHALL fix compatibility or raise
 `minAppVersion` before release.
 

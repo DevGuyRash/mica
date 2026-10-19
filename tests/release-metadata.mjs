@@ -117,7 +117,11 @@ assert.match(release, /node scripts\/release\.mjs publish/);
 
 const escapedMinVersion = manifest.minAppVersion.replaceAll(".", "\\.");
 assert.match(wdio, new RegExp(`MINIMUM_APP_VERSION = "${escapedMinVersion}"`));
-assert.match(wdio, /VERIFIED_INSTALLER_VERSION = "1\.5\.8"/);
+assert.equal(pkg.scripts["test:e2e-config"], "node --import tsx --test tests/e2e-config.test.mjs");
+assert.ok(
+	pkg.scripts.check.split(" && ").includes("pnpm run test:e2e-config"),
+	"aggregate checks must exercise real capabilities against pinned compatibility evidence",
+);
 assert.match(wdio, /selected === "desktop-latest"/);
 assert.equal(pkg.scripts["release:advisory"], "pnpm run e2e:latest");
 assert.match(release, /Advisory product compatibility[\s\S]*?continue-on-error: true/);

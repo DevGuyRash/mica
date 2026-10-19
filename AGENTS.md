@@ -68,6 +68,12 @@ pnpm run e2e
 The aggregate `check` includes the storage fallback fixture and therefore
 requires WASM generated from the same current source. A clean checkout must
 build first; do not substitute another candidate's generated artifacts.
+It also runs `pnpm run test:e2e-config`, which exercises the real WDIO profile
+capabilities against commit-pinned launcher-maintainer compatibility evidence.
+This configuration check is not a native E2E run. Preserve the manifest minimum
+and oldest-compatible installer target; a cached newer pair or current-app QA
+does not replace minimum-version acceptance. See `RELEASING.md` for the exact
+app availability boundary and source attribution.
 
 WHEN claiming release readiness THEN you SHALL additionally run:
 
