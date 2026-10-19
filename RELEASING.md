@@ -1,41 +1,38 @@
 # Releasing Mica
 
-This is the human decision gate for the Obsidian plugin and CLI. Local checks
-establish reproducible facts; the release owner records external review and
-qualification evidence.
+This guide separates automated GitHub publication from official Community
+review and native/device qualification. Record actual results for each stage;
+success at one does not establish the others.
 
 ## Update delivery
 
-The shared [release contract](docs/RELEASE-CONTRACT.md) automates qualification,
-draft publication and verification after a manual release dispatch. It defaults
-to a dry run. Main pushes, PRs, tags and schedules start no hosted jobs. The old
-CI/weekly Compatibility workflows are replaced by this release-only workflow;
-their checks remain in the product scripts. Source changes alone do not enable
-Actions or publish a plugin update. A published GitHub Release with the exact
-manifest version tag and runtime attachments is what Obsidian distributes.
+Main pushes run the shared [release contract](docs/RELEASE-CONTRACT.md): official
+scanner-rule preflight, source/build/asset validation, exact-byte build
+attestation, and immutable publication for a new manifest version. A push that
+keeps an already-published version validates without replacing its tag or
+assets. Manual dispatch remains available for retries and explicit dry runs.
 
 Viewgram is the canonical release bundle; this repository carries an identical
-hash-checked snapshot pinned to a full Viewgram commit. Run `pnpm run test:release`
-for protocol tests and `pnpm run release:parity` for local/upstream drift checks.
-`pnpm run release:qualify` composes production audits, build, aggregate checks,
-Obsidian preflight, protocol tests, stress corpus, Rust format/Clippy/CLI build,
-asset/smoke checks, and required native default/minimum/mobile profiles.
-`pnpm run release:advisory` runs the existing moving desktop-latest canary; the
-workflow records it as advisory, never as a required pass. The required profile
-must actually run; an unavailable authenticated Obsidian download is a blocker,
-not permission to skip it or copy owner credentials into hosted jobs.
+hash-checked snapshot pinned to a full Viewgram commit. `pnpm run test:release`
+tests the protocol, and `pnpm run release:parity` checks local/upstream drift.
+`pnpm run release:validate` is the hosted publication gate: production audits,
+build, aggregate checks, Obsidian preflight, protocol tests, stress corpus,
+Rust format/Clippy/CLI build, asset checks and WASM smoke checks.
 
-Follow the contract's first-run settings checks and exact-SHA evidence inputs.
-The qualification-report URL must record the existing device, Sync and storage
-gates below; a supplied link is not automated verification of its contents.
-No workflow result claims existing-vault cutover. The pending 0.3 qualification,
-publication and Kingdom staging remain separate until their actual evidence
-passes. Existing releases are preserved, including 0.2.2.
+`pnpm run release:qualify` additionally runs the native default/minimum/mobile
+profiles. `pnpm run release:advisory` runs the moving desktop-latest canary.
+Physical-device, two-device Sync, existing-vault storage cutover and official
+Community review remain separately recorded acceptance evidence. They are not
+implied by a GitHub upload and do not require a manual evidence entry on every
+source push. Do not skip unavailable checks and then claim they passed. Never
+copy owner credentials into hosted jobs to obtain an unavailable app download.
 
-Only the initial Community directory submission is needed. Subsequent versions
-are delivered through new GitHub Releases. Installed community plugins do not
-update automatically: users select **Settings → Community plugins → Check for
-updates**, then **Update** or **Update all**.
+Only the initial Community directory submission is needed. The directory
+periodically detects and reviews each matching GitHub Release. Publication
+must not be reported as official acceptance until that actual review completes.
+Existing releases, including 0.2.2, are preserved. Installed community plugins
+do not update automatically: users select **Settings → Community plugins →
+Check for updates**, then **Update** or **Update all**.
 
 ## Storage format 1 cutover
 
@@ -84,53 +81,52 @@ rollback; bridge outcome retention and native journal recovery need their own
 acceptance evidence. Keep every unrun check pending rather than treating source
 review as that evidence.
 
-## Review branch and promotion gate
+## Review branch and promotion
 
-1. Commit and push all new work to the permanent lowercase `review` branch
-   first. Isolated work branches may integrate there. Preserve existing work
-   and history; branch setup is not permission to reset or discard them.
-2. Run `pnpm run lint:obsidian` within the authorized scope and record its actual
-   source-rule and local CSS-tripwire results. Errors must be zero. Keep other
-   warnings visible; fix each or document its reviewed necessity without
-   suppressing rules. This preflight does not establish full CSS compatibility
-   or an official preview pass.
-3. On the Obsidian Community entry, select **Review branch**, enter the full
-   current `review` HEAD commit SHA, then select **Run preview scan**. The
-   official control accepts any branch, tag, or SHA; `review` is this
-   repository's permanent branch convention. Use the SHA so the evidence is
-   fixed to one candidate.
-4. Obtain an actual passing preview with zero errors before opening the
-   `review` → `main` PR. Fix every warning or document its intentional necessity
-   with a reviewed reason; unreviewed warnings block promotion. Record the SHA,
-   report evidence, warning dispositions, and remaining recommendations or
-   unverified optional capabilities/attestations in the PR template. Official
-   warnings are advisory; this repository requires their reviewed disposition
-   before merge. Recommendations remain separately reported outcomes.
-5. Any change to `review` HEAD invalidates its earlier pass. Stop and rerun the
-   preview on the new full SHA before opening or merging the PR, tagging, or
-   publishing. GitHub PR checks are separate evidence; they do not automatically
-   represent the Obsidian preview, and no named GitHub status is assumed.
-6. After the clean preview, merge the PR into `main` and record the resulting
-   main commit. The release source and root manifest must match the scanned
-   candidate. Resolve any merge content changes through `review` and a fresh
-   preview. Create the version tag and public release only after merge and the
-   release gates below.
+1. Commit new work to the permanent lowercase `review` branch first. Preserve
+   existing work and history. Run the product source validation and official
+   scanner-rule preflight before merging.
+2. Fix scanner errors. Warnings are advisory: correct defects and explain
+   intentional capabilities or literal identifiers. Keep clipboard copy and
+   the explicitly invoked clipboard instruction command. A disclosure is not
+   a reason to remove an essential feature.
+3. When Community access is available, select **Review branch**, enter the
+   exact current SHA and select **Run preview scan**. Retain the actual report.
+   A changed SHA invalidates the old preview. Local lint and GitHub checks are
+   not official preview evidence, and no Obsidian status name is assumed.
+4. Merge into `main` after source validation. Main pushes automatically validate
+   and publish a new manifest version; an existing version is never replaced.
+   The workflow binds the commit, version and asset hashes to verified build
+   provenance. Manual preview/qualification reports are optional evidence, not
+   invented prerequisites for every push.
+5. After publication, inspect the actual full Community release review. The
+   portal can request a release check immediately; otherwise periodic checks
+   discover it. Record build, publication, review, installation and activation
+   separately. Unavailable evidence remains pending.
 
-The owner handles Community access and account authorization as described
-below. An unavailable scan or missing report leaves this gate pending; do not
-infer a pass from local checks, a source push, or an earlier candidate.
+The official [management guide](https://docs.obsidian.md/community-directory/manage-entry)
+states that warnings do not block submission. The official
+[FAQ](https://docs.obsidian.md/community-directory/faq) explains the scanner's
+build-command selection and preview controls.
 
 ## Local preflight boundaries
 
 `pnpm run lint:obsidian` runs the official recommended TypeScript rules, with
-native DOM creation promoted to an error, then `pnpm run lint:review-css`.
+native DOM creation promoted to an error, the official scanner's CSS rules via
+`pnpm run lint:scanner-css`, then `pnpm run lint:review-css`. The CSS config is
+vendored from [obsidian-workflows v1.2.3](https://github.com/obsidianmd/obsidian-workflows/blob/8167caed39664214d82c86fdfa32e06d8d55f61d/src/lint.ts)
+with its upstream Electron 39 floor for the declared minimum app. Stylelint
+17.6.0 and its unsupported-browser-features plugin 8.1.1 are pinned. Preserve
+upstream warning severity; do not use `--max-warnings=0` to turn disclosures
+into blocking errors.
+
 The dependency-free CSS tripwires report source locations for priority
 overrides, `:has()` and the previously rejected decoration longhands, ignoring
 comments and quoted values. They scan the shipping root stylesheet; they are
 not a full CSS parser or browser compatibility database. The preflight does not
 establish reproducible builds, optional attestations or an official preview
-pass. Rerun the exact-SHA preview after every source change, including changes
-made to remove advisory warnings.
+pass. When recording a Community preview, use the exact current SHA; an old
+preview cannot be reused after a source change.
 
 Preserve these component contracts without priority overrides:
 
@@ -158,8 +154,8 @@ capitalization suggestions to identifiers or names:
 ## 1. Establish a release candidate
 
 WHEN you prepare a release candidate THEN you SHALL put all source and metadata
-changes on `review` before its exact-SHA preview. Use that candidate for the
-checks below and record the merged `main` commit used for release artifacts.
+changes on `review`. Use that candidate for source validation and any preview,
+and record the merged `main` commit used for release artifacts.
 A changed candidate requires fresh evidence; an unrun gate remains pending.
 
 WHEN you choose the release version THEN you SHALL set the same version in
@@ -189,9 +185,11 @@ readable, stale line-union inputs do not expose the unwrapped version, and the
 plugin and CLI agree on version order, labels, parents, heads, visibility, and
 counts.
 
-## 2. Prove the automated gates
+## 2. Validate source and record native acceptance
 
-WHEN the candidate is ready for verification THEN you SHALL run:
+WHEN publishing from a main push THEN the workflow SHALL run `pnpm run
+release:validate` and the official scanner-rule preflight. For full native
+qualification, use `pnpm run release:qualify` or the detailed commands below:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -256,11 +254,13 @@ directory sign-in and launcher early-access download authorization are separate.
 A current-app run, including an installed 1.14.4 run, is separate QA and cannot
 clear minimum-version qualification. Keep the moving latest profile advisory.
 
-IF the minimum-app profile fails THEN you SHALL fix compatibility or raise
-`minAppVersion` before release.
+IF the minimum-app profile demonstrates an actual compatibility failure THEN
+you SHALL fix it or deliberately raise `minAppVersion`. An unavailable download
+is not a compatibility failure and does not justify changing the API floor.
 
-IF the mobile-emulation profile fails THEN you SHALL fix it or set
-`isDesktopOnly` to `true` before release.
+IF the mobile-emulation profile demonstrates an actual mobile incompatibility
+THEN you SHALL fix it or set `isDesktopOnly` to `true`. An unrun profile remains
+unverified; do not claim that it passed.
 
 WHEN `isDesktopOnly` is `false` THEN you SHALL smoke-test the built artifacts on
 at least one real Android or iOS device, because desktop mobile emulation does
@@ -268,8 +268,9 @@ not exercise Capacitor, WebKit, or native filesystem behavior.
 
 ## 3. Verify concurrent storage behavior
 
-WHEN versioning is included in the release THEN you SHALL test one real
-two-device Obsidian Sync scenario using the candidate artifacts.
+WHEN qualifying versioning for real two-device use THEN you SHALL test one real
+Obsidian Sync scenario using the candidate artifacts. A GitHub publication alone
+does not establish this acceptance.
 
 The Sync scenario covers concurrent edits, snapshots on both devices, Sync
 settling, ledger folding, version restore, and `mica doctor` against the settled
@@ -295,9 +296,9 @@ You SHALL NOT publish placeholder, private, or unverified repository URLs.
 
 ## 5. Build and publish artifacts
 
-WHEN creating the GitHub release THEN you SHALL first merge the reviewed
+WHEN creating the GitHub release THEN you SHALL first merge the validated
 candidate into `main`, verify that its source and root manifest match the
-scanned candidate, and use a tag exactly equal to `manifest.json`'s `x.y.z`
+built candidate, and use a tag exactly equal to `manifest.json`'s `x.y.z`
 version, without a `v` prefix.
 
 WHEN attaching plugin assets THEN you SHALL attach exactly the candidate's

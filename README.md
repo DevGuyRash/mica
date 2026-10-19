@@ -243,16 +243,15 @@ The reproducible toolchain is Node 22.12 or newer, pnpm 11.3.0, Rust 1.97.1,
 Rust versions are recorded in `package.json` and `rust-toolchain.toml`; CI pins
 the same `wasm-pack` version.
 
-The checked-in CI and Compatibility workflow definitions describe the normal
-verification suites and tag artifact uploads when hosted Actions is enabled;
-they do not publish GitHub Releases. [RELEASING.md](RELEASING.md) gives the local
-release procedure, version/lockfile synchronization, minimum/mobile checks and
-download verification. Real mobile devices and two-device Obsidian Sync remain
-manual release gates because desktop automation cannot reproduce those runtime
-and concurrency boundaries.
+Main pushes run the automated source/build/asset checks and publish a new
+manifest version as an immutable GitHub Release with the three runtime assets
+and verified build provenance. A push that retains an already-published version
+validates without replacing that release. Manual dispatch remains available for
+retries. [RELEASING.md](RELEASING.md) covers version synchronization and separate
+native/mobile, real-device, two-device Sync and existing-vault cutover checks.
+Hosted success does not establish those checks or official Community acceptance.
 
-Ordinary source pushes do not distribute a plugin update. Publish a new matching
-GitHub Release with the three runtime assets for each version. The initial
+The directory automatically reviews published GitHub Releases. The initial
 Community directory submission is needed only once. Users install updates with
 **Community plugins → Check for updates → Update** or **Update all**; installed
 community plugins do not update automatically.

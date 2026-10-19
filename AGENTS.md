@@ -17,23 +17,23 @@ WHEN starting new work THEN you SHALL commit and push it to the permanent
 `review` branch first. Isolated work branches may integrate into `review`;
 preserve existing work and history when switching or integrating branches.
 
-WHEN `review` is ready THEN you SHALL open the entry's Obsidian Community
-**Review branch** control, enter the full current `review` HEAD commit SHA, and
-select **Run preview scan**. Record that SHA and the actual report. Every change
-to `review` HEAD invalidates its earlier pass and requires a fresh preview.
+WHEN `review` is ready THEN you SHALL run the source validation and official
+scanner-rule preflight before merging. Use the entry's **Review branch** control
+for an actual Community preview when available, and record its exact SHA and
+report. A changed SHA invalidates that earlier preview. GitHub checks and local
+lint are separate evidence; neither is an official preview result.
 
-UNTIL that exact SHA has an actual passing preview with zero errors and every
-warning fixed or documented as intentional necessity with a reviewed reason
-THEN you SHALL stop before opening the `review` → `main` PR, merging into
-`main`, tagging, or publishing. Unreviewed warnings block promotion. Keep
-recommendations and unverified optional capabilities or attestations explicit.
-GitHub PR checks and local lint are separate evidence; neither is an Obsidian
-preview result, and no Obsidian GitHub status name is assumed.
+Main pushes automatically validate and publish a new manifest version with
+verified build provenance. A previously published version is never overwritten.
+The directory performs its own release review after publication. Do not invent
+preview evidence, require a manual evidence entry on every push, or mistake
+successful publication for directory acceptance or device qualification.
 
-WHEN preparing the PR THEN you SHALL include the exact SHA and preview evidence
-using the PR template. After merge, the release source and root manifest SHALL
-match that reviewed candidate; content changes return through `review` and a
-fresh preview. Follow [RELEASING.md](RELEASING.md) for the complete procedure.
+WHEN a scanner reports an error THEN you SHALL fix it before affected delivery.
+Warnings are advisory: fix genuine defects and document intentional capabilities
+or exact identifiers without suppressing rules or removing essential features.
+Keep the source SHA, actual checks and any unavailable checks explicit in the
+PR. Follow [RELEASING.md](RELEASING.md) for the complete procedure.
 
 WHEN using the local preflight THEN you SHALL run `pnpm run lint:obsidian`
 separately from broader checks, within the authorized scope. It combines the
@@ -75,7 +75,7 @@ and oldest-compatible installer target; a cached newer pair or current-app QA
 does not replace minimum-version acceptance. See `RELEASING.md` for the exact
 app availability boundary and source attribution.
 
-WHEN claiming release readiness THEN you SHALL additionally run:
+WHEN claiming full native/device qualification THEN you SHALL additionally run:
 
 ```sh
 cargo build --release -p mica-cli --locked
@@ -91,20 +91,21 @@ pnpm run e2e:latest
 
 WHEN you add, rename, split, or remove a mandatory verification gate THEN you
 SHALL update the human release procedure and this command inventory in the same
-change. Keep authorized automation consistent; hosted CI is not required. You
-SHALL NOT call a subset release-ready.
+change. Keep authorized automation consistent. You SHALL name the stage that
+passed and not imply full runtime/device acceptance from a subset.
 
 The shared `docs/RELEASE-CONTRACT.md` is canonical in Viewgram and vendored here
 with exact file hashes plus a full upstream commit pin. Release tooling changes
 SHALL run `pnpm run test:release`, `pnpm run release:parity` and
-`pnpm run check:release`. `pnpm run release:qualify` composes all required
-automatable commands above plus the protocol tests and Obsidian preflight;
-`pnpm run release:advisory` owns the moving desktop-latest canary. Device, Sync,
-storage and exact-SHA Community evidence remain external required gates.
-The single hosted workflow SHALL remain manual `workflow_dispatch` with
-publication false by default. Main/PR/tag/scheduled general CI stays disabled.
-Committing the workflow does not authorize enabling hosted runs, expanding
-credentials/permissions or changing published immutable assets.
+`pnpm run check:release`. `pnpm run release:validate` composes the source/build/asset gates, protocol tests
+and Obsidian preflight used by hosted publication. `pnpm run release:qualify`
+adds native default/minimum/mobile profiles; `pnpm run release:advisory` owns the
+moving desktop-latest canary. Device, Sync, storage and official Community
+results remain separate evidence and may not be inferred from hosted checks.
+The workflow validates main pushes and publishes only new manifest versions;
+manual dispatch remains available for retries. Existing immutable releases are
+preserved. New persistent credentials or permission expansion still need the
+owner's approval.
 
 WHEN a change is documentation-only and does not alter a command, contract, or
 generated artifact THEN you MAY limit verification to formatting, link/path
@@ -650,7 +651,7 @@ collision.
 
 WHEN preparing a plugin update THEN you SHALL follow `RELEASING.md`: synchronize
 package, manifest, Rust workspace/lockfile and version mappings on `review`,
-clear its exact-SHA preview gate, merge the reviewed candidate into `main`, and
+validate the source, merge the candidate into `main`, and let the workflow
 publish its exact version tag with matching runtime attachments. Verify
 downloaded release bytes. A completed publication is a verified GitHub Release.
 Repository pushes, installation, activation and directory review have separate

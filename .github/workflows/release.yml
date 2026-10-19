@@ -1,23 +1,26 @@
 name: Obsidian release
 
-# Deliberately manual. Source pushes, PRs, tags and schedules start no jobs.
+# Review pushes validate; a new version on main publishes after all checks.
+# No tag trigger or version-writeback commit: publication cannot retrigger itself.
 on:
+    push:
+        branches: [review, main]
     workflow_dispatch:
         inputs:
             source_sha:
-                description: Merged main commit (full 40-character SHA)
-                required: true
+                description: Optional exact main commit (defaults to the dispatched main HEAD)
+                required: false
                 type: string
             preview_sha:
-                description: Passing Community preview SHA (same tree as source)
-                required: true
+                description: Optional Community preview SHA (must have the same tree as source)
+                required: false
                 type: string
             preview_report:
-                description: HTTPS evidence of zero errors and reviewed warnings
-                required: true
+                description: Optional HTTPS Community preview evidence (required when preview_sha is supplied)
+                required: false
                 type: string
             qualification_report:
-                description: HTTPS qualification evidence (required for Mica)
+                description: Optional HTTPS additional qualification evidence
                 required: false
                 type: string
             publish:
@@ -30,26 +33,28 @@ permissions:
     contents: read
 
 concurrency:
-    group: obsidian-release-${{ github.repository }}
+    group: obsidian-release-${{ github.repository }}-${{ github.ref }}
     cancel-in-progress: false
 
 env:
-    SOURCE_SHA: ${{ inputs.source_sha }}
+    SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+    WORKFLOW_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     PREVIEW_SHA: ${{ inputs.preview_sha }}
     PREVIEW_REPORT: ${{ inputs.preview_report }}
     QUALIFICATION_REPORT: ${{ inputs.qualification_report }}
 
 jobs:
     qualify:
-        if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
+        if: github.event_name == 'push' || (github.ref == 'refs/heads/main' && (inputs.source_sha == '' || inputs.source_sha == github.sha))
         runs-on: ubuntu-24.04
         timeout-minutes: 90
         outputs:
             artifact_id: ${{ steps.assets.outputs.artifact-id }}
+            release_needed: ${{ steps.release.outputs.release_needed }}
         steps:
             - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
               with:
-                  ref: ${{ inputs.source_sha }}
+                  ref: ${{ inputs.source_sha || github.sha }}
                   fetch-depth: 0
                   persist-credentials: false
 
@@ -61,7 +66,8 @@ jobs:
               id: product
               run: node scripts/release.mjs inspect
 
-            - name: Validate merged candidate and external-evidence bindings
+            - name: Validate exact main candidate and any optional report bindings
+              if: github.ref == 'refs/heads/main'
               run: node scripts/release.mjs candidate
 
             - name: Check pinned release bundle
@@ -100,26 +106,47 @@ jobs:
                   echo "CHROMIUM_PATH=$(node --input-type=module -e 'import {chromium} from "playwright"; console.log(chromium.executablePath())')" >> "$GITHUB_ENV"
 
             # Product scripts are the only authority for required test commands.
-            # Native Obsidian access must already be available; never inject an
-            # owner credential or skip an unavailable required profile.
+            # Full device qualification remains separate; never inject an owner
+            # credential or label hosted validation as native-device acceptance.
             - name: Qualify npm product
               if: steps.product.outputs.manager == 'npm'
-              run: npm run release:qualify
+              run: npm run release:validate
 
             - name: Qualify pnpm product
               if: steps.product.outputs.manager == 'pnpm'
-              run: pnpm run release:qualify
+              run: pnpm run release:validate
+
+            - name: Official Obsidian public scanner preflight
+              id: scanner
+              uses: obsidianmd/obsidian-workflows@8167caed39664214d82c86fdfa32e06d8d55f61d # v1.2.3
+              with:
+                  type: plugin
+                  mode: pr
+                  build: "false"
+                  scanner-lint: true
+                  strict: true
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
 
             - name: Advisory product compatibility
-              if: steps.product.outputs.advisory == 'true'
+              if: github.event_name == 'workflow_dispatch' && steps.product.outputs.advisory == 'true'
               continue-on-error: true
               run: node scripts/release.mjs advisory
 
+            - name: Check whether this exact version needs publication
+              id: release
+              if: github.ref == 'refs/heads/main'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: node scripts/release.mjs release-needed
+
             - name: Stage exact assets and bound receipt
+              if: steps.release.outputs.release_needed == 'true'
               run: node scripts/release.mjs stage
 
             - name: Upload qualified candidate
               id: assets
+              if: steps.release.outputs.release_needed == 'true'
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
               with:
                   name: obsidian-${{ github.run_id }}-${{ github.run_attempt }}
@@ -128,10 +155,9 @@ jobs:
                   retention-days: 7
                   path: release/
 
-    # Committing this manual workflow does not activate its new permissions.
-    # Owner approval is required before setting the repository variable true.
+    # These previously approved short-lived permissions are isolated from builds.
     attest:
-        if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha && vars.OBSIDIAN_BUILD_PROVENANCE_APPROVED == 'true'
+        if: github.ref == 'refs/heads/main' && needs.qualify.outputs.release_needed == 'true'
         needs: qualify
         runs-on: ubuntu-24.04
         timeout-minutes: 10
@@ -144,7 +170,7 @@ jobs:
         steps:
             - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
               with:
-                  ref: ${{ inputs.source_sha }}
+                  ref: ${{ inputs.source_sha || github.sha }}
                   fetch-depth: 0
                   persist-credentials: false
             - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -189,7 +215,7 @@ jobs:
                   path: provenance/
 
     publish:
-        if: inputs.publish && github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
+        if: github.ref == 'refs/heads/main' && needs.qualify.outputs.release_needed == 'true' && (github.event_name == 'push' || inputs.publish)
         needs: [qualify, attest]
         runs-on: ubuntu-24.04
         timeout-minutes: 15
@@ -198,7 +224,7 @@ jobs:
         steps:
             - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
               with:
-                  ref: ${{ inputs.source_sha }}
+                  ref: ${{ inputs.source_sha || github.sha }}
                   fetch-depth: 0
                   persist-credentials: false
 

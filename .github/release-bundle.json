@@ -1,9 +1,10 @@
 {
 	"canonical": "DevGuyRash/viewgram",
 	"files": {
-		".github/workflows/release.yml": "a8d2c4c6702feb6f9b20f44149afd1c1a62591c11a03f0f4f9172ff602f5af31",
-		"docs/RELEASE-CONTRACT.md": "c50381cd0f7fe8fa05ce8ea11fdf4f3008c9ceaf64d4c6896d4ec42812f67f07",
-		"scripts/release.mjs": "7630ac4fb85f7b8370a6b2c442d48fb38e1573fabefd0838cd342fe909f88d90",
-		"tests/release-contract.test.mjs": "8eea9d628792351419059c209bb86d06c7739854eecb36303ace76aac1fe24e1"
+		".github/workflows/release.yml": "e5d8a9f49b637f7ce1937e2586a2dfb140d4a18731c5829054f59ecf0c03e0c4",
+		"docs/RELEASE-CONTRACT.md": "778634e9ce3ae14397386bf433c435433ea94d5f9cdfb6c1ffcb00380df3bf5f",
+		"scripts/release.mjs": "e09530b7994f2bd39ada3675e7816d6b6b3d19e659aaf2533e591f57fa3d697f",
+		"stylelint.obsidian-scanner.json": "d7a8288322a9cc46516ba0a02f4a7c1593c6c1a4c63b13c6b45037c4389f0def",
+		"tests/release-contract.test.mjs": "8fb544df2536b6527878b356e269889c71552f76033b5dcd5b8a14924249d9b3"
 	}
 }

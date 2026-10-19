@@ -59,13 +59,15 @@
 		"test:hide-syntax": "tsx tests/hide-syntax.mts",
 		"test:icon-packs": "tsx tests/icon-packs.mts",
 		"test:combine-kind": "tsx tests/combine-kind.mts",
-		"lint:obsidian": "eslint --config eslint.obsidian.config.mjs src && pnpm run lint:review-css",
+		"lint:obsidian": "eslint --config eslint.obsidian.config.mjs src && pnpm run lint:scanner-css && pnpm run lint:review-css",
 		"lint:review-css": "node scripts/check-review-css.mjs",
 		"test:e2e-config": "node --import tsx --test tests/e2e-config.test.mjs",
 		"test:release": "node --test tests/release-contract.test.mjs",
 		"release:parity": "node scripts/release.mjs parity --upstream",
-		"release:qualify": "pnpm run audit:prod && cargo deny check advisories && pnpm run build && pnpm run check && pnpm run lint:obsidian && pnpm run test:release && pnpm run test:version-stress && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --release -p mica-cli --locked && pnpm run check:release:assets && pnpm run smoke && pnpm run e2e && pnpm run e2e:minimum && pnpm run e2e:mobile",
-		"release:advisory": "pnpm run e2e:latest"
+		"release:qualify": "pnpm run release:validate && pnpm run e2e && pnpm run e2e:minimum && pnpm run e2e:mobile",
+		"release:advisory": "pnpm run e2e:latest",
+		"release:validate": "pnpm run audit:prod && cargo deny check advisories && pnpm run build && pnpm run check && pnpm run lint:obsidian && pnpm run test:release && pnpm run test:version-stress && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --release -p mica-cli --locked && pnpm run check:release:assets && pnpm run smoke",
+		"lint:scanner-css": "stylelint styles.css --config stylelint.obsidian-scanner.json"
 	},
 	"keywords": [
 		"obsidian",
@@ -106,6 +108,8 @@
 		"mocha": "^11.7.6",
 		"obsidian": "1.13.1",
 		"prettier": "3.9.6",
+		"stylelint": "17.6.0",
+		"stylelint-no-unsupported-browser-features": "8.1.1",
 		"tsx": "^4.23.0",
 		"typescript": "~5.9.0",
 		"typescript-eslint": "8.65.0",
