@@ -145,6 +145,12 @@ if (process.env.GITHUB_REF_TYPE === "tag") {
 }
 
 if (process.argv.includes("--artifacts")) {
+	const declarations = await readText("src/wasm/pkg/mica_core.d.ts");
+	assert.doesNotMatch(
+		declarations,
+		/\/\*\s*(?:eslint-disable|tslint:disable)\s*\*\//,
+		"generated WASM declarations must not disable reviewer lint rules",
+	);
 	for (const relativePath of ["main.js", "manifest.json", "styles.css"]) {
 		await access(path.join(root, relativePath));
 		const artifact = await stat(path.join(root, relativePath));

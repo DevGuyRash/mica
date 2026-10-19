@@ -16,7 +16,7 @@
 
 For manual installation, use the published [Mica release assets](https://github.com/DevGuyRash/mica/releases):
 
-1. Copy `manifest.json`, `main.js`, and `styles.css` into `<your vault>/.obsidian/plugins/mica/`.
+1. Copy `manifest.json`, `main.js`, and `styles.css` into the `.obsidian/plugins/mica/` folder inside your vault.
    _(Or, if you're developing it, symlink the repo there — see [Development](#development).)_
 2. In Obsidian: **Settings → Community plugins → Reload**, then enable **Mica**.
 
