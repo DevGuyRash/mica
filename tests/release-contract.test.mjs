@@ -5,7 +5,14 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateMetadata, validateEvidence, validateReceipt, publishRelease } from "../scripts/release.mjs";
+import {
+	validateMetadata,
+	validateEvidence,
+	validateReceipt,
+	publishRelease,
+	verifyBuildProvenance,
+	validateProvenanceSubjects,
+} from "../scripts/release.mjs";
 
 const source = "a".repeat(40);
 const preview = "b".repeat(40);
@@ -121,6 +128,7 @@ function fakeHost({ existing = null, tag = null, immutable = true, badUpload = f
 				};
 		},
 		verifyDownloads: async () => calls.push(["download-and-hash"]),
+		verifyProvenance: async () => calls.push(["verify-build-provenance"]),
 	};
 }
 
@@ -188,8 +196,8 @@ test("release workflow is manual-only, least-privilege and pins every action", a
 	assert.match(workflow, /persist-credentials: false/);
 	assert.equal(
 		(workflow.match(/inputs\.source_sha == github\.sha/g) || []).length,
-		2,
-		"both jobs must reject unmerged input before checking out executable code",
+		3,
+		"all jobs must reject unmerged input before checking out executable code",
 	);
 	assert.match(workflow, /artifact-ids: \$\{\{ needs\.qualify\.outputs\.artifact_id \}\}/);
 	assert.match(workflow, /Advisory product compatibility[\s\S]*?continue-on-error: true/);
@@ -321,4 +329,98 @@ test("advisory runner preserves successful and failing product exit status", asy
 			assert.equal(result.status === 0, status === 0, result.stderr);
 		});
 	}
+});
+
+function verifiedProvenance() {
+	return [
+		{
+			verificationResult: {
+				statement: {
+					predicateType: "https://slsa.dev/provenance/v1",
+					subject: Object.entries(receipt.assets).map(([name, asset]) => ({
+						name,
+						digest: { sha256: asset.sha256 },
+					})),
+				},
+			},
+		},
+	];
+}
+
+test("provenance verifies every actual asset with exact certificate source and workflow policy", async () => {
+	const calls = [];
+	await verifyBuildProvenance(receipt, async (args) => {
+		calls.push(args);
+		return verifiedProvenance();
+	});
+	assert.deepEqual(
+		calls.map((args) => args[2]),
+		["release/main.js", "release/manifest.json", "release/styles.css"],
+	);
+	for (const args of calls) {
+		for (const [flag, value] of Object.entries({
+			"--repo": receipt.repository,
+			"--source-digest": source,
+			"--signer-digest": source,
+			"--source-ref": "refs/heads/main",
+			"--signer-workflow": "owner/example/.github/workflows/release.yml",
+			"--predicate-type": "https://slsa.dev/provenance/v1",
+			"--cert-oidc-issuer": "https://token.actions.githubusercontent.com",
+			"--bundle": "provenance/bundle.json",
+		}))
+			assert.equal(args[args.indexOf(flag) + 1], value);
+		assert.ok(args.includes("--deny-self-hosted-runners"));
+	}
+});
+
+test("provenance rejects missing evidence, release predicates and changed or extra subjects", async () => {
+	assert.throws(() => validateProvenanceSubjects(receipt, []));
+	for (const change of [
+		(statement) => {
+			statement.predicateType = "https://in-toto.io/attestation/release/v0.2";
+		},
+		(statement) => {
+			statement.subject[0].digest.sha256 = "e".repeat(64);
+		},
+		(statement) => {
+			statement.subject[0].name = "private.json";
+		},
+		(statement) => {
+			statement.subject.pop();
+		},
+		(statement) => {
+			statement.subject.push(statement.subject[0]);
+		},
+	]) {
+		const results = verifiedProvenance();
+		change(results[0].verificationResult.statement);
+		assert.throws(() => validateProvenanceSubjects(receipt, results));
+	}
+	await assert.rejects(
+		verifyBuildProvenance(receipt, async () => {
+			throw Error("certificate identity mismatch");
+		}),
+		/identity/,
+	);
+});
+
+test("publisher requires fresh cryptographic build provenance before any external mutation", async () => {
+	const host = fakeHost();
+	host.verifyProvenance = async () => {
+		throw Error("unverified provenance");
+	};
+	await assert.rejects(publishRelease(receipt, host, true), /unverified provenance/);
+	assert.equal(host.calls.length, 0);
+});
+
+test("attestation privileges are approval-gated and isolated from product execution and publication", async () => {
+	const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+	const attest = workflow.split("\n    attest:\n")[1].split("\n    publish:\n")[0];
+	assert.match(attest, /OBSIDIAN_BUILD_PROVENANCE_APPROVED == 'true'/);
+	assert.match(attest, /contents: read\n\s+id-token: write\n\s+attestations: write/);
+	assert.doesNotMatch(attest, /contents: write|run:.*(?:npm|pnpm|cargo) /);
+	assert.match(attest, /subject-path: \|\n\s+release\/main.js\n\s+release\/manifest.json\n\s+release\/styles.css/);
+	assert.ok(attest.indexOf("verify-staged") < attest.indexOf("uses: actions/attest@"));
+	assert.match(workflow, /needs: \[qualify, attest\]/);
+	assert.match(workflow, /artifact-ids: \$\{\{ needs\.attest\.outputs\.artifact_id \}\}/);
 });

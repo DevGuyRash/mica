@@ -128,9 +128,69 @@ jobs:
                   retention-days: 7
                   path: release/
 
+    # Committing this manual workflow does not activate its new permissions.
+    # Owner approval is required before setting the repository variable true.
+    attest:
+        if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha && vars.OBSIDIAN_BUILD_PROVENANCE_APPROVED == 'true'
+        needs: qualify
+        runs-on: ubuntu-24.04
+        timeout-minutes: 10
+        permissions:
+            contents: read
+            id-token: write
+            attestations: write
+        outputs:
+            artifact_id: ${{ steps.provenance.outputs.artifact-id }}
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+              with:
+                  ref: ${{ inputs.source_sha }}
+                  fetch-depth: 0
+                  persist-credentials: false
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+              with:
+                  node-version: 22.12.0
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              with:
+                  artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
+                  path: release
+                  merge-multiple: true
+            - name: Validate qualified bytes before attesting
+              run: |
+                  node scripts/release.mjs parity --upstream
+                  node scripts/release.mjs verify-staged
+            - name: Attest exact workflow-built plugin assets
+              id: attest
+              uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+              with:
+                  subject-path: |
+                      release/main.js
+                      release/manifest.json
+                      release/styles.css
+            - name: Retain the original Sigstore bundle
+              env:
+                  BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+              run: |
+                  mkdir provenance
+                  cp "$BUNDLE_PATH" provenance/bundle.json
+            - name: Install checksum-pinned official GitHub CLI
+              run: node scripts/release.mjs install-gh
+            - name: Verify build provenance identity and exact hashes
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: node scripts/release.mjs verify-provenance
+            - name: Preserve provenance for independent publication verification
+              id: provenance
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: provenance-${{ github.run_id }}-${{ github.run_attempt }}
+                  if-no-files-found: error
+                  retention-days: 7
+                  path: provenance/
+
     publish:
         if: inputs.publish && github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
-        needs: qualify
+        needs: [qualify, attest]
         runs-on: ubuntu-24.04
         timeout-minutes: 15
         permissions:
@@ -150,6 +210,12 @@ jobs:
               with:
                   artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
                   path: release
+                  merge-multiple: true
+
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              with:
+                  artifact-ids: ${{ needs.attest.outputs.artifact_id }}
+                  path: provenance
                   merge-multiple: true
 
             - name: Verify pinned release bundle
