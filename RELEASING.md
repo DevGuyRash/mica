@@ -389,3 +389,25 @@ attest the three exact qualified assets and verify repository, source commit,
 signing workflow and hashes before publication. Preserve immutable-release
 verification afterward as a separate gate. Workflow preparation does not prove
 provenance exists; keep activation approval and actual verification explicit.
+
+## Hosted Actions allowlist
+
+Enable Actions for this repository and allow these specific external action
+repositories. The workflow itself pins exact commits; `@*` in the repository
+allowlist permits reviewed pin upgrades without allowing unrelated actions.
+
+- `actions/attest@*`
+- `actions/checkout@*`
+- `actions/download-artifact@*`
+- `actions/setup-node@*`
+- `actions/upload-artifact@*`
+- `dtolnay/rust-toolchain@*`
+- `obsidianmd/obsidian-workflows@*`
+- `pnpm/action-setup@*`
+- `taiki-e/install-action@*`
+
+Keep the default workflow token read-only. The workflow grants narrowly scoped
+permissions only to its separate attestation and publication jobs. Before the
+first publication, verify release immutability in repository settings and set
+`OBSIDIAN_IMMUTABLE_RELEASES_CONFIRMED=true`; the publisher also checks the actual
+published release. Never store credentials in that variable.
