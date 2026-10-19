@@ -40,7 +40,7 @@ assert.equal(
 );
 assert.equal(pkg.license, "MIT", "package license must remain MIT");
 assert.equal(pkg.packageManager, "pnpm@11.3.0", "pnpm must remain reproducibly pinned");
-assert.equal(pkg.engines?.node, ">=22.12.0", "Node floor must satisfy the locked Electron downloader");
+assert.equal(pkg.engines?.node, ">=22.13.0", "Node floor must satisfy the locked Electron downloader");
 assert.equal(pkg.dependencies?.fflate, "0.8.3", "mobile gzip read fallback must remain reproducibly pinned");
 assert.equal(pkg.devDependencies?.stylelint, "17.6.0", "official CSS scanner tooling must remain pinned");
 assert.equal(pkg.devDependencies?.["stylelint-no-unsupported-browser-features"], "8.1.1");

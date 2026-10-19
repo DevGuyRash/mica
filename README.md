@@ -238,7 +238,7 @@ pnpm smoke       # WASM boundary test in Node (no Obsidian needed)
 just e2e         # contract + UI suite in a REAL sandboxed Obsidian (Xvfb)
 ```
 
-The reproducible toolchain is Node 22.12 or newer, pnpm 11.3.0, Rust 1.97.1,
+The reproducible toolchain is Node 22.13 or newer, pnpm 11.3.0, Rust 1.97.1,
 `wasm-pack` 0.15.0, the `wasm32-unknown-unknown` target, and `just`. The pnpm and
 Rust versions are recorded in `package.json` and `rust-toolchain.toml`; CI pins
 the same `wasm-pack` version.
