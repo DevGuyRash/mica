@@ -243,6 +243,11 @@ The reproducible toolchain is Node 22.13 or newer, pnpm 11.3.0, Rust 1.97.1,
 Rust versions are recorded in `package.json` and `rust-toolchain.toml`; CI pins
 the same `wasm-pack` version.
 
+Release WASM uses Rust's speed-optimized `-O3`, LTO, and single-codegen-unit
+profile. The optional Binaryen `wasm-opt` post-pass is disabled for release builds:
+this keeps clean builds independent of an ambient optimizer version and avoids
+its extra resource cost. The same build path produces review and release assets.
+
 Main pushes run the automated source/build/asset checks and publish a new
 manifest version as an immutable GitHub Release with the three runtime assets
 and verified build provenance. A push that retains an already-published version

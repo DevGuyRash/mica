@@ -108,6 +108,16 @@ assert.match(
 	"WASM build must use the shared build config",
 );
 assert.match(buildConfig, /"--",\s*"--locked"/, "wasm-pack must pass --locked to Cargo");
+assert.match(
+	await readText("crates/mica-core/Cargo.toml"),
+	/\[package\.metadata\.wasm-pack\.profile\.release\]\s*(?:#[^\n]*\n\s*)*wasm-opt\s*=\s*false(?:\s|$)/,
+	"release WASM must not depend on an ambient or downloaded Binaryen optimizer",
+);
+assert.match(
+	cargo,
+	/\[profile\.release\]\s*opt-level\s*=\s*3\s*lto\s*=\s*true\s*codegen-units\s*=\s*1(?:\s|$)/,
+	"release WASM must retain Rust speed optimization, LTO, and a single codegen unit",
+);
 assert.match(pkg.scripts["test:rust"], /--locked/, "Rust tests must use Cargo.lock");
 assert.equal(pkg.scripts["test:sidecar-fallback"], "node tests/sidecar-fallback.mjs");
 

@@ -6,6 +6,11 @@ description = "Pure Rust core for Mica: fence scanner, CST, serializer, structur
 license-file = "LICENSE"
 publish = false
 
+[package.metadata.wasm-pack.profile.release]
+# Rust's release profile already applies -O3 and LTO. Avoid a second optimizer
+# whose version depends on PATH and whose work can exceed clean-build budgets.
+wasm-opt = false
+
 [lints]
 workspace = true
 
