@@ -1,6 +1,6 @@
 {
 	"name": "mica",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Versioned, structured content blocks for Obsidian \u2014 fast nested tabs and grids with first-class version history and Meld-class diffing.",
 	"type": "module",
 	"private": true,
