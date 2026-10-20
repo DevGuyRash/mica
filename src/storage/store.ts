@@ -489,7 +489,13 @@ export function ensureStoreFolder(root: StoreRoot, path: string): Promise<void> 
 	return ensureSelectedFolder(root, path);
 }
 
-async function ensureSelectedFolder(root: StoreRoot, path: string, allowInitializing = false): Promise<void> {
+async function ensureSelectedFolder(
+	root: StoreRoot,
+	path: string,
+	allowInitializing = false,
+	guard?: () => void,
+): Promise<void> {
+	guard?.();
 	stateOf(root, allowInitializing);
 	if (
 		!isManagedPath(path, root.paths.root) ||
@@ -505,12 +511,14 @@ async function ensureSelectedFolder(root: StoreRoot, path: string, allowInitiali
 		if (current instanceof TFolder) continue;
 		if (current) throw new Error(`Mica: storage path is not a folder: ${parent}`);
 		await assertRouteCurrent(root, true, allowInitializing);
+		guard?.();
 		stateOf(root, allowInitializing);
 		try {
 			await root.vault.createFolder(parent);
 		} catch (error) {
 			if (!(root.vault.getAbstractFileByPath(parent) instanceof TFolder)) throw error;
 		}
+		guard?.();
 		stateOf(root, allowInitializing);
 	}
 }
@@ -540,8 +548,10 @@ async function readStoreMarker(
 	return id;
 }
 
-async function completeStoreInitialization(root: StoreRoot): Promise<void> {
+async function completeStoreInitialization(root: StoreRoot, guard?: () => void): Promise<void> {
+	guard?.();
 	let snapshot = await assertRouteCurrent(root, true, true);
+	guard?.();
 	const intent = snapshot.location;
 	if (intent === null || !intent.initializing || intent.storeId === null)
 		throw new Error("Mica: no recorded store initialization intent is available");
@@ -551,8 +561,9 @@ async function completeStoreInitialization(root: StoreRoot): Promise<void> {
 	if (!marker) {
 		if (folder instanceof TFolder && folder.children.length !== 0)
 			throw new Error("Mica: pending initialization names a populated directory without its marker");
-		await ensureSelectedFolder(root, root.paths.root, true);
+		await ensureSelectedFolder(root, root.paths.root, true, guard);
 		await assertRouteCurrent(root, true, true);
+		guard?.();
 		const empty = root.vault.getAbstractFileByPath(root.paths.root);
 		if (
 			!(empty instanceof TFolder) ||
@@ -565,6 +576,7 @@ async function completeStoreInitialization(root: StoreRoot): Promise<void> {
 		try {
 			marker = await root.vault.create(root.paths.marker, body);
 		} catch (error) {
+			guard?.();
 			// An ambiguous own create may only recover the exact recorded marker body.
 			const candidate = root.vault.getAbstractFileByPath(root.paths.marker);
 			if (!(candidate instanceof TFile)) throw error;
@@ -577,6 +589,7 @@ async function completeStoreInitialization(root: StoreRoot): Promise<void> {
 			await readStoreMarker(root, candidate, body, true);
 			marker = candidate;
 		}
+		guard?.();
 		if (!(marker instanceof TFile)) throw new Error("Mica: invalid initialized store marker");
 		ownedState(root).markerGeneration = { file: marker, mtime: marker.stat.mtime, size: marker.stat.size };
 		await readStoreMarker(root, marker, body, true);
@@ -605,6 +618,7 @@ async function completeStoreInitialization(root: StoreRoot): Promise<void> {
 		snapshot,
 		{ ...intent, initializing: false },
 		() => {
+			guard?.();
 			stateOf(root, true);
 			requireInitializationLeaf();
 			if (
@@ -620,20 +634,23 @@ async function completeStoreInitialization(root: StoreRoot): Promise<void> {
 }
 
 /** Startup-only recovery: resume the sole persisted initialization intent, never infer one. */
-export async function resumeStoreInitialization(root: StoreRoot): Promise<void> {
+export async function resumeStoreInitialization(root: StoreRoot, guard?: () => void): Promise<void> {
+	guard?.();
 	const state = stateOf(root, true);
 	if (!state.location?.initializing) throw new Error("Mica: no pending store initialization was recorded");
 	if (state.initializing) {
 		await state.initializing;
+		guard?.();
 		return;
 	}
-	const initialize = completeStoreInitialization(root);
+	const initialize = completeStoreInitialization(root, guard);
 	state.initializing = initialize;
 	try {
 		await initialize;
 	} finally {
 		if (state.initializing === initialize) state.initializing = null;
 	}
+	guard?.();
 	await validateStoreRoot(root);
 }
 

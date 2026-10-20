@@ -37,20 +37,33 @@ export default class MicaPlugin extends Plugin {
 	 * by block id/position so it survives the widget rebuild after each edit. */
 	readonly micaUi = new Map<string, BlockUi>();
 
-	async onload(): Promise<void> {
+	private startup: AbortController | null = null;
+
+	onload(): void {
+		this.startup?.abort();
+		const startup = new AbortController();
+		this.startup = startup;
+		// Vault discovery is incomplete during onload. Do not pin absent routing
+		// files or admit history work until the host has finished loading them.
+		this.app.workspace.onLayoutReady(() => {
+			if (startup.signal.aborted) return;
+			void this.initialize(() => startup.signal.throwIfAborted()).catch((error: unknown) => {
+				if (startup.signal.aborted) return;
+				new Notice(error instanceof Error ? error.message : "Mica: startup failed");
+				console.error("Mica: startup failed", error);
+				this.unload();
+			});
+		});
+	}
+
+	private async initialize(guard: () => void): Promise<void> {
 		await initCore();
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<MicaSettings> | null);
-		try {
-			await initializeStorageLocation(this);
-		} catch (error) {
-			new Notice(error instanceof Error ? error.message : "Mica: storage startup failed");
-			throw error;
-		}
-		this.register(
-			installStoreLifecycle(this.app.vault, async () => {
-				await Promise.all([this.engine?.settled(), this.api?.settled()]);
-			}),
-		);
+		guard();
+		const settings = (await this.loadData()) as Partial<MicaSettings> | null;
+		guard();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+		await initializeStorageLocation(this, guard);
+		guard();
 		const customConfig = normalizeCustomToolConfig(this.settings.customTools ?? [], this.settings.toolbarLayout);
 		const sectionActionConfig = normalizeHiddenSectionActions(this.settings.hiddenSectionActions);
 		const dockActionLayout = normalizeDockActionLayout(this.settings.dockActionLayout);
@@ -60,6 +73,14 @@ export default class MicaPlugin extends Plugin {
 		this.settings.hiddenSectionActions = sectionActionConfig.hidden;
 		this.settings.dockActionLayout = dockActionLayout;
 		if (customConfig.changed || sectionActionConfig.changed || dockConfigChanged) await this.saveSettings();
+		guard();
+		// No runtime resources are installed until every asynchronous startup step
+		// has completed for this load. Runtime writes retain their existing drain.
+		this.register(
+			installStoreLifecycle(this.app.vault, async () => {
+				await Promise.all([this.engine?.settled(), this.api?.settled()]);
+			}),
+		);
 		this.applyStyleVars();
 		this.applyToolbarConfig();
 		this.engine = new VersionEngine(this);
@@ -195,9 +216,14 @@ export default class MicaPlugin extends Plugin {
 			name: "Migrate legacy tabs (whole vault)",
 			callback: () => void this.migrateWholeVault(false),
 		});
+		// Existing leaves rendered before deferred registration must get the same
+		// Reading/Live Preview controls as leaves opened after startup.
+		this.refreshViews();
 	}
 
 	onunload(): void {
+		this.startup?.abort();
+		this.startup = null;
 		this.api?.dispose();
 		this.engine?.dispose();
 		delete (window as unknown as { mica?: MicaApi }).mica;

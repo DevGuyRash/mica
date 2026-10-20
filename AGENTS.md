@@ -65,8 +65,11 @@ cargo fmt --all -- --check
 pnpm run e2e
 ```
 
-The aggregate `check` includes the storage fallback fixture and therefore
-requires WASM generated from the same current source. A clean checkout must
+The aggregate `check` includes the storage fallback fixture and
+`pnpm run test:startup-lifecycle`, which exercises cold/hot startup, unload
+cancellation, recovery publication, authority guards, and existing-view refresh
+through the real plugin entry point, storage, engine, and WASM with host/UI
+boundaries mocked. These fixtures require WASM generated from the same current source. A clean checkout must
 build first; do not substitute another candidate's generated artifacts.
 It also runs `pnpm run test:e2e-config`, which exercises the real WDIO profile
 capabilities against commit-pinned launcher-maintainer compatibility evidence.

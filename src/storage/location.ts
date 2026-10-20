@@ -93,7 +93,12 @@ async function requireSnapshot(vault: Vault, expected: StoreLocationSnapshot): P
 		throw new Error("Mica: storage location changed; restart before continuing");
 }
 
-async function finishMove(vault: Vault, snapshot: StoreLocationSnapshot): Promise<StoreLocationSnapshot> {
+async function finishMove(
+	vault: Vault,
+	snapshot: StoreLocationSnapshot,
+	guard: () => void,
+): Promise<StoreLocationSnapshot> {
+	guard();
 	const location = snapshot.location;
 	if (!location?.previousFolder || !location.storeId) throw new Error("Mica: invalid pending storage move");
 	const previousFolder = location.previousFolder;
@@ -116,6 +121,7 @@ async function finishMove(vault: Vault, snapshot: StoreLocationSnapshot): Promis
 	if (source) {
 		if (!(source instanceof TFolder)) throw new Error("Mica: the recorded source storage location is not a folder");
 		const sourceMarker = await markerAt(vault, previousFolder);
+		guard();
 		if (sourceMarker === null || sourceMarker.storeId !== location.storeId || sourceMarker.dir !== source)
 			throw new Error("Mica: the recorded source store identity does not match");
 		destinationAvailable(vault, location.folder);
@@ -123,25 +129,31 @@ async function finishMove(vault: Vault, snapshot: StoreLocationSnapshot): Promis
 		for (const part of location.folder.split("/").slice(0, -1)) {
 			parent = parent ? `${parent}/${part}` : part;
 			await requireSnapshot(vault, snapshot);
+			guard();
 			assertMarkerCurrent(vault, sourceMarker);
 			assertNoCompetingDefault();
 			if (!vault.getAbstractFileByPath(parent)) await vault.createFolder(parent);
+			guard();
 			if (!(vault.getAbstractFileByPath(parent) instanceof TFolder))
 				throw new Error("Mica: destination parent changed");
 		}
 		const movingMarker = await markerAt(vault, previousFolder);
+		guard();
 		if (movingMarker === null || movingMarker.storeId !== location.storeId || movingMarker.dir !== source)
 			throw new Error("Mica: source store identity changed");
 		await requireSnapshot(vault, snapshot);
+		guard();
 		assertMarkerCurrent(vault, movingMarker);
 		assertNoCompetingDefault();
 		destinationAvailable(vault, location.folder);
 		await vault.rename(source, location.folder);
 	}
 	const movedMarker = await markerAt(vault, location.folder);
+	guard();
 	if (movedMarker === null || movedMarker.storeId !== location.storeId)
 		throw new Error("Mica: moved store identity could not be verified");
 	return writeStoreLocation(vault, snapshot, { ...location, previousFolder: null }, () => {
+		guard();
 		assertMarkerCurrent(vault, movedMarker);
 		assertNoCompetingDefault();
 		if (vault.getAbstractFileByPath(previousFolder))
@@ -150,16 +162,22 @@ async function finishMove(vault: Vault, snapshot: StoreLocationSnapshot): Promis
 }
 
 /** The locator wins over a stale settings mirror, including on another device. */
-export async function initializeStorageLocation(plugin: MicaPlugin): Promise<void> {
+export async function initializeStorageLocation(plugin: MicaPlugin, guard: () => void = () => {}): Promise<void> {
+	guard();
 	const vault = plugin.app.vault;
 	let snapshot = await readStoreLocation(vault);
-	if (snapshot.location?.previousFolder) snapshot = await finishMove(vault, snapshot);
+	guard();
+	if (snapshot.location?.previousFolder) snapshot = await finishMove(vault, snapshot, guard);
+	guard();
 	configureStoreRoot(vault, snapshot.location);
 	if (snapshot.location?.initializing) {
-		await resumeStoreInitialization(storeRoot(vault));
+		await resumeStoreInitialization(storeRoot(vault), guard);
+		guard();
 		snapshot = await readStoreLocation(vault);
+		guard();
 	}
 	await validateStoreRoot(storeRoot(vault));
+	guard();
 	const current = snapshot.location?.folder ?? storageLayout().root;
 	const pending = plugin.settings.pendingStorageFolder;
 	if (pending !== null) {
@@ -170,6 +188,7 @@ export async function initializeStorageLocation(plugin: MicaPlugin): Promise<voi
 			const root = storeRoot(vault);
 			const storeId = await validateStoreRoot(root);
 			await requireSnapshot(vault, snapshot);
+			guard();
 			const location: StoreLocation = validateStoreLocation({
 				format: storageLayout().format,
 				folder: target,
@@ -178,15 +197,19 @@ export async function initializeStorageLocation(plugin: MicaPlugin): Promise<voi
 				initializing: false,
 			});
 			snapshot = await writeStoreLocation(vault, snapshot, location, () => {
+				guard();
 				assertStoreRootCurrent(root);
 				destinationAvailable(vault, target);
 			});
-			if (storeId) snapshot = await finishMove(vault, snapshot);
+			guard();
+			if (storeId) snapshot = await finishMove(vault, snapshot, guard);
+			guard();
 			configureStoreRoot(vault, snapshot.location);
 		}
 	}
 	const folder = snapshot.location?.folder ?? storageLayout().root;
 	await validateStoreRoot(storeRoot(vault));
+	guard();
 	if (plugin.settings.storageFolder !== folder || pending !== null) {
 		plugin.settings.storageFolder = folder;
 		plugin.settings.pendingStorageFolder = null;
