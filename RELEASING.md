@@ -206,6 +206,14 @@ pnpm run smoke
 xvfb-run -a pnpm run e2e
 ```
 
+The aggregate `check` includes `pnpm run test:startup-lifecycle`. Build WASM
+from the candidate source first. This typed integration fixture exercises the
+real plugin entry point, storage routing, version engine, and WASM against a
+controlled Obsidian host/UI boundary. It covers cold/hot startup, unload and
+reload races, guarded recovery publication, authority changes, essential command
+registration, and refreshing already-open views. It is source-level regression
+evidence; it does not establish native rendering, device, or Sync acceptance.
+
 WHEN the default gate passes THEN you SHALL run the existing local
 `pnpm run e2e:minimum` and `pnpm run e2e:mobile` profiles on the same commit.
 `pnpm run e2e:latest` is the existing advisory moving-latest canary. A hosted

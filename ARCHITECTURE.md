@@ -128,6 +128,11 @@ separate from the durable version ledger.
   intent. A custom route also rejects any competing reserved `mica-data` entry;
   relocation permits that entry only when it is the recorded source or target.
   Ordinary operations fail closed while initialization or a move is pending.
+  Plugin routing initialization waits for `onLayoutReady`, so initial Vault
+  discovery cannot be mistaken for missing storage. Runtime services register
+  only after routing and settings settle, then refresh already-open views.
+  Unload cancels deferred startup at recovery publication boundaries; any
+  interrupted initialization or relocation retains its recorded recovery intent.
   Plugin preferences hold the requested location; `--store-dir` must agree with the
   active locator. Neither can select a competing store. **Apply after restart**
   validates and saves the request, then startup performs the move before the
