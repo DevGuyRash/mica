@@ -176,6 +176,10 @@ export class LightboxSearch {
 	}
 
 	close(): void {
+		if (this.debounce !== null) {
+			this.ownerWindow.clearTimeout(this.debounce);
+			this.debounce = null;
+		}
 		this.invalidate();
 		this.host.hidden = true;
 		this.onVisibilityChange?.(false);

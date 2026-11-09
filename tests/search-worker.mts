@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./lightbox-search-lifecycle.mts";
 import { Worker } from "node:worker_threads";
 import { SEARCH_WORKER_SOURCE } from "../src/ui/searchWorker.ts";
 import { buildSearchFlags, type SearchFlagResult } from "../src/ui/searchFlags.ts";
